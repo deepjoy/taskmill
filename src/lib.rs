@@ -32,7 +32,7 @@ pub mod task;
 // Convenience re-exports.
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
 pub use priority::Priority;
-pub use registry::{StateMap, TaskContext, TaskExecutor};
+pub use registry::{ChildSpawner, StateMap, TaskContext, TaskExecutor};
 pub use resource::sampler::{SamplerConfig, SmoothedReader};
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
@@ -41,8 +41,9 @@ pub use scheduler::{
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
-    generate_dedup_key, HistoryStatus, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup,
-    TaskRecord, TaskResult, TaskStatus, TaskSubmission, TypeStats, TypedTask,
+    generate_dedup_key, HistoryStatus, ParentResolution, SubmitOutcome, TaskError,
+    TaskHistoryRecord, TaskLookup, TaskRecord, TaskResult, TaskStatus, TaskSubmission, TypeStats,
+    TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at           TEXT,
     requeue              INTEGER NOT NULL DEFAULT 0,
     requeue_priority     INTEGER,
+    parent_id            INTEGER,
+    fail_fast            INTEGER NOT NULL DEFAULT 1,
     UNIQUE(key)
 );
 
@@ -43,7 +45,9 @@ CREATE TABLE IF NOT EXISTS task_history (
     created_at           TEXT    NOT NULL,
     started_at           TEXT,
     completed_at         TEXT    NOT NULL DEFAULT (datetime('now')),
-    duration_ms          INTEGER
+    duration_ms          INTEGER,
+    parent_id            INTEGER,
+    fail_fast            INTEGER NOT NULL DEFAULT 1
 );
 
 -- Index for IO learning: recent completions by task type.
@@ -62,3 +66,13 @@ CREATE INDEX IF NOT EXISTS idx_history_completed
 -- Index for filtering history by status (e.g. listing failed tasks).
 CREATE INDEX IF NOT EXISTS idx_history_status
     ON task_history (status, completed_at DESC);
+
+-- Index for looking up children of a parent task (active queue).
+CREATE INDEX IF NOT EXISTS idx_tasks_parent
+    ON tasks (parent_id)
+    WHERE parent_id IS NOT NULL;
+
+-- Index for looking up children of a parent task (history).
+CREATE INDEX IF NOT EXISTS idx_task_history_parent
+    ON task_history (parent_id)
+    WHERE parent_id IS NOT NULL;
