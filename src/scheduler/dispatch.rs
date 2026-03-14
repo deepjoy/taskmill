@@ -1,6 +1,6 @@
 //! Task spawning, active-task tracking, preemption, and parent-child resolution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -37,15 +37,17 @@ pub(crate) struct ActiveTask {
 pub(crate) struct ActiveTaskMap {
     inner: Arc<Mutex<HashMap<i64, ActiveTask>>>,
     /// IDs of parent tasks ready for finalization. Populated by
-    /// `handle_parent_resolution` when all children complete.
-    pub(crate) pending_finalizers: Arc<Mutex<Vec<i64>>>,
+    /// `handle_parent_resolution` when all children complete. Uses a
+    /// `HashSet` to deduplicate — two children completing simultaneously
+    /// may both resolve the parent, but we only finalize once.
+    pub(crate) pending_finalizers: Arc<Mutex<HashSet<i64>>>,
 }
 
 impl ActiveTaskMap {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            pending_finalizers: Arc::new(Mutex::new(Vec::new())),
+            pending_finalizers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -247,7 +249,7 @@ pub(crate) async fn spawn_task(
             task.label.clone(),
             event_tx.clone(),
         ),
-        scheduler,
+        scheduler: scheduler.downgrade(),
         app_state,
         child_spawner: Some(child_spawner),
         io: io.clone(),
@@ -468,7 +470,7 @@ async fn handle_parent_resolution(
     match store.try_resolve_parent(parent_id).await {
         Ok(Some(ParentResolution::ReadyToFinalize)) => {
             // Enqueue parent for finalize dispatch.
-            active.pending_finalizers.lock().await.push(parent_id);
+            active.pending_finalizers.lock().await.insert(parent_id);
             // Wake the scheduler to dispatch the finalize phase.
             work_notify.notify_one();
         }
