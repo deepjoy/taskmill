@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/deepjoy/taskmill/compare/v0.3.0...v0.3.1) - 2026-03-14
+
+### Fixed
+
+- scheduler performance and correctness improvements ([#24](https://github.com/deepjoy/taskmill/pull/24))
+- *(taskmill)* atomic parent resolution and weak scheduler reference in TaskContext ([#22](https://github.com/deepjoy/taskmill/pull/22))
+
+### Other
+
+- *(taskmill)* split large modules into focused submodules and optimize completion hot path ([#25](https://github.com/deepjoy/taskmill/pull/25))
+- *(taskmill)* add integration tests and criterion benchmarks ([#21](https://github.com/deepjoy/taskmill/pull/21))
+
 ## [0.3.0](https://github.com/deepjoy/taskmill/compare/v0.2.0...v0.3.0) - 2026-03-14
 
 ### Added
