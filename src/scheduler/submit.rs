@@ -2,7 +2,10 @@
 
 use crate::priority::Priority;
 use crate::store::StoreError;
-use crate::task::{generate_dedup_key, SubmitOutcome, TaskLookup, TaskSubmission, TypedTask};
+use crate::task::{
+    generate_dedup_key, BatchOutcome, BatchSubmission, SubmitOutcome, TaskLookup, TaskSubmission,
+    TypedTask,
+};
 
 use super::{Scheduler, SchedulerEvent};
 
@@ -33,12 +36,14 @@ impl Scheduler {
 
     /// Submit multiple tasks in a single SQLite transaction.
     ///
-    /// Preemption is triggered once at the end if any inserted or upgraded
-    /// task has high enough priority.
+    /// Returns a [`BatchOutcome`] with per-task results and convenience
+    /// accessors. Preemption is triggered once at the end if any inserted
+    /// or upgraded task has high enough priority. A [`SchedulerEvent::BatchSubmitted`]
+    /// event is emitted when at least one task was changed.
     pub async fn submit_batch(
         &self,
         submissions: &[TaskSubmission],
-    ) -> Result<Vec<SubmitOutcome>, StoreError> {
+    ) -> Result<BatchOutcome, StoreError> {
         let results = self.inner.store.submit_batch(submissions).await?;
 
         // Find the highest (lowest numeric value) priority among tasks that
@@ -63,11 +68,33 @@ impl Scheduler {
             }
         }
 
+        let outcome = BatchOutcome { outcomes: results };
+
         if any_changed {
+            let inserted_ids = outcome.inserted();
+            let _ = self
+                .inner
+                .event_tx
+                .send(SchedulerEvent::BatchSubmitted {
+                    count: submissions.len(),
+                    inserted_ids,
+                });
+
             self.inner.work_notify.notify_one();
         }
 
-        Ok(results)
+        Ok(outcome)
+    }
+
+    /// Submit a batch built with [`BatchSubmission`].
+    ///
+    /// Applies the builder's defaults and delegates to [`submit_batch`](Self::submit_batch).
+    pub async fn submit_built(
+        &self,
+        batch: BatchSubmission,
+    ) -> Result<BatchOutcome, StoreError> {
+        let submissions = batch.build();
+        self.submit_batch(&submissions).await
     }
 
     /// Submit a [`TypedTask`], handling serialization automatically.

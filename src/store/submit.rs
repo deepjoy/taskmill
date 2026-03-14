@@ -1,10 +1,17 @@
 //! Task submission: deduplication, priority upgrade, and requeue logic.
 
+use std::collections::HashMap;
+
 use sqlx::Row;
 
 use crate::task::{SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
 
 use super::{StoreError, TaskStore};
+
+/// Maximum number of tasks per transaction chunk. Batches larger than this
+/// are split into multiple transactions to avoid holding the SQLite write
+/// lock for too long.
+const BATCH_CHUNK_SIZE: usize = 10_000;
 
 /// Core dedup logic for a single task submission within an existing connection.
 ///
@@ -112,6 +119,15 @@ impl TaskStore {
     /// This is significantly faster than calling [`submit`](Self::submit) in a
     /// loop because all inserts share a single SQLite transaction (one
     /// `BEGIN`/`COMMIT` pair instead of N implicit transactions).
+    ///
+    /// **Intra-batch dedup:** When multiple tasks in the same batch share a
+    /// dedup key, only the last occurrence is submitted (last-wins). Earlier
+    /// duplicates receive [`SubmitOutcome::Duplicate`].
+    ///
+    /// **Chunking:** Batches larger than 10,000 tasks are split into
+    /// sub-transactions to avoid holding the SQLite write lock for too long.
+    /// This means very large batches are not fully atomic, but task submission
+    /// is idempotent so re-submitting after a partial failure is safe.
     pub async fn submit_batch(
         &self,
         submissions: &[TaskSubmission],
@@ -126,14 +142,31 @@ impl TaskStore {
             }
         }
 
-        let mut results = Vec::with_capacity(submissions.len());
-        let mut conn = self.begin_write().await?;
-
-        for sub in submissions {
-            results.push(submit_one(&mut conn, sub).await?);
+        // Intra-batch dedup: last-wins. Map each effective key to its last
+        // occurrence index so earlier duplicates are skipped.
+        let mut last_occurrence: HashMap<String, usize> = HashMap::new();
+        for (i, sub) in submissions.iter().enumerate() {
+            last_occurrence.insert(sub.effective_key(), i);
         }
 
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        let mut results = Vec::with_capacity(submissions.len());
+
+        for chunk in submissions.chunks(BATCH_CHUNK_SIZE) {
+            let chunk_offset = results.len();
+            let mut conn = self.begin_write().await?;
+
+            for (i, sub) in chunk.iter().enumerate() {
+                let global_i = chunk_offset + i;
+                if last_occurrence[&sub.effective_key()] != global_i {
+                    results.push(SubmitOutcome::Duplicate);
+                } else {
+                    results.push(submit_one(&mut conn, sub).await?);
+                }
+            }
+
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+        }
+
         Ok(results)
     }
 }
@@ -357,13 +390,16 @@ mod tests {
         let store = test_store().await;
         let sub = make_submission("dup", Priority::NORMAL);
 
+        // Intra-batch dedup: last-wins, so the first is Duplicate and the
+        // second (last occurrence) is Inserted.
         let results = store
             .submit_batch(&[sub.clone(), sub.clone()])
             .await
             .unwrap();
-        assert!(results[0].is_inserted());
-        assert_eq!(results[1], SubmitOutcome::Duplicate);
+        assert_eq!(results[0], SubmitOutcome::Duplicate);
+        assert!(results[1].is_inserted());
 
+        // Re-submitting the same key hits the DB-level dedup.
         let results = store.submit_batch(&[sub]).await.unwrap();
         assert_eq!(results[0], SubmitOutcome::Duplicate);
     }
@@ -373,6 +409,46 @@ mod tests {
         let store = test_store().await;
         let results = store.submit_batch(&[]).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn submit_batch_intra_dedup_last_wins() {
+        let store = test_store().await;
+
+        // Two tasks with the same dedup key but different priorities.
+        // Last-wins: the second task (HIGH) should be inserted, first skipped.
+        let sub_normal = make_submission("same-key", Priority::NORMAL);
+        let sub_high = make_submission("same-key", Priority::HIGH);
+
+        let results = store
+            .submit_batch(&[sub_normal.clone(), sub_high.clone()])
+            .await
+            .unwrap();
+        assert_eq!(results[0], SubmitOutcome::Duplicate);
+        assert!(results[1].is_inserted());
+
+        // Verify the stored task has the second task's priority.
+        let key = sub_normal.effective_key();
+        let task = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(task.priority, Priority::HIGH);
+    }
+
+    #[tokio::test]
+    async fn submit_batch_large_chunking() {
+        use super::BATCH_CHUNK_SIZE;
+
+        let store = test_store().await;
+        let count = BATCH_CHUNK_SIZE + 100;
+        let subs: Vec<_> = (0..count)
+            .map(|i| make_submission(&format!("chunk-{i}"), Priority::NORMAL))
+            .collect();
+
+        let results = store.submit_batch(&subs).await.unwrap();
+        assert_eq!(results.len(), count);
+        assert!(results.iter().all(|r| r.is_inserted()));
+
+        let pending = store.pending_count().await.unwrap();
+        assert_eq!(pending, count as i64);
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ use crate::priority::Priority;
 
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
-pub use submission::{SubmitOutcome, TaskSubmission};
+pub use submission::{BatchOutcome, BatchSubmission, SubmitOutcome, TaskSubmission};
 pub use typed::TypedTask;
 
 /// Lifecycle state of a task in the active queue.
