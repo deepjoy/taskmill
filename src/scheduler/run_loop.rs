@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::store::StoreError;
-use crate::task::TaskMetrics;
+use crate::task::IoBudget;
 
 use super::dispatch::{self, SpawnContext};
 use super::gate::GateContext;
@@ -78,7 +78,7 @@ impl Scheduler {
                     &format!("no executor registered for type '{}'", task.task_type),
                     false,
                     0,
-                    &TaskMetrics::default(),
+                    &IoBudget::default(),
                 )
                 .await?;
             return Ok(true);
@@ -133,7 +133,7 @@ impl Scheduler {
                     "no executor for finalize",
                     false,
                     0,
-                    &TaskMetrics::default(),
+                    &IoBudget::default(),
                 )
                 .await?;
             return Ok(true);

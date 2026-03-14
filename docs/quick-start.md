@@ -63,7 +63,7 @@ impl TaskExecutor for ImageResizer {
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use taskmill::{Scheduler, Priority, TaskSubmission, ShutdownMode};
+use taskmill::{Scheduler, Priority, IoBudget, TaskSubmission, ShutdownMode};
 
 #[tokio::main]
 async fn main() {
@@ -92,8 +92,7 @@ async fn main() {
     // Submit a single task with a typed payload.
     let sub = TaskSubmission::new("resize")
         .payload_json(&serde_json::json!({"path": "/photos/image.jpg", "width": 300}))
-        .unwrap()
-        .expected_io(4096, 1024);
+        .expected_io(IoBudget::disk(4096, 1024));
     scheduler.submit(&sub).await.unwrap();
 
     // Submit tasks in bulk (single SQLite transaction).
@@ -101,8 +100,7 @@ async fn main() {
     let batch: Vec<_> = paths.iter().map(|p| {
         TaskSubmission::new("resize")
             .payload_json(&serde_json::json!({"path": p}))
-            .unwrap()
-            .expected_io(4096, 1024)
+            .expected_io(IoBudget::disk(4096, 1024))
     }).collect();
     let outcomes = scheduler.submit_batch(&batch).await.unwrap();
     // Each outcome is Inserted, Upgraded, Requeued, or Duplicate.
@@ -119,7 +117,7 @@ For stronger type safety, implement the `TypedTask` trait:
 
 ```rust
 use serde::{Serialize, Deserialize};
-use taskmill::{TypedTask, Priority};
+use taskmill::{TypedTask, IoBudget, Priority};
 
 #[derive(Serialize, Deserialize)]
 struct ResizeTask {
@@ -130,8 +128,7 @@ struct ResizeTask {
 impl TypedTask for ResizeTask {
     const TASK_TYPE: &'static str = "resize";
 
-    fn expected_read_bytes(&self) -> i64 { 4096 }
-    fn expected_write_bytes(&self) -> i64 { 1024 }
+    fn expected_io(&self) -> IoBudget { IoBudget::disk(4096, 1024) }
     fn priority(&self) -> Priority { Priority::NORMAL }
 }
 

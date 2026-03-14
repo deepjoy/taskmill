@@ -43,10 +43,12 @@ Every `report()` call emits a `SchedulerEvent::Progress`:
 
 ```rust
 SchedulerEvent::Progress {
-    task_id: 42,
-    task_type: "resize".into(),
-    key: "abc123".into(),
-    label: "my-image.jpg".into(),
+    header: TaskEventHeader {
+        task_id: 42,
+        task_type: "resize".into(),
+        key: "abc123".into(),
+        label: "my-image.jpg".into(),
+    },
     percent: 0.5,
     message: Some("resizing".into()),
 }
@@ -58,8 +60,8 @@ Subscribe to events for real-time UI updates:
 let mut events = scheduler.subscribe();
 tokio::spawn(async move {
     while let Ok(event) = events.recv().await {
-        if let SchedulerEvent::Progress { task_id, percent, message, .. } = event {
-            update_ui(task_id, percent, message);
+        if let SchedulerEvent::Progress { header, percent, message } = event {
+            update_ui(header.task_id, percent, message);
         }
     }
 });
@@ -84,7 +86,7 @@ This means even tasks with no explicit progress reporting show movement in UI da
 ```rust
 let progress = scheduler.estimated_progress().await;
 for p in &progress {
-    println!("{} ({}): {:.0}%", p.task_type, p.key, p.percent * 100.0);
+    println!("{} ({}): {:.0}%", p.header.task_type, p.header.key, p.percent * 100.0);
     // p.reported_percent  — last executor-reported value (if any)
     // p.extrapolated_percent — throughput-based estimate (if any)
     // p.percent — best available: reported if present, else extrapolated
@@ -98,7 +100,7 @@ The `SchedulerSnapshot` includes progress for all running tasks:
 ```rust
 let snap = scheduler.snapshot().await?;
 for p in &snap.progress {
-    println!("{}: {:.0}%", p.key, p.percent * 100.0);
+    println!("{}: {:.0}%", p.header.key, p.percent * 100.0);
 }
 ```
 
@@ -108,15 +110,17 @@ All scheduler state changes are broadcast as `SchedulerEvent` variants:
 
 | Event | When |
 |-------|------|
-| `Dispatched { task_id, task_type, key, label }` | Task popped from queue and executor spawned |
-| `Completed { task_id, task_type, key, label }` | Task finished successfully |
-| `Failed { task_id, task_type, key, label, error, will_retry }` | Task failed (includes whether it will be retried) |
-| `Preempted { task_id, task_type, key, label }` | Task paused for higher-priority work |
-| `Cancelled { task_id, task_type, key, label }` | Task cancelled via `scheduler.cancel()` |
-| `Progress { task_id, task_type, key, label, percent, message }` | Progress update from executor |
+| `Dispatched(TaskEventHeader)` | Task popped from queue and executor spawned |
+| `Completed(TaskEventHeader)` | Task finished successfully |
+| `Failed { header, error, will_retry }` | Task failed (includes whether it will be retried) |
+| `Preempted(TaskEventHeader)` | Task paused for higher-priority work |
+| `Cancelled(TaskEventHeader)` | Task cancelled via `scheduler.cancel()` |
+| `Progress { header, percent, message }` | Progress update from executor |
 | `Waiting { task_id, children_count }` | Parent task entered waiting state after spawning children |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
+
+Task-specific variants share a `TaskEventHeader` struct with `task_id`, `task_type`, `key`, and `label`. Use `event.header()` to access it generically.
 
 ### Tauri bridge
 

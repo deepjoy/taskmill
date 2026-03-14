@@ -6,6 +6,7 @@ use crate::priority::Priority;
 
 use super::dedup::generate_dedup_key;
 use super::typed::TypedTask;
+use super::IoBudget;
 
 /// Result of a task submission attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,13 +42,13 @@ impl SubmitOutcome {
 /// construction with sensible defaults:
 ///
 /// ```ignore
-/// use taskmill::{TaskSubmission, Priority};
+/// use taskmill::{TaskSubmission, Priority, IoBudget};
 ///
 /// let sub = TaskSubmission::new("thumbnail")
 ///     .key("img-001")
 ///     .priority(Priority::HIGH)
 ///     .payload_json(&my_payload)?
-///     .expected_io(4096, 1024);
+///     .expected_io(IoBudget::disk(4096, 1024));
 /// ```
 ///
 /// For strongly-typed tasks, prefer [`TaskSubmission::from_typed`] or
@@ -64,12 +65,8 @@ pub struct TaskSubmission {
     pub label: String,
     pub priority: Priority,
     pub payload: Option<Vec<u8>>,
-    pub expected_read_bytes: i64,
-    pub expected_write_bytes: i64,
-    /// Estimated network receive bytes for IO budget scheduling.
-    pub expected_net_rx_bytes: i64,
-    /// Estimated network transmit bytes for IO budget scheduling.
-    pub expected_net_tx_bytes: i64,
+    /// Expected IO budget for scheduling.
+    pub expected_io: IoBudget,
     /// Parent task ID for hierarchical tasks. Set automatically by
     /// [`TaskContext::spawn_child`](crate::TaskContext::spawn_child).
     pub parent_id: Option<i64>,
@@ -84,6 +81,10 @@ pub struct TaskSubmission {
     /// by [`SchedulerBuilder::group_concurrency`](crate::SchedulerBuilder::group_concurrency).
     /// Use this to prevent hammering a single endpoint (e.g. `"s3://my-bucket"`).
     pub group_key: Option<String>,
+    /// Deferred serialization error from [`payload_json`](Self::payload_json).
+    /// Surfaced at submit time as [`StoreError::Serialization`](crate::StoreError::Serialization).
+    #[serde(skip)]
+    pub(crate) payload_error: Option<String>,
 }
 
 impl TaskSubmission {
@@ -98,8 +99,8 @@ impl TaskSubmission {
     /// TaskSubmission::new("resize")
     ///     .key("my-file.jpg")
     ///     .priority(Priority::HIGH)
-    ///     .payload_json(&data)?
-    ///     .expected_io(4096, 1024)
+    ///     .payload_json(&data)
+    ///     .expected_io(IoBudget::disk(4096, 1024))
     /// ```
     pub fn new(task_type: impl Into<String>) -> Self {
         let task_type = task_type.into();
@@ -110,13 +111,11 @@ impl TaskSubmission {
             label,
             priority: Priority::NORMAL,
             payload: None,
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            expected_net_rx_bytes: 0,
-            expected_net_tx_bytes: 0,
+            expected_io: IoBudget::default(),
             parent_id: None,
             fail_fast: true,
             group_key: None,
+            payload_error: None,
         }
     }
 
@@ -151,14 +150,15 @@ impl TaskSubmission {
 
     /// Set the payload from a serializable value (JSON-encoded).
     ///
-    /// Returns an error if serialization fails. The payload can be
-    /// deserialized in the executor via [`TaskContext::payload`](crate::TaskContext::payload).
-    pub fn payload_json<T: serde::Serialize>(
-        mut self,
-        data: &T,
-    ) -> Result<Self, serde_json::Error> {
-        self.payload = Some(serde_json::to_vec(data)?);
-        Ok(self)
+    /// Serialization errors are deferred to submit time so the builder
+    /// chain is never interrupted. The payload can be deserialized in
+    /// the executor via [`TaskContext::payload`](crate::TaskContext::payload).
+    pub fn payload_json<T: serde::Serialize>(mut self, data: &T) -> Self {
+        match serde_json::to_vec(data) {
+            Ok(bytes) => self.payload = Some(bytes),
+            Err(e) => self.payload_error = Some(e.to_string()),
+        }
+        self
     }
 
     /// Set the payload from raw bytes.
@@ -167,25 +167,9 @@ impl TaskSubmission {
         self
     }
 
-    /// Set expected disk IO bytes for budget-based scheduling.
-    ///
-    /// The scheduler uses these estimates to avoid saturating disk throughput
-    /// when [resource monitoring](crate::SchedulerBuilder::with_resource_monitoring)
-    /// is enabled. Default: 0 for both.
-    pub fn expected_io(mut self, read_bytes: i64, write_bytes: i64) -> Self {
-        self.expected_read_bytes = read_bytes;
-        self.expected_write_bytes = write_bytes;
-        self
-    }
-
-    /// Set expected network IO bytes for budget-based scheduling.
-    ///
-    /// The scheduler uses these estimates to avoid saturating network bandwidth
-    /// when [resource monitoring](crate::SchedulerBuilder::with_resource_monitoring)
-    /// is enabled. Default: 0 for both.
-    pub fn expected_net_io(mut self, rx_bytes: i64, tx_bytes: i64) -> Self {
-        self.expected_net_rx_bytes = rx_bytes;
-        self.expected_net_tx_bytes = tx_bytes;
+    /// Set the expected IO budget for scheduling.
+    pub fn expected_io(mut self, budget: IoBudget) -> Self {
+        self.expected_io = budget;
         self
     }
 
@@ -220,36 +204,23 @@ impl TaskSubmission {
         }
     }
 
-    /// Create a submission with a typed payload serialized to JSON bytes.
-    ///
-    /// The dedup key is auto-generated from the task type and serialized payload.
-    /// Use `TaskRecord::deserialize_payload()` on the executor side to recover the type.
-    #[deprecated(
-        since = "2.0.0",
-        note = "use `TaskSubmission::new(task_type).payload_json(&data)?.priority(p).expected_io(r, w)` instead"
-    )]
-    pub fn with_payload<T: serde::Serialize>(
-        task_type: &str,
-        priority: Priority,
-        data: &T,
-        expected_read_bytes: i64,
-        expected_write_bytes: i64,
-    ) -> Result<Self, serde_json::Error> {
-        Ok(Self::new(task_type)
-            .priority(priority)
-            .payload_json(data)?
-            .expected_io(expected_read_bytes, expected_write_bytes))
-    }
-
     /// Create a submission from a [`TypedTask`], serializing the payload and
-    /// pulling task type, priority, IO estimates, and group key from the trait.
-    pub fn from_typed<T: TypedTask>(task: &T) -> Result<Self, serde_json::Error> {
+    /// pulling task type, priority, IO estimates, key, label, and group key
+    /// from the trait.
+    pub fn from_typed<T: TypedTask>(task: &T) -> Self {
         let mut sub = Self::new(T::TASK_TYPE)
             .priority(task.priority())
-            .payload_json(task)?
-            .expected_io(task.expected_read_bytes(), task.expected_write_bytes())
-            .expected_net_io(task.expected_net_rx_bytes(), task.expected_net_tx_bytes());
-        sub.group_key = task.group_key();
-        Ok(sub)
+            .payload_json(task)
+            .expected_io(task.expected_io());
+        if let Some(k) = task.key() {
+            sub = sub.key(k);
+        }
+        if let Some(l) = task.label() {
+            sub = sub.label(l);
+        }
+        if let Some(g) = task.group_key() {
+            sub = sub.group(g);
+        }
+        sub
     }
 }

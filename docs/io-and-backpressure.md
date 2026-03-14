@@ -9,9 +9,11 @@ Taskmill combines two independent gating mechanisms — IO budget tracking and c
 Every `TaskSubmission` includes expected IO:
 
 ```rust
+use taskmill::IoBudget;
+
 let sub = TaskSubmission::new("scan")
     .payload_raw(data)
-    .expected_io(50_000, 10_000);  // caller's estimate
+    .expected_io(IoBudget::disk(50_000, 10_000));  // caller's estimate
 ```
 
 ### Completion actuals
@@ -30,10 +32,11 @@ Actual values are stored in `task_history` for learning.
 Tasks that perform network transfers can declare expected bandwidth:
 
 ```rust
+use taskmill::IoBudget;
+
 let sub = TaskSubmission::new("upload")
-    .payload_json(&upload_payload)?
-    .expected_io(0, 0)                   // no disk IO
-    .expected_net_io(0, 50_000_000);     // 50 MB upload
+    .payload_json(&upload_payload)
+    .expected_io(IoBudget::net(0, 50_000_000));  // 50 MB upload
 ```
 
 Executors report actual network bytes during execution:

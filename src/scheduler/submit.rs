@@ -74,7 +74,7 @@ impl Scheduler {
     ///
     /// Uses the priority from [`TypedTask::priority()`].
     pub async fn submit_typed<T: TypedTask>(&self, task: &T) -> Result<SubmitOutcome, StoreError> {
-        let sub = TaskSubmission::from_typed(task)?;
+        let sub = TaskSubmission::from_typed(task);
         self.submit(&sub).await
     }
 
@@ -87,7 +87,7 @@ impl Scheduler {
         task: &T,
         priority: Priority,
     ) -> Result<SubmitOutcome, StoreError> {
-        let mut sub = TaskSubmission::from_typed(task)?;
+        let mut sub = TaskSubmission::from_typed(task);
         sub.priority = priority;
         self.submit(&sub).await
     }
@@ -140,12 +140,7 @@ impl Scheduler {
             if let Some(at) = self.inner.active.remove(*child_id) {
                 at.token.cancel();
                 let _ = self.inner.store.delete(*child_id).await;
-                let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled {
-                    task_id: *child_id,
-                    task_type: at.record.task_type.clone(),
-                    key: at.record.key.clone(),
-                    label: at.record.label.clone(),
-                });
+                let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled(at.record.event_header()));
             }
         }
 
@@ -153,12 +148,7 @@ impl Scheduler {
         if let Some(at) = self.inner.active.remove(task_id) {
             at.token.cancel();
             self.inner.store.delete(task_id).await?;
-            let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled {
-                task_id,
-                task_type: at.record.task_type.clone(),
-                key: at.record.key.clone(),
-                label: at.record.label.clone(),
-            });
+            let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled(at.record.event_header()));
             return Ok(true);
         }
 

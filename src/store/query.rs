@@ -294,7 +294,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use crate::priority::Priority;
-    use crate::task::{HistoryStatus, TaskLookup, TaskMetrics, TaskStatus, TaskSubmission};
+    use crate::task::{HistoryStatus, IoBudget, TaskLookup, TaskStatus, TaskSubmission};
 
     use super::super::TaskStore;
 
@@ -307,7 +307,7 @@ mod tests {
             .key(key)
             .priority(priority)
             .payload_raw(b"hello".to_vec())
-            .expected_io(1000, 500)
+            .expected_io(IoBudget::disk(1000, 500))
     }
 
     #[tokio::test]
@@ -333,11 +333,7 @@ mod tests {
         store
             .complete(
                 task.id,
-                &TaskMetrics {
-                    read_bytes: 100,
-                    write_bytes: 50,
-                    ..Default::default()
-                },
+                &IoBudget::disk(100, 50),
             )
             .await
             .unwrap();
@@ -348,7 +344,7 @@ mod tests {
 
         let record = store.history_by_id(hist_id).await.unwrap().unwrap();
         assert_eq!(record.key, sub.effective_key());
-        assert_eq!(record.actual_read_bytes, Some(100));
+        assert_eq!(record.actual_io.unwrap().disk_read, 100);
 
         assert!(store.history_by_id(9999).await.unwrap().is_none());
     }
@@ -364,11 +360,7 @@ mod tests {
             store
                 .complete(
                     task.id,
-                    &TaskMetrics {
-                        read_bytes: 1000,
-                        write_bytes: 500,
-                        ..Default::default()
-                    },
+                    &IoBudget::disk(1000, 500),
                 )
                 .await
                 .unwrap();
@@ -423,7 +415,7 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         store
-            .complete(task.id, &TaskMetrics::default())
+            .complete(task.id, &IoBudget::default())
             .await
             .unwrap();
 
@@ -450,7 +442,7 @@ mod tests {
             store.submit(&sub).await.unwrap();
             let task = store.pop_next().await.unwrap().unwrap();
             store
-                .complete(task.id, &TaskMetrics::default())
+                .complete(task.id, &IoBudget::default())
                 .await
                 .unwrap();
         }

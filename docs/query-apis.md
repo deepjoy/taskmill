@@ -15,7 +15,7 @@ All queries are available on `TaskStore`, accessed via `scheduler.store()`.
 | `paused_count()` | `i64` | Count of paused tasks. |
 | `task_by_id(id)` | `Option<TaskRecord>` | Look up an active task by row ID. |
 | `task_by_key(key)` | `Option<TaskRecord>` | Look up an active task by dedup key. |
-| `running_io_totals()` | `(i64, i64)` | Sum of `(expected_read_bytes, expected_write_bytes)` across running tasks. |
+| `running_io_totals()` | `(i64, i64)` | Sum of `(expected_io.disk_read, expected_io.disk_write)` across running tasks. |
 
 ## History queries
 

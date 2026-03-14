@@ -35,6 +35,21 @@ pub struct SchedulerSnapshot {
     pub is_paused: bool,
 }
 
+// ── Task Event Header ────────────────────────────────────────────────
+
+/// Common fields shared by task-specific [`SchedulerEvent`] variants.
+///
+/// Extracted to avoid repeating `task_id`, `task_type`, `key`, `label`
+/// in every variant. Use [`SchedulerEvent::header()`] to access it
+/// generically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEventHeader {
+    pub task_id: i64,
+    pub task_type: String,
+    pub key: String,
+    pub label: String,
+}
+
 // ── Events ──────────────────────────────────────────────────────────
 
 /// Events emitted by the scheduler for UI integration and observability.
@@ -45,48 +60,22 @@ pub struct SchedulerSnapshot {
 #[serde(tag = "type", content = "data")]
 pub enum SchedulerEvent {
     /// A task was dispatched and is now running.
-    Dispatched {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
-    },
+    Dispatched(TaskEventHeader),
     /// A task completed successfully.
-    Completed {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
-    },
+    Completed(TaskEventHeader),
     /// A task failed (may be retried or permanently failed).
     Failed {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
+        header: TaskEventHeader,
         error: String,
         will_retry: bool,
     },
     /// A task was preempted by higher-priority work.
-    Preempted {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
-    },
+    Preempted(TaskEventHeader),
     /// A task was cancelled by the application.
-    Cancelled {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
-    },
+    Cancelled(TaskEventHeader),
     /// Progress update from a running task.
     Progress {
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
+        header: TaskEventHeader,
         /// Progress percentage (0.0 to 1.0).
         percent: f32,
         /// Optional human-readable message from the executor.
@@ -99,6 +88,20 @@ pub enum SchedulerEvent {
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
     Resumed,
+}
+
+impl SchedulerEvent {
+    /// Returns the [`TaskEventHeader`] if this event is task-specific.
+    pub fn header(&self) -> Option<&TaskEventHeader> {
+        match self {
+            Self::Dispatched(h)
+            | Self::Completed(h)
+            | Self::Preempted(h)
+            | Self::Cancelled(h) => Some(h),
+            Self::Failed { header, .. } | Self::Progress { header, .. } => Some(header),
+            Self::Waiting { .. } | Self::Paused | Self::Resumed => None,
+        }
+    }
 }
 
 // ── Config ──────────────────────────────────────────────────────────

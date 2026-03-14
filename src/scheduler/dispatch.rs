@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::priority::Priority;
 use crate::registry::{ChildSpawner, IoTracker, TaskContext};
 use crate::store::TaskStore;
-use crate::task::{ParentResolution, TaskMetrics, TaskRecord};
+use crate::task::{ParentResolution, IoBudget, TaskRecord};
 
 use super::progress::ProgressReporter;
 use super::SchedulerEvent;
@@ -140,12 +140,7 @@ impl ActiveTaskMap {
             );
             at.token.cancel();
             let _ = store.pause(id).await;
-            let _ = event_tx.send(SchedulerEvent::Preempted {
-                task_id: id,
-                task_type: at.record.task_type.clone(),
-                key: at.record.key.clone(),
-                label: at.record.label.clone(),
-            });
+            let _ = event_tx.send(SchedulerEvent::Preempted(at.record.event_header()));
             preempted.push(id);
         }
 
@@ -211,12 +206,7 @@ impl ActiveTaskMap {
         for (id, at) in drained {
             at.token.cancel();
             let _ = store.pause(id).await;
-            let _ = event_tx.send(SchedulerEvent::Preempted {
-                task_id: id,
-                task_type: at.record.task_type.clone(),
-                key: at.record.key.clone(),
-                label: at.record.label.clone(),
-            });
+            let _ = event_tx.send(SchedulerEvent::Preempted(at.record.event_header()));
         }
         count
     }
@@ -282,10 +272,7 @@ pub(crate) async fn spawn_task(
         record: task.clone(),
         token: child_token.clone(),
         progress: ProgressReporter::new(
-            task.id,
-            task.task_type.clone(),
-            task.key.clone(),
-            task.label.clone(),
+            task.event_header(),
             event_tx.clone(),
             active.clone(),
         ),
@@ -296,12 +283,7 @@ pub(crate) async fn spawn_task(
     };
 
     // Emit dispatched event.
-    let _ = event_tx.send(SchedulerEvent::Dispatched {
-        task_id: task.id,
-        task_type: task.task_type.clone(),
-        key: task.key.clone(),
-        label: task.label.clone(),
-    });
+    let _ = event_tx.send(SchedulerEvent::Dispatched(task.event_header()));
 
     // Spawn executor.
     let task_id_for_handle = task.id;
@@ -365,12 +347,7 @@ pub(crate) async fn spawn_task(
                 }
                 // Remove from active tracking AFTER the store write completes.
                 active.remove(task_id);
-                let _ = event_tx.send(SchedulerEvent::Completed {
-                    task_id,
-                    task_type: task.task_type.clone(),
-                    key: task.key.clone(),
-                    label: task.label.clone(),
-                });
+                let _ = event_tx.send(SchedulerEvent::Completed(task.event_header()));
                 work_notify.notify_one();
 
                 // If this was a child task, check if parent is ready.
@@ -410,10 +387,7 @@ pub(crate) async fn spawn_task(
                 // Remove from active tracking AFTER the store write completes.
                 active.remove(task_id);
                 let _ = event_tx.send(SchedulerEvent::Failed {
-                    task_id,
-                    task_type: task.task_type.clone(),
-                    key: task.key.clone(),
-                    label: task.label.clone(),
+                    header: task.event_header(),
                     error: te.message.clone(),
                     will_retry,
                 });
@@ -432,12 +406,9 @@ pub(crate) async fn spawn_task(
                                         if let Some(at) = active.remove(*rid) {
                                             at.token.cancel();
                                             let _ = store.delete(*rid).await;
-                                            let _ = event_tx.send(SchedulerEvent::Cancelled {
-                                                task_id: *rid,
-                                                task_type: at.record.task_type.clone(),
-                                                key: at.record.key.clone(),
-                                                label: at.record.label.clone(),
-                                            });
+                                            let _ = event_tx.send(SchedulerEvent::Cancelled(
+                                                at.record.event_header(),
+                                            ));
                                         }
                                     }
                                 }
@@ -449,7 +420,7 @@ pub(crate) async fn spawn_task(
                                         &msg,
                                         false,
                                         0,
-                                        &TaskMetrics::default(),
+                                        &IoBudget::default(),
                                     )
                                     .await
                                 {
@@ -460,10 +431,7 @@ pub(crate) async fn spawn_task(
                                     );
                                 }
                                 let _ = event_tx.send(SchedulerEvent::Failed {
-                                    task_id: parent_id,
-                                    task_type: parent.task_type.clone(),
-                                    key: parent.key.clone(),
-                                    label: parent.label.clone(),
+                                    header: parent.event_header(),
                                     error: msg,
                                     will_retry: false,
                                 });
@@ -511,16 +479,13 @@ async fn handle_parent_resolution(
             // All children done but some failed — fail the parent.
             if let Ok(Some(parent)) = store.task_by_id(parent_id).await {
                 if let Err(e) = store
-                    .fail_with_record(&parent, &reason, false, 0, &TaskMetrics::default())
+                    .fail_with_record(&parent, &reason, false, 0, &IoBudget::default())
                     .await
                 {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
                 }
                 let _ = event_tx.send(SchedulerEvent::Failed {
-                    task_id: parent_id,
-                    task_type: parent.task_type.clone(),
-                    key: parent.key.clone(),
-                    label: parent.label.clone(),
+                    header: parent.event_header(),
                     error: reason,
                     will_retry: false,
                 });

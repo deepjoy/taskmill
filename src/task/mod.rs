@@ -107,12 +107,8 @@ pub struct TaskRecord {
     pub priority: Priority,
     pub status: TaskStatus,
     pub payload: Option<Vec<u8>>,
-    pub expected_read_bytes: i64,
-    pub expected_write_bytes: i64,
-    /// Estimated network receive bytes for IO budget scheduling.
-    pub expected_net_rx_bytes: i64,
-    /// Estimated network transmit bytes for IO budget scheduling.
-    pub expected_net_tx_bytes: i64,
+    /// Expected IO budget declared at submission.
+    pub expected_io: IoBudget,
     pub retry_count: i32,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -142,6 +138,16 @@ impl TaskRecord {
             None => Ok(None),
         }
     }
+
+    /// Build a [`TaskEventHeader`](crate::scheduler::event::TaskEventHeader) from this record.
+    pub fn event_header(&self) -> crate::scheduler::event::TaskEventHeader {
+        crate::scheduler::event::TaskEventHeader {
+            task_id: self.id,
+            task_type: self.task_type.clone(),
+            key: self.key.clone(),
+            label: self.label.clone(),
+        }
+    }
 }
 
 /// A task that has completed or permanently failed.
@@ -155,18 +161,10 @@ pub struct TaskHistoryRecord {
     pub priority: Priority,
     pub status: HistoryStatus,
     pub payload: Option<Vec<u8>>,
-    pub expected_read_bytes: i64,
-    pub expected_write_bytes: i64,
-    /// Estimated network receive bytes declared at submission.
-    pub expected_net_rx_bytes: i64,
-    /// Estimated network transmit bytes declared at submission.
-    pub expected_net_tx_bytes: i64,
-    pub actual_read_bytes: Option<i64>,
-    pub actual_write_bytes: Option<i64>,
-    /// Actual network receive bytes reported by the executor.
-    pub actual_net_rx_bytes: Option<i64>,
-    /// Actual network transmit bytes reported by the executor.
-    pub actual_net_tx_bytes: Option<i64>,
+    /// Expected IO budget declared at submission.
+    pub expected_io: IoBudget,
+    /// Actual IO recorded by the executor, if available.
+    pub actual_io: Option<IoBudget>,
     pub retry_count: i32,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -181,23 +179,41 @@ pub struct TaskHistoryRecord {
     pub group_key: Option<String>,
 }
 
-/// Accumulated IO metrics captured by the scheduler after an executor finishes.
+/// IO budget for a task: expected or actual disk and network IO bytes.
 ///
-/// Executors report metrics incrementally via [`TaskContext::record_read_bytes`](crate::TaskContext::record_read_bytes),
-/// [`record_write_bytes`](crate::TaskContext::record_write_bytes),
-/// [`record_net_rx_bytes`](crate::TaskContext::record_net_rx_bytes), and
-/// [`record_net_tx_bytes`](crate::TaskContext::record_net_tx_bytes).
-/// This struct is the snapshot read by the scheduler — executors never construct it directly.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TaskMetrics {
-    /// Actual disk bytes read during execution.
-    pub read_bytes: i64,
-    /// Actual disk bytes written during execution.
-    pub write_bytes: i64,
-    /// Actual network bytes received during execution.
-    pub net_rx_bytes: i64,
-    /// Actual network bytes transmitted during execution.
-    pub net_tx_bytes: i64,
+/// Used in [`TaskSubmission`] for expected IO (scheduling), [`TaskRecord`] for
+/// persisted expectations, and as the snapshot returned by the IO tracker after
+/// execution completes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoBudget {
+    /// Disk bytes read.
+    pub disk_read: i64,
+    /// Disk bytes written.
+    pub disk_write: i64,
+    /// Network bytes received.
+    pub net_rx: i64,
+    /// Network bytes transmitted.
+    pub net_tx: i64,
+}
+
+impl IoBudget {
+    /// Create an `IoBudget` with only disk IO set.
+    pub fn disk(read: i64, write: i64) -> Self {
+        Self {
+            disk_read: read,
+            disk_write: write,
+            ..Default::default()
+        }
+    }
+
+    /// Create an `IoBudget` with only network IO set.
+    pub fn net(rx: i64, tx: i64) -> Self {
+        Self {
+            net_rx: rx,
+            net_tx: tx,
+            ..Default::default()
+        }
+    }
 }
 
 /// Unified lookup result for querying a task by its dedup inputs.

@@ -19,8 +19,10 @@ Holds pending, running, and paused tasks.
 | `priority` | INTEGER NOT NULL | 0–255 (lower = higher priority) |
 | `status` | TEXT DEFAULT 'pending' | `pending`, `running`, `paused`, or `waiting` |
 | `payload` | BLOB | Opaque task data (max 1 MiB) |
-| `expected_read_bytes` | INTEGER | Estimated read IO |
-| `expected_write_bytes` | INTEGER | Estimated write IO |
+| `expected_read_bytes` | INTEGER | Estimated disk read IO (part of `IoBudget`) |
+| `expected_write_bytes` | INTEGER | Estimated disk write IO (part of `IoBudget`) |
+| `expected_net_rx_bytes` | INTEGER | Estimated network RX (part of `IoBudget`) |
+| `expected_net_tx_bytes` | INTEGER | Estimated network TX (part of `IoBudget`) |
 | `parent_id` | INTEGER | Parent task ID for child tasks (NULL for top-level) |
 | `fail_fast` | INTEGER DEFAULT 1 | Whether child failure cancels siblings and fails parent |
 | `retry_count` | INTEGER DEFAULT 0 | Number of retries so far |
@@ -35,8 +37,10 @@ Holds pending, running, and paused tasks.
 | Column | Type | Description |
 |--------|------|-------------|
 | *(all columns from `tasks`, including `label`, `parent_id`, `fail_fast`)* | | |
-| `actual_read_bytes` | INTEGER | Reported by executor |
-| `actual_write_bytes` | INTEGER | Reported by executor |
+| `actual_read_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
+| `actual_write_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
+| `actual_net_rx_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
+| `actual_net_tx_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
 | `completed_at` | TEXT | ISO 8601 timestamp |
 | `duration_ms` | INTEGER | Wall-clock duration |
 | `status` | TEXT | `completed` or `failed` |

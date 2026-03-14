@@ -195,13 +195,13 @@ async fn event_emitted_on_complete() {
 
     // Should get Dispatched event.
     let evt = rx.recv().await.unwrap();
-    assert!(matches!(evt, SchedulerEvent::Dispatched { .. }));
+    assert!(matches!(evt, SchedulerEvent::Dispatched(..)));
 
     // Wait for completion.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let evt = rx.recv().await.unwrap();
-    assert!(matches!(evt, SchedulerEvent::Completed { .. }));
+    assert!(matches!(evt, SchedulerEvent::Completed(..)));
 }
 
 #[tokio::test]
@@ -233,12 +233,8 @@ async fn submit_typed_enqueues_task() {
     impl crate::task::TypedTask for Thumb {
         const TASK_TYPE: &'static str = "test";
 
-        fn expected_read_bytes(&self) -> i64 {
-            4096
-        }
-
-        fn expected_write_bytes(&self) -> i64 {
-            512
+        fn expected_io(&self) -> crate::task::IoBudget {
+            crate::task::IoBudget::disk(4096, 512)
         }
     }
 
@@ -258,8 +254,8 @@ async fn submit_typed_enqueues_task() {
         .unwrap()
         .expect("task should exist");
     assert_eq!(record.task_type, "test");
-    assert_eq!(record.expected_read_bytes, 4096);
-    assert_eq!(record.expected_write_bytes, 512);
+    assert_eq!(record.expected_io.disk_read, 4096);
+    assert_eq!(record.expected_io.disk_write, 512);
 
     // Payload round-trips.
     let recovered: Thumb = record.deserialize_payload().unwrap().unwrap();
@@ -580,7 +576,7 @@ async fn parent_auto_completes_after_children_finish() {
     let mut parent_completed = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Ok(SchedulerEvent::Completed { task_type, .. })) if task_type == "parent" => {
+            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent" => {
                 parent_completed = true;
                 break;
             }
@@ -641,7 +637,7 @@ async fn finalize_called_after_children_complete() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Ok(SchedulerEvent::Completed { task_type, .. })) if task_type == "parent" => {
+            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent" => {
                 break;
             }
             _ => {}

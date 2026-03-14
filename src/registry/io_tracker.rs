@@ -24,12 +24,12 @@ impl IoTracker {
         }
     }
 
-    pub fn snapshot(&self) -> crate::task::TaskMetrics {
-        crate::task::TaskMetrics {
-            read_bytes: self.read_bytes.load(Ordering::Relaxed),
-            write_bytes: self.write_bytes.load(Ordering::Relaxed),
-            net_rx_bytes: self.net_rx_bytes.load(Ordering::Relaxed),
-            net_tx_bytes: self.net_tx_bytes.load(Ordering::Relaxed),
+    pub fn snapshot(&self) -> crate::task::IoBudget {
+        crate::task::IoBudget {
+            disk_read: self.read_bytes.load(Ordering::Relaxed),
+            disk_write: self.write_bytes.load(Ordering::Relaxed),
+            net_rx: self.net_rx_bytes.load(Ordering::Relaxed),
+            net_tx: self.net_tx_bytes.load(Ordering::Relaxed),
         }
     }
 }

@@ -13,6 +13,7 @@ use crate::store::TaskStore;
 use crate::task::TaskRecord;
 
 use super::dispatch::ActiveTaskMap;
+use super::event::TaskEventHeader;
 use super::SchedulerEvent;
 
 // ── Progress Reporter ──────────────────────────────────────────────
@@ -39,10 +40,7 @@ use super::SchedulerEvent;
 /// ```
 #[derive(Clone)]
 pub struct ProgressReporter {
-    task_id: i64,
-    task_type: String,
-    key: String,
-    label: String,
+    header: TaskEventHeader,
     event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
     /// Direct handle for updating internal progress tracking without a
     /// broadcast roundtrip.
@@ -51,18 +49,12 @@ pub struct ProgressReporter {
 
 impl ProgressReporter {
     pub(crate) fn new(
-        task_id: i64,
-        task_type: String,
-        key: String,
-        label: String,
+        header: TaskEventHeader,
         event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
         active: ActiveTaskMap,
     ) -> Self {
         Self {
-            task_id,
-            task_type,
-            key,
-            label,
+            header,
             event_tx,
             active,
         }
@@ -72,13 +64,10 @@ impl ProgressReporter {
     pub fn report(&self, percent: f32, message: Option<String>) {
         let clamped = percent.clamp(0.0, 1.0);
         // Update internal progress tracking directly (sync, no broadcast roundtrip).
-        self.active.update_progress(self.task_id, clamped);
+        self.active.update_progress(self.header.task_id, clamped);
         // Broadcast for external subscribers (UI / Tauri).
         let _ = self.event_tx.send(SchedulerEvent::Progress {
-            task_id: self.task_id,
-            task_type: self.task_type.clone(),
-            key: self.key.clone(),
-            label: self.label.clone(),
+            header: self.header.clone(),
             percent: clamped,
             message,
         });
@@ -101,10 +90,8 @@ impl ProgressReporter {
 /// with throughput-based extrapolation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EstimatedProgress {
-    pub task_id: i64,
-    pub task_type: String,
-    pub key: String,
-    pub label: String,
+    /// Common task identification fields.
+    pub header: TaskEventHeader,
     /// Executor-reported progress (0.0 to 1.0), if available.
     pub reported_percent: Option<f32>,
     /// Throughput-extrapolated progress (0.0 to 1.0), if history data exists.
@@ -162,10 +149,7 @@ pub(crate) async fn extrapolate(
     let percent = reported.or(extrapolated).unwrap_or(0.0);
 
     EstimatedProgress {
-        task_id: record.id,
-        task_type: record.task_type.clone(),
-        key: record.key.clone(),
-        label: record.label.clone(),
+        header: record.event_header(),
         reported_percent: reported,
         extrapolated_percent: extrapolated,
         percent,
