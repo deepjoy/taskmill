@@ -194,16 +194,48 @@ impl TaskStore {
     }
 
     /// Run the migration SQL.
+    ///
+    /// Migrations are idempotent: `CREATE TABLE IF NOT EXISTS` for the
+    /// initial schema and `ALTER TABLE ADD COLUMN` for incremental changes
+    /// (SQLite returns "duplicate column name" if the column already exists,
+    /// which we silently ignore).
     async fn migrate(&self) -> Result<(), StoreError> {
         sqlx::raw_sql(include_str!("../migrations/001_tasks.sql"))
             .execute(&self.pool)
             .await?;
-        sqlx::raw_sql(include_str!("../migrations/002_add_label.sql"))
-            .execute(&self.pool)
+        Self::run_alter_migration(&self.pool, include_str!("../migrations/002_add_label.sql"))
             .await?;
-        sqlx::raw_sql(include_str!("../migrations/003_net_io_and_groups.sql"))
-            .execute(&self.pool)
-            .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../migrations/003_net_io_and_groups.sql"),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Run a migration containing `ALTER TABLE` statements, ignoring
+    /// "duplicate column name" errors (column already exists from a
+    /// previous run).
+    async fn run_alter_migration(pool: &SqlitePool, sql: &str) -> Result<(), StoreError> {
+        for statement in sql.split(';') {
+            // Strip comment-only lines but keep SQL after comments.
+            let meaningful: String = statement
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = meaningful.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match sqlx::raw_sql(trimmed).execute(pool).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column name") => {
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(())
     }
 
