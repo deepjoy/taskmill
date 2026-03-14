@@ -1,10 +1,14 @@
 //! System resource monitoring for IO-aware scheduling.
 //!
 //! Implement [`ResourceSampler`] to feed CPU and disk IO metrics into the
-//! scheduler. The built-in [`sysinfo_monitor`] module provides a cross-platform
-//! sampler using the `sysinfo` crate (enabled by the `sysinfo-monitor` feature).
-//! The scheduler reads the latest smoothed snapshot via [`ResourceReader`] when
-//! making IO-budget dispatch decisions.
+//! scheduler, or use the built-in [`sysinfo_monitor`] module (enabled by the
+//! `sysinfo-monitor` feature) for cross-platform monitoring. Enable via
+//! [`SchedulerBuilder::with_resource_monitoring`](crate::SchedulerBuilder::with_resource_monitoring)
+//! or provide a custom sampler with
+//! [`SchedulerBuilder::resource_sampler`](crate::SchedulerBuilder::resource_sampler).
+//!
+//! The scheduler reads the latest EWMA-smoothed snapshot via [`ResourceReader`]
+//! when making IO-budget dispatch decisions.
 
 pub mod sampler;
 

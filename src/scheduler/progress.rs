@@ -1,8 +1,11 @@
 //! Progress reporting and throughput-based extrapolation.
 //!
-//! Executors call [`ProgressReporter::report`] to emit percentage updates.
-//! The scheduler combines these with historical throughput data to produce
-//! [`EstimatedProgress`] snapshots for dashboard UIs.
+//! Executors call [`ProgressReporter::report`] (via [`TaskContext::progress`](crate::TaskContext::progress))
+//! to emit percentage updates as [`SchedulerEvent::Progress`]
+//! events. The scheduler combines these with historical throughput data to
+//! produce [`EstimatedProgress`] snapshots, available via
+//! [`Scheduler::estimated_progress`](super::Scheduler::estimated_progress) or
+//! the [`SchedulerSnapshot`](super::SchedulerSnapshot).
 
 use serde::{Deserialize, Serialize};
 
@@ -22,13 +25,13 @@ use super::SchedulerEvent;
 ///
 /// ```ignore
 /// // Inside a TaskExecutor::execute implementation:
-/// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+/// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
 ///     let items = vec![/* ... */];
 ///     for (i, item) in items.iter().enumerate() {
 ///         // process item...
 ///         ctx.progress.report_fraction(i as u64 + 1, items.len() as u64, None);
 ///     }
-///     Ok(TaskResult { actual_read_bytes: 0, actual_write_bytes: 0 })
+///     Ok(())
 /// }
 /// ```
 #[derive(Clone)]

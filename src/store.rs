@@ -3,6 +3,12 @@
 //! [`TaskStore`] manages the active task queue and completed/failed history
 //! in a single SQLite database. It handles deduplication, priority upgrades,
 //! retries, parent-child hierarchy, and automatic history pruning.
+//!
+//! Most users interact with the store through [`Scheduler`](crate::Scheduler)
+//! methods like [`submit`](crate::Scheduler::submit) and
+//! [`task_lookup`](crate::Scheduler::task_lookup). Direct access is available
+//! via [`Scheduler::store()`](crate::Scheduler::store) for queries and
+//! diagnostics.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,8 +19,8 @@ use sqlx::{Row, SqlitePool};
 
 use crate::priority::Priority;
 use crate::task::{
-    HistoryStatus, ParentResolution, SubmitOutcome, TaskHistoryRecord, TaskLookup, TaskRecord,
-    TaskResult, TaskStatus, TaskSubmission, TypeStats, MAX_PAYLOAD_BYTES,
+    HistoryStatus, ParentResolution, SubmitOutcome, TaskHistoryRecord, TaskLookup, TaskMetrics,
+    TaskRecord, TaskStatus, TaskSubmission, TypeStats, MAX_PAYLOAD_BYTES,
 };
 
 /// Serde-friendly error type for Tauri IPC and API boundaries.
@@ -92,6 +98,45 @@ impl Default for StoreConfig {
 }
 
 /// SQLite-backed persistence layer for the task queue and history.
+///
+/// Most users interact with [`TaskStore`] indirectly through [`Scheduler`](crate::Scheduler),
+/// but direct access is available via [`Scheduler::store()`](crate::Scheduler::store) for
+/// queries and diagnostics.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), taskmill::store::StoreError> {
+/// use taskmill::store::TaskStore;
+/// use taskmill::task::{TaskSubmission, TaskMetrics, TaskStatus};
+/// use taskmill::priority::Priority;
+///
+/// let store = TaskStore::open_memory().await?;
+///
+/// // Submit a task.
+/// let sub = TaskSubmission {
+///     task_type: "thumbnail".into(),
+///     dedup_key: Some("photo-1".into()),
+///     priority: Priority::NORMAL,
+///     payload: Some(br#"{"path":"/a.jpg"}"#.to_vec()),
+///     expected_read_bytes: 4096,
+///     expected_write_bytes: 1024,
+///     parent_id: None,
+///     fail_fast: true,
+/// };
+/// let outcome = store.submit(&sub).await?;
+/// assert!(outcome.is_inserted());
+///
+/// // Pop the highest-priority task and mark it running.
+/// let task = store.pop_next().await?.unwrap();
+/// assert_eq!(task.status, TaskStatus::Running);
+///
+/// // Complete it — moves to history.
+/// store.complete(task.id, &TaskMetrics { read_bytes: 4096, write_bytes: 1024 }).await?;
+/// assert!(store.task_by_id(task.id).await?.is_none()); // gone from active queue
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct TaskStore {
     pool: SqlitePool,
@@ -435,7 +480,9 @@ impl TaskStore {
     }
 
     /// Mark a task as completed and move it to history.
-    pub async fn complete(&self, id: i64, result: &TaskResult) -> Result<(), StoreError> {
+    pub async fn complete(&self, id: i64, metrics: &TaskMetrics) -> Result<(), StoreError> {
+        let actual_read_bytes = metrics.read_bytes;
+        let actual_write_bytes = metrics.write_bytes;
         tracing::debug!(task_id = id, "store.complete: BEGIN tx");
         let mut conn = self.begin_write().await?;
 
@@ -477,8 +524,8 @@ impl TaskStore {
         .bind(&task.payload)
         .bind(task.expected_read_bytes)
         .bind(task.expected_write_bytes)
-        .bind(result.actual_read_bytes)
-        .bind(result.actual_write_bytes)
+        .bind(actual_read_bytes)
+        .bind(actual_write_bytes)
         .bind(task.retry_count)
         .bind(&task.last_error)
         .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -534,8 +581,7 @@ impl TaskStore {
         error: &str,
         retryable: bool,
         max_retries: i32,
-        actual_read_bytes: i64,
-        actual_write_bytes: i64,
+        metrics: &TaskMetrics,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = id, "store.fail: BEGIN tx");
         let mut conn = self.begin_write().await?;
@@ -589,8 +635,8 @@ impl TaskStore {
             .bind(&task.payload)
             .bind(task.expected_read_bytes)
             .bind(task.expected_write_bytes)
-            .bind(actual_read_bytes)
-            .bind(actual_write_bytes)
+            .bind(metrics.read_bytes)
+            .bind(metrics.write_bytes)
             .bind(task.retry_count + 1)
             .bind(error)
             .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -1175,7 +1221,7 @@ mod tests {
     fn make_submission(key: &str, priority: Priority) -> TaskSubmission {
         TaskSubmission {
             task_type: "test".into(),
-            key: Some(key.into()),
+            dedup_key: Some(key.into()),
             priority,
             payload: Some(b"hello".to_vec()),
             expected_read_bytes: 1000,
@@ -1263,13 +1309,7 @@ mod tests {
 
         // Complete the running task — should reset to pending with requeue_priority.
         store
-            .complete(
-                task.id,
-                &TaskResult {
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                },
-            )
+            .complete(task.id, &TaskMetrics::default())
             .await
             .unwrap();
 
@@ -1339,7 +1379,10 @@ mod tests {
         store.submit(&sub_high).await.unwrap();
 
         // Permanent failure — requeue flag is dropped.
-        store.fail(task.id, "boom", false, 0, 0, 0).await.unwrap();
+        store
+            .fail(task.id, "boom", false, 0, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Key should be free for reuse.
         let outcome = store.submit(&sub).await.unwrap();
@@ -1352,7 +1395,7 @@ mod tests {
 
         let sub_a = TaskSubmission {
             task_type: "type_a".into(),
-            key: Some("shared-key".into()),
+            dedup_key: Some("shared-key".into()),
             priority: Priority::NORMAL,
             payload: None,
             expected_read_bytes: 0,
@@ -1362,7 +1405,7 @@ mod tests {
         };
         let sub_b = TaskSubmission {
             task_type: "type_b".into(),
-            key: Some("shared-key".into()),
+            dedup_key: Some("shared-key".into()),
             priority: Priority::NORMAL,
             payload: None,
             expected_read_bytes: 0,
@@ -1385,7 +1428,7 @@ mod tests {
 
         let sub = TaskSubmission {
             task_type: "ingest".into(),
-            key: None,
+            dedup_key: None,
             priority: Priority::NORMAL,
             payload: Some(b"same-data".to_vec()),
             expected_read_bytes: 0,
@@ -1447,9 +1490,9 @@ mod tests {
         store
             .complete(
                 task.id,
-                &TaskResult {
-                    actual_read_bytes: 2000,
-                    actual_write_bytes: 1000,
+                &TaskMetrics {
+                    read_bytes: 2000,
+                    write_bytes: 1000,
                 },
             )
             .await
@@ -1474,7 +1517,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .fail(task.id, "transient error", true, 3, 0, 0)
+            .fail(task.id, "transient error", true, 3, &TaskMetrics::default())
             .await
             .unwrap();
 
@@ -1494,11 +1537,26 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         // First fail: retry_count 0 < 1, requeued with retry_count=1.
-        store.fail(task.id, "err1", true, 1, 0, 0).await.unwrap();
+        store
+            .fail(task.id, "err1", true, 1, &TaskMetrics::default())
+            .await
+            .unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.retry_count, 1);
         // Second fail: retry_count 1 >= max_retries 1, moves to history.
-        store.fail(task.id, "err2", true, 1, 100, 50).await.unwrap();
+        store
+            .fail(
+                task.id,
+                "err2",
+                true,
+                1,
+                &TaskMetrics {
+                    read_bytes: 100,
+                    write_bytes: 50,
+                },
+            )
+            .await
+            .unwrap();
 
         // Should be in history now.
         assert!(store.task_by_key(&key).await.unwrap().is_none());
@@ -1547,13 +1605,7 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         store
-            .complete(
-                task.id,
-                &TaskResult {
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                },
-            )
+            .complete(task.id, &TaskMetrics::default())
             .await
             .unwrap();
 
@@ -1574,9 +1626,9 @@ mod tests {
             store
                 .complete(
                     task.id,
-                    &TaskResult {
-                        actual_read_bytes: 1000,
-                        actual_write_bytes: 500,
+                    &TaskMetrics {
+                        read_bytes: 1000,
+                        write_bytes: 500,
                     },
                 )
                 .await
@@ -1655,9 +1707,9 @@ mod tests {
         store
             .complete(
                 task.id,
-                &TaskResult {
-                    actual_read_bytes: 100,
-                    actual_write_bytes: 50,
+                &TaskMetrics {
+                    read_bytes: 100,
+                    write_bytes: 50,
                 },
             )
             .await
@@ -1778,13 +1830,7 @@ mod tests {
             store.submit(&sub).await.unwrap();
             let task = store.pop_next().await.unwrap().unwrap();
             store
-                .complete(
-                    task.id,
-                    &TaskResult {
-                        actual_read_bytes: 0,
-                        actual_write_bytes: 0,
-                    },
-                )
+                .complete(task.id, &TaskMetrics::default())
                 .await
                 .unwrap();
         }
@@ -1862,13 +1908,7 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         store
-            .complete(
-                task.id,
-                &TaskResult {
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                },
-            )
+            .complete(task.id, &TaskMetrics::default())
             .await
             .unwrap();
 
@@ -1892,7 +1932,7 @@ mod tests {
         let sub = make_submission("ok", Priority::NORMAL);
         let big = TaskSubmission {
             task_type: "test".into(),
-            key: Some("big".into()),
+            dedup_key: Some("big".into()),
             priority: Priority::NORMAL,
             payload: Some(vec![0u8; MAX_PAYLOAD_BYTES + 1]),
             expected_read_bytes: 0,
@@ -1986,7 +2026,10 @@ mod tests {
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
-        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Parent should be ready to finalize.
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
@@ -2009,7 +2052,10 @@ mod tests {
             store.submit(&sub).await.unwrap();
         }
         let child = store.pop_next().await.unwrap().unwrap();
-        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
         assert_eq!(resolution, Some(ParentResolution::StillWaiting));
@@ -2029,7 +2075,10 @@ mod tests {
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
-        store.fail(child.id, "boom", false, 0, 0, 0).await.unwrap();
+        store
+            .fail(child.id, "boom", false, 0, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
         assert_eq!(
@@ -2083,7 +2132,10 @@ mod tests {
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
 
-        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Check history record has parent_id.
         let hist = store.history(10, 0).await.unwrap();
@@ -2102,7 +2154,10 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
         assert!(!task.fail_fast);
 
-        store.complete(task.id, &TaskResult::zero()).await.unwrap();
+        store
+            .complete(task.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let hist = store.history(10, 0).await.unwrap();
         assert!(!hist[0].fail_fast);
