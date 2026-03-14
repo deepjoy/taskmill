@@ -1,3 +1,10 @@
+//! The scheduler: configuration, event stream, and the main run loop.
+//!
+//! [`Scheduler`] coordinates task execution — popping from the store,
+//! applying backpressure and IO-budget checks, preempting lower-priority
+//! work, and emitting [`SchedulerEvent`]s for UI integration. Use
+//! [`SchedulerBuilder`] for ergonomic construction.
+
 pub(crate) mod dispatch;
 pub(crate) mod gate;
 pub mod progress;
@@ -37,6 +44,8 @@ pub struct SchedulerSnapshot {
     pub pending_count: i64,
     /// Number of tasks paused (preempted).
     pub paused_count: i64,
+    /// Number of parent tasks waiting for children to complete.
+    pub waiting_count: i64,
     /// Progress estimates for every running task.
     pub progress: Vec<EstimatedProgress>,
     /// Aggregate backpressure (0.0–1.0).
@@ -100,6 +109,9 @@ pub enum SchedulerEvent {
         /// Optional human-readable message from the executor.
         message: Option<String>,
     },
+    /// A parent task entered the waiting state after its executor returned
+    /// and it has active children.
+    Waiting { task_id: i64, children_count: i64 },
     /// The scheduler was globally paused via [`Scheduler::pause_all`].
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
@@ -175,7 +187,7 @@ struct SchedulerInner {
     /// Global pause flag — when `true`, the run loop skips dispatching.
     paused: AtomicBool,
     /// Wakes the run loop when new work is submitted or the scheduler is resumed.
-    work_notify: Notify,
+    work_notify: Arc<Notify>,
 }
 
 /// IO-aware priority scheduler.
@@ -240,7 +252,7 @@ impl Scheduler {
                 sampler_token: CancellationToken::new(),
                 app_state,
                 paused: AtomicBool::new(false),
-                work_notify: Notify::new(),
+                work_notify: Arc::new(Notify::new()),
             }),
         }
     }
@@ -405,6 +417,20 @@ impl Scheduler {
     /// it is deleted from the store. Returns `true` if the task was found
     /// and cancelled.
     pub async fn cancel(&self, task_id: i64) -> Result<bool, StoreError> {
+        // Cancel children first (cascade).
+        let running_child_ids = self.inner.store.cancel_children(task_id).await?;
+        for child_id in &running_child_ids {
+            if let Some(at) = self.inner.active.remove(*child_id).await {
+                at.token.cancel();
+                let _ = self.inner.store.delete(*child_id).await;
+                let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled {
+                    task_id: *child_id,
+                    task_type: at.record.task_type.clone(),
+                    key: at.record.key.clone(),
+                });
+            }
+        }
+
         // Check if it's an active (running) task first.
         if let Some(at) = self.inner.active.remove(task_id).await {
             at.token.cancel();
@@ -417,7 +443,7 @@ impl Scheduler {
             return Ok(true);
         }
 
-        // Not active — try to delete from the queue (pending/paused).
+        // Not active — try to delete from the queue (pending/paused/waiting).
         let deleted = self.inner.store.delete(task_id).await?;
         Ok(deleted)
     }
@@ -486,11 +512,68 @@ impl Scheduler {
         dispatch::spawn_task(
             task,
             executor,
-            self.inner.store.clone(),
-            self.inner.active.clone(),
-            self.inner.event_tx.clone(),
-            self.inner.max_retries,
-            self.inner.app_state.snapshot().await,
+            dispatch::SpawnContext {
+                store: self.inner.store.clone(),
+                active: self.inner.active.clone(),
+                event_tx: self.inner.event_tx.clone(),
+                max_retries: self.inner.max_retries,
+                app_state: self.inner.app_state.snapshot().await,
+                work_notify: Arc::clone(&self.inner.work_notify),
+            },
+            dispatch::ExecutionPhase::Execute,
+        )
+        .await;
+
+        Ok(true)
+    }
+
+    /// Try to dispatch a parent task for its finalize phase.
+    ///
+    /// Returns `true` if a finalizer was dispatched.
+    async fn try_dispatch_finalizer(&self) -> Result<bool, StoreError> {
+        // Pop the next pending finalizer.
+        let parent_id = {
+            let mut finalizers = self.inner.active.pending_finalizers.lock().await;
+            if finalizers.is_empty() {
+                return Ok(false);
+            }
+            finalizers.remove(0)
+        };
+
+        // Transition the parent from waiting to running for finalize.
+        self.inner.store.set_running_for_finalize(parent_id).await?;
+
+        // Fetch the parent record (now running).
+        let Some(task) = self.inner.store.task_by_id(parent_id).await? else {
+            return Ok(false);
+        };
+
+        // Look up executor.
+        let Some(executor) = self.inner.registry.get(&task.task_type) else {
+            tracing::error!(
+                task_type = task.task_type,
+                "no executor registered for finalize — failing parent"
+            );
+            self.inner
+                .store
+                .fail(parent_id, "no executor for finalize", false, 0, 0, 0)
+                .await?;
+            return Ok(true);
+        };
+        let executor = Arc::clone(executor);
+
+        dispatch::spawn_task(
+            task,
+            executor,
+            dispatch::SpawnContext {
+                store: self.inner.store.clone(),
+                active: self.inner.active.clone(),
+                event_tx: self.inner.event_tx.clone(),
+                max_retries: self.inner.max_retries,
+                app_state: self.inner.app_state.snapshot().await,
+                work_notify: Arc::clone(&self.inner.work_notify),
+            },
+            dispatch::ExecutionPhase::Finalize,
         )
         .await;
 
@@ -529,7 +612,7 @@ impl Scheduler {
         }
     }
 
-    /// Resume paused tasks and dispatch pending work.
+    /// Resume paused tasks, dispatch finalizers, and dispatch pending work.
     async fn poll_and_dispatch(&self) {
         if self.is_paused() {
             return;
@@ -545,6 +628,18 @@ impl Scheduler {
                     .await
                 {
                     let _ = self.inner.store.resume(task.id).await;
+                }
+            }
+        }
+
+        // Dispatch any pending finalizers (parent tasks ready for finalize phase).
+        loop {
+            match self.try_dispatch_finalizer().await {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::error!(error = %e, "scheduler finalizer dispatch error");
+                    break;
                 }
             }
         }
@@ -630,6 +725,7 @@ impl Scheduler {
         let running = self.inner.active.records().await;
         let pending_count = self.inner.store.pending_count().await?;
         let paused_count = self.inner.store.paused_count().await?;
+        let waiting_count = self.inner.store.waiting_count().await?;
         let progress = self.estimated_progress().await;
         let pressure = self.inner.gate.pressure().await;
         let pressure_breakdown = self.inner.gate.pressure_breakdown().await;
@@ -639,6 +735,7 @@ impl Scheduler {
             running,
             pending_count,
             paused_count,
+            waiting_count,
             progress,
             pressure,
             pressure_breakdown,
@@ -737,6 +834,7 @@ pub struct SchedulerBuilder {
 }
 
 impl SchedulerBuilder {
+    /// Create a new builder with default configuration.
     pub fn new() -> Self {
         Self {
             store_path: None,
@@ -753,7 +851,7 @@ impl SchedulerBuilder {
         }
     }
 
-    /// Set the SQLite database path. Either this or [`store`] must be called.
+    /// Set the SQLite database path. Either this or [`store`](Self::store) must be called.
     pub fn store_path(mut self, path: &str) -> Self {
         self.store_path = Some(path.to_string());
         self
@@ -856,7 +954,7 @@ impl SchedulerBuilder {
     }
 
     /// Register shared application state accessible from every executor via
-    /// [`TaskContext::state`].
+    /// [`TaskContext::state`](crate::TaskContext::state).
     ///
     /// Multiple types can be registered — each is keyed by its concrete
     /// `TypeId`. Calling this twice with the same `T` overwrites the
@@ -887,7 +985,7 @@ impl SchedulerBuilder {
     /// have an `Arc<T>` and need to retain a handle for use outside the
     /// scheduler (e.g. to populate `OnceLock` fields after build). Avoids
     /// double-wrapping (`Arc<Arc<T>>`), which would cause
-    /// [`TaskContext::state`] downcasts to fail.
+    /// [`TaskContext::state`](crate::TaskContext::state) downcasts to fail.
     ///
     /// Multiple types can be registered — each is keyed by its concrete
     /// `TypeId`.
@@ -1063,6 +1161,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1108,6 +1208,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1130,6 +1232,8 @@ mod tests {
             payload: None,
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
         };
 
         let first = sched.submit(&sub).await.unwrap();
@@ -1158,6 +1262,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap()
@@ -1189,6 +1295,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap()
@@ -1216,6 +1324,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1247,6 +1357,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1316,6 +1428,8 @@ mod tests {
                     payload: None,
                     expected_read_bytes: 0,
                     expected_write_bytes: 0,
+                    parent_id: None,
+                    fail_fast: true,
                 })
                 .await
                 .unwrap();
@@ -1350,6 +1464,8 @@ mod tests {
                     payload: None,
                     expected_read_bytes: 0,
                     expected_write_bytes: 0,
+                    parent_id: None,
+                    fail_fast: true,
                 })
                 .await
                 .unwrap();
@@ -1431,6 +1547,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1453,6 +1571,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1476,6 +1596,8 @@ mod tests {
                 payload: None,
                 expected_read_bytes: 0,
                 expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
             })
             .await
             .unwrap();
@@ -1522,5 +1644,334 @@ mod tests {
 
         let result = sched.lookup_typed(&task).await.unwrap();
         assert!(matches!(result, crate::task::TaskLookup::Active(_)));
+    }
+
+    // ── Hierarchy tests ─────────────────────────────────────────────
+
+    /// An executor that spawns N child tasks during execution.
+    struct SpawningExecutor {
+        num_children: usize,
+    }
+
+    impl TaskExecutor for SpawningExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+            for i in 0..self.num_children {
+                let sub = TaskSubmission {
+                    task_type: "child".into(),
+                    key: Some(format!("child-{i}")),
+                    priority: ctx.record.priority,
+                    payload: None,
+                    expected_read_bytes: 0,
+                    expected_write_bytes: 0,
+                    parent_id: None, // spawn_child sets this
+                    fail_fast: true,
+                };
+                ctx.spawn_child(sub).await.map_err(|e| TaskError {
+                    message: e.to_string(),
+                    retryable: false,
+                    actual_read_bytes: 0,
+                    actual_write_bytes: 0,
+                })?;
+            }
+            Ok(TaskResult::zero())
+        }
+    }
+
+    /// An executor that records whether finalize was called.
+    struct FinalizeTrackingExecutor {
+        children: usize,
+        finalized: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TaskExecutor for FinalizeTrackingExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+            for i in 0..self.children {
+                let sub = TaskSubmission {
+                    task_type: "child".into(),
+                    key: Some(format!("ft-child-{i}")),
+                    priority: ctx.record.priority,
+                    payload: None,
+                    expected_read_bytes: 0,
+                    expected_write_bytes: 0,
+                    parent_id: None,
+                    fail_fast: true,
+                };
+                ctx.spawn_child(sub).await.map_err(|e| TaskError {
+                    message: e.to_string(),
+                    retryable: false,
+                    actual_read_bytes: 0,
+                    actual_write_bytes: 0,
+                })?;
+            }
+            Ok(TaskResult::zero())
+        }
+
+        async fn finalize<'a>(&'a self, _ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+            self.finalized
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(TaskResult::zero())
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_enters_waiting_when_children_spawned() {
+        let store = TaskStore::open_memory().await.unwrap();
+        let mut registry = TaskTypeRegistry::new();
+        registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
+        registry.register_erased("child", arc_erased(InstantExecutor));
+
+        let sched = Scheduler::new(
+            store,
+            SchedulerConfig::default(),
+            Arc::new(registry),
+            CompositePressure::new(),
+            ThrottlePolicy::default_three_tier(),
+        );
+        let mut rx = sched.subscribe();
+
+        // Submit parent task.
+        sched
+            .submit(&TaskSubmission {
+                task_type: "parent".into(),
+                key: Some("p1".into()),
+                priority: Priority::NORMAL,
+                payload: None,
+                expected_read_bytes: 0,
+                expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
+            })
+            .await
+            .unwrap();
+
+        // Dispatch parent.
+        sched.try_dispatch().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Should get Dispatched, then Waiting events for the parent.
+        let mut saw_waiting = false;
+        for _ in 0..10 {
+            if let Ok(evt) = rx.try_recv() {
+                if matches!(evt, SchedulerEvent::Waiting { .. }) {
+                    saw_waiting = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_waiting, "expected Waiting event for parent");
+
+        // Parent should be in waiting status in the store.
+        let parent_key = crate::task::generate_dedup_key("parent", Some(b"p1"));
+        let parent = sched
+            .store()
+            .task_by_key(&parent_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent.status, crate::task::TaskStatus::Waiting);
+
+        // Two children should be pending.
+        assert_eq!(sched.store().pending_count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn parent_auto_completes_after_children_finish() {
+        let store = TaskStore::open_memory().await.unwrap();
+        let mut registry = TaskTypeRegistry::new();
+        registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
+        registry.register_erased("child", arc_erased(InstantExecutor));
+
+        let sched = Scheduler::new(
+            store,
+            SchedulerConfig::default(),
+            Arc::new(registry),
+            CompositePressure::new(),
+            ThrottlePolicy::default_three_tier(),
+        );
+        let mut rx = sched.subscribe();
+
+        sched
+            .submit(&TaskSubmission {
+                task_type: "parent".into(),
+                key: Some("p-complete".into()),
+                priority: Priority::NORMAL,
+                payload: None,
+                expected_read_bytes: 0,
+                expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
+            })
+            .await
+            .unwrap();
+
+        // Run scheduler loop.
+        let token = CancellationToken::new();
+        let sched_clone = sched.clone();
+        let token_clone = token.clone();
+        let handle = tokio::spawn(async move {
+            sched_clone.run(token_clone).await;
+        });
+
+        // Wait for parent Completed event.
+        let parent_key = crate::task::generate_dedup_key("parent", Some(b"p-complete"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut parent_completed = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(SchedulerEvent::Completed { task_type, .. })) if task_type == "parent" => {
+                    parent_completed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Check before shutdown closes the pool.
+        let lookup = sched.store().task_lookup(&parent_key).await.unwrap();
+
+        token.cancel();
+        let _ = handle.await;
+
+        assert!(parent_completed, "expected parent Completed event");
+        assert!(
+            matches!(lookup, crate::task::TaskLookup::History(ref h) if h.status == crate::task::HistoryStatus::Completed),
+            "expected parent in history as completed, got: {lookup:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_called_after_children_complete() {
+        let finalized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let store = TaskStore::open_memory().await.unwrap();
+        let mut registry = TaskTypeRegistry::new();
+        registry.register_erased(
+            "parent",
+            arc_erased(FinalizeTrackingExecutor {
+                children: 1,
+                finalized: finalized.clone(),
+            }),
+        );
+        registry.register_erased("child", arc_erased(InstantExecutor));
+
+        let sched = Scheduler::new(
+            store,
+            SchedulerConfig::default(),
+            Arc::new(registry),
+            CompositePressure::new(),
+            ThrottlePolicy::default_three_tier(),
+        );
+        let mut rx = sched.subscribe();
+
+        sched
+            .submit(&TaskSubmission {
+                task_type: "parent".into(),
+                key: Some("p-finalize".into()),
+                priority: Priority::NORMAL,
+                payload: None,
+                expected_read_bytes: 0,
+                expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
+            })
+            .await
+            .unwrap();
+
+        let token = CancellationToken::new();
+        let sched_clone = sched.clone();
+        let token_clone = token.clone();
+        let handle = tokio::spawn(async move {
+            sched_clone.run(token_clone).await;
+        });
+
+        // Wait for parent Completed event rather than a fixed sleep.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(SchedulerEvent::Completed { task_type, .. })) if task_type == "parent" => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        token.cancel();
+        let _ = handle.await;
+
+        assert!(
+            finalized.load(std::sync::atomic::Ordering::SeqCst),
+            "finalize() should have been called"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_parent_cascades_to_children() {
+        let store = TaskStore::open_memory().await.unwrap();
+        let mut registry = TaskTypeRegistry::new();
+        registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 3 }));
+        registry.register_erased("child", arc_erased(SlowExecutor));
+
+        let sched = Scheduler::new(
+            store,
+            SchedulerConfig::default(),
+            Arc::new(registry),
+            CompositePressure::new(),
+            ThrottlePolicy::default_three_tier(),
+        );
+
+        let parent_id = sched
+            .submit(&TaskSubmission {
+                task_type: "parent".into(),
+                key: Some("p-cancel".into()),
+                priority: Priority::NORMAL,
+                payload: None,
+                expected_read_bytes: 0,
+                expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
+            })
+            .await
+            .unwrap()
+            .id()
+            .unwrap();
+
+        // Dispatch parent (which spawns children).
+        sched.try_dispatch().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Cancel parent — should cascade to children.
+        let cancelled = sched.cancel(parent_id).await.unwrap();
+        assert!(cancelled);
+
+        // All children should be gone.
+        assert_eq!(sched.store().pending_count().await.unwrap(), 0);
+        assert_eq!(sched.store().running_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn no_children_completes_normally() {
+        // Task without children should complete as before (backward compat).
+        let sched = setup(arc_erased(InstantExecutor)).await;
+
+        sched
+            .submit(&TaskSubmission {
+                task_type: "test".into(),
+                key: Some("no-kids".into()),
+                priority: Priority::NORMAL,
+                payload: None,
+                expected_read_bytes: 0,
+                expected_write_bytes: 0,
+                parent_id: None,
+                fail_fast: true,
+            })
+            .await
+            .unwrap();
+
+        sched.try_dispatch().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let key = crate::task::generate_dedup_key("test", Some(b"no-kids"));
+        let lookup = sched.store().task_lookup(&key).await.unwrap();
+        assert!(matches!(lookup, crate::task::TaskLookup::History(_)));
     }
 }

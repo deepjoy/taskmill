@@ -1,3 +1,10 @@
+//! Task types, submission parameters, and the [`TypedTask`] trait.
+//!
+//! This module defines the data structures that flow through the scheduler:
+//! [`TaskSubmission`] for enqueuing work, [`TaskRecord`] for in-flight tasks,
+//! [`TaskHistoryRecord`] for completed/failed results, and [`TypedTask`] for
+//! strongly-typed task payloads with built-in serialization.
+
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -15,6 +22,10 @@ pub enum TaskStatus {
     Pending,
     Running,
     Paused,
+    /// Parent task whose executor has returned but whose children are still
+    /// active. Transitions to `Running` (for finalize) or terminal once all
+    /// children complete.
+    Waiting,
 }
 
 impl TaskStatus {
@@ -23,6 +34,7 @@ impl TaskStatus {
             Self::Pending => "pending",
             Self::Running => "running",
             Self::Paused => "paused",
+            Self::Waiting => "waiting",
         }
     }
 }
@@ -35,6 +47,7 @@ impl std::str::FromStr for TaskStatus {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
             "paused" => Ok(Self::Paused),
+            "waiting" => Ok(Self::Waiting),
             other => Err(format!("unknown TaskStatus: {other}")),
         }
     }
@@ -86,6 +99,12 @@ pub struct TaskRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub requeue: bool,
     pub requeue_priority: Option<Priority>,
+    /// Parent task ID for hierarchical tasks. `None` for top-level tasks.
+    pub parent_id: Option<i64>,
+    /// When `true` (default), the first child failure cancels siblings and
+    /// fails the parent immediately. When `false`, the parent waits for all
+    /// children to finish before resolving.
+    pub fail_fast: bool,
 }
 
 impl TaskRecord {
@@ -121,6 +140,10 @@ pub struct TaskHistoryRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: DateTime<Utc>,
     pub duration_ms: Option<i64>,
+    /// Parent task ID for hierarchical tasks.
+    pub parent_id: Option<i64>,
+    /// Whether the parent used fail-fast semantics.
+    pub fail_fast: bool,
 }
 
 /// Reported by the executor on successful completion.
@@ -201,6 +224,14 @@ pub struct TaskSubmission {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    /// Parent task ID for hierarchical tasks. Set automatically by
+    /// [`TaskContext::spawn_child`](crate::TaskContext::spawn_child).
+    pub parent_id: Option<i64>,
+    /// When `true` (default), the first child failure cancels siblings and
+    /// fails the parent immediately. When `false`, the parent waits for all
+    /// children to finish before resolving. Only meaningful for parent tasks
+    /// that spawn children.
+    pub fail_fast: bool,
 }
 
 impl TaskSubmission {
@@ -235,6 +266,8 @@ impl TaskSubmission {
             payload: Some(payload),
             expected_read_bytes,
             expected_write_bytes,
+            parent_id: None,
+            fail_fast: true,
         })
     }
 }
@@ -243,8 +276,9 @@ impl TaskSubmission {
 /// IO estimates.
 ///
 /// Implementing this trait collapses the 6 fields of [`TaskSubmission`] into a
-/// derive-friendly pattern. Use [`Scheduler::submit_typed`] to submit and
-/// [`TaskContext::deserialize_typed`] on the executor side.
+/// derive-friendly pattern. Use [`Scheduler::submit_typed`](crate::Scheduler::submit_typed)
+/// to submit and [`TaskContext::deserialize_typed`](crate::TaskContext::deserialize_typed)
+/// on the executor side.
 ///
 /// # Example
 ///
@@ -293,13 +327,16 @@ impl TaskSubmission {
             payload: Some(payload),
             expected_read_bytes: task.expected_read_bytes(),
             expected_write_bytes: task.expected_write_bytes(),
+            parent_id: None,
+            fail_fast: true,
         })
     }
 }
 
 /// Unified lookup result for querying a task by its dedup inputs.
 ///
-/// Returned by [`TaskStore::task_lookup`] and [`Scheduler::task_lookup`].
+/// Returned by [`TaskStore::task_lookup`](crate::TaskStore::task_lookup) and
+/// [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
 /// Tells the caller whether a task is currently active (pending, running,
 /// or paused) or has finished (completed or failed), without requiring
 /// them to manually compute the dedup key or query two tables.
@@ -323,6 +360,30 @@ pub struct TypeStats {
     pub avg_read_bytes: f64,
     pub avg_write_bytes: f64,
     pub failure_rate: f64,
+}
+
+/// Resolution of a parent task after a child completes or fails.
+///
+/// Returned by [`TaskStore::try_resolve_parent`](crate::TaskStore::try_resolve_parent) to tell the scheduler
+/// what action to take on the parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentResolution {
+    /// All children are done and none failed — parent is ready for finalize.
+    ReadyToFinalize,
+    /// At least one child failed (terminal) — parent should fail.
+    Failed(String),
+    /// Children are still active — no action needed yet.
+    StillWaiting,
+}
+
+impl TaskResult {
+    /// A result with zero IO bytes.
+    pub fn zero() -> Self {
+        Self {
+            actual_read_bytes: 0,
+            actual_write_bytes: 0,
+        }
+    }
 }
 
 #[cfg(test)]

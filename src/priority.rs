@@ -1,3 +1,11 @@
+//! Priority levels for task scheduling.
+//!
+//! [`Priority`] is a `u8` newtype where lower values mean higher priority.
+//! Named constants ([`REALTIME`](Priority::REALTIME), [`HIGH`](Priority::HIGH),
+//! [`NORMAL`](Priority::NORMAL), [`BACKGROUND`](Priority::BACKGROUND),
+//! [`IDLE`](Priority::IDLE)) cover common tiers, and any value 0–255 is valid
+//! for fine-grained control.
+
 use std::cmp::Ordering;
 use std::fmt;
 

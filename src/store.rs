@@ -1,3 +1,9 @@
+//! SQLite-backed persistence layer for the task queue and history.
+//!
+//! [`TaskStore`] manages the active task queue and completed/failed history
+//! in a single SQLite database. It handles deduplication, priority upgrades,
+//! retries, parent-child hierarchy, and automatic history pruning.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -7,8 +13,8 @@ use sqlx::{Row, SqlitePool};
 
 use crate::priority::Priority;
 use crate::task::{
-    HistoryStatus, SubmitOutcome, TaskHistoryRecord, TaskLookup, TaskRecord, TaskResult,
-    TaskStatus, TaskSubmission, TypeStats, MAX_PAYLOAD_BYTES,
+    HistoryStatus, ParentResolution, SubmitOutcome, TaskHistoryRecord, TaskLookup, TaskRecord,
+    TaskResult, TaskStatus, TaskSubmission, TypeStats, MAX_PAYLOAD_BYTES,
 };
 
 /// Serde-friendly error type for Tauri IPC and API boundaries.
@@ -79,7 +85,7 @@ impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             max_connections: 16,
-            retention_policy: None,
+            retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
             prune_interval: 100,
         }
     }
@@ -140,7 +146,7 @@ impl TaskStore {
 
         let store = Self {
             pool,
-            retention_policy: None,
+            retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
             prune_interval: 100,
             completion_count: std::sync::Arc::new(AtomicU64::new(0)),
         };
@@ -157,6 +163,8 @@ impl TaskStore {
     }
 
     /// Restart recovery: reset any `running` tasks back to `pending`.
+    /// `waiting` parents are left as-is — their children will be reset to
+    /// pending and will eventually re-trigger parent finalization.
     async fn recover_running(&self) -> Result<(), StoreError> {
         let result = sqlx::query(
             "UPDATE tasks SET status = 'pending', started_at = NULL WHERE status = 'running'",
@@ -210,10 +218,11 @@ impl TaskStore {
 
         let key = sub.effective_key();
         let priority = sub.priority.value() as i32;
+        let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&sub.task_type)
         .bind(&key)
@@ -221,6 +230,8 @@ impl TaskStore {
         .bind(&sub.payload)
         .bind(sub.expected_read_bytes)
         .bind(sub.expected_write_bytes)
+        .bind(sub.parent_id)
+        .bind(fail_fast_val)
         .execute(&self.pool)
         .await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT end");
@@ -294,9 +305,10 @@ impl TaskStore {
         for sub in submissions {
             let key = sub.effective_key();
             let priority = sub.priority.value() as i32;
+            let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
             let result = sqlx::query(
-                "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes)
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(&key)
@@ -304,6 +316,8 @@ impl TaskStore {
             .bind(&sub.payload)
             .bind(sub.expected_read_bytes)
             .bind(sub.expected_write_bytes)
+            .bind(sub.parent_id)
+            .bind(fail_fast_val)
             .execute(&mut *conn)
             .await?;
 
@@ -450,11 +464,12 @@ impl TaskStore {
         };
 
         // Insert into history.
+        let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
         sqlx::query(
             "INSERT INTO task_history (task_type, key, priority, status, payload,
                 expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
-                retry_count, last_error, created_at, started_at, duration_ms)
-             VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
+             VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.task_type)
         .bind(&task.key)
@@ -472,6 +487,8 @@ impl TaskStore {
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
         )
         .bind(duration_ms)
+        .bind(task.parent_id)
+        .bind(fail_fast_val)
         .execute(&mut *conn)
         .await?;
 
@@ -501,6 +518,7 @@ impl TaskStore {
         }
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn); // Release the pool connection before pruning.
         tracing::debug!(task_id = id, "store.complete: COMMIT ok");
 
         self.maybe_prune().await;
@@ -558,11 +576,12 @@ impl TaskStore {
                 None
             };
 
+            let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
             sqlx::query(
                 "INSERT INTO task_history (task_type, key, priority, status, payload,
                     expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
-                    retry_count, last_error, created_at, started_at, duration_ms)
-                 VALUES (?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
+                 VALUES (?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&task.task_type)
             .bind(&task.key)
@@ -577,6 +596,8 @@ impl TaskStore {
             .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
             .bind(task.started_at.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()))
             .bind(duration_ms)
+            .bind(task.parent_id)
+            .bind(fail_fast_val)
             .execute(&mut *conn)
             .await?;
 
@@ -587,6 +608,7 @@ impl TaskStore {
         }
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn); // Release the pool connection before pruning.
         tracing::debug!(task_id = id, "store.fail: COMMIT ok");
 
         self.maybe_prune().await;
@@ -829,7 +851,7 @@ impl TaskStore {
     /// Look up a task by its dedup key, checking the active queue first
     /// and falling back to history.
     ///
-    /// This is the low-level building block for [`Scheduler::task_lookup`].
+    /// This is the low-level building block for [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
     /// The `key` parameter is the pre-computed SHA-256 dedup key (as
     /// returned by [`generate_dedup_key`](crate::task::generate_dedup_key)
     /// or [`TaskSubmission::effective_key`]).
@@ -851,6 +873,146 @@ impl TaskStore {
             Some(r) => Ok(TaskLookup::History(row_to_history_record(&r))),
             None => Ok(TaskLookup::NotFound),
         }
+    }
+
+    // ── Hierarchy ───────────────────────────────────────────────────
+
+    /// Transition a running parent task to `waiting` status.
+    ///
+    /// Called after the parent's executor returns when it has spawned children.
+    pub async fn set_waiting(&self, id: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE tasks SET status = 'waiting', started_at = NULL WHERE id = ? AND status = 'running'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Transition a waiting parent task back to `running` for finalization.
+    pub async fn set_running_for_finalize(&self, id: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE tasks SET status = 'running', started_at = datetime('now') WHERE id = ? AND status = 'waiting'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Count of active (non-terminal) children for a parent task.
+    pub async fn active_children_count(&self, parent_id: i64) -> Result<i64, StoreError> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE parent_id = ?")
+            .bind(parent_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    /// List active children of a parent task.
+    pub async fn children(&self, parent_id: i64) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM tasks WHERE parent_id = ? ORDER BY id ASC")
+            .bind(parent_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
+    }
+
+    /// Count of children that completed successfully in history.
+    pub async fn completed_children_count(&self, parent_id: i64) -> Result<i64, StoreError> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_history WHERE parent_id = ? AND status = 'completed'",
+        )
+        .bind(parent_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0)
+    }
+
+    /// Count of children that failed permanently in history.
+    pub async fn failed_children_count(&self, parent_id: i64) -> Result<i64, StoreError> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_history WHERE parent_id = ? AND status = 'failed'",
+        )
+        .bind(parent_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0)
+    }
+
+    /// Cancel all active children of a parent task.
+    ///
+    /// Deletes pending/paused children from the active queue and returns the
+    /// IDs of running children (whose cancellation tokens the scheduler must
+    /// cancel separately).
+    pub async fn cancel_children(&self, parent_id: i64) -> Result<Vec<i64>, StoreError> {
+        // Collect IDs of running children (scheduler needs to cancel their tokens).
+        let running_rows =
+            sqlx::query("SELECT id FROM tasks WHERE parent_id = ? AND status = 'running'")
+                .bind(parent_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let running_ids: Vec<i64> = running_rows.iter().map(|r| r.get("id")).collect();
+
+        // Delete all non-running children from the active queue.
+        sqlx::query("DELETE FROM tasks WHERE parent_id = ? AND status IN ('pending', 'paused')")
+            .bind(parent_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(running_ids)
+    }
+
+    /// Atomically check whether a waiting parent is ready to finalize or has failed.
+    ///
+    /// Called after a child completes or fails. The parent must be in `waiting`
+    /// status for resolution to proceed.
+    pub async fn try_resolve_parent(
+        &self,
+        parent_id: i64,
+    ) -> Result<Option<ParentResolution>, StoreError> {
+        // Check the parent exists and is waiting.
+        let parent = self.task_by_id(parent_id).await?;
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        if parent.status != TaskStatus::Waiting {
+            return Ok(None);
+        }
+
+        let active_count = self.active_children_count(parent_id).await?;
+        if active_count > 0 {
+            return Ok(Some(ParentResolution::StillWaiting));
+        }
+
+        // All children are terminal — check for failures.
+        let failed_count = self.failed_children_count(parent_id).await?;
+        if failed_count > 0 {
+            return Ok(Some(ParentResolution::Failed(format!(
+                "{failed_count} child task(s) failed"
+            ))));
+        }
+
+        Ok(Some(ParentResolution::ReadyToFinalize))
+    }
+
+    /// Count of waiting tasks (parents waiting for children).
+    pub async fn waiting_count(&self) -> Result<i64, StoreError> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status = 'waiting'")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    /// Waiting tasks (parents waiting for children).
+    pub async fn waiting_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM tasks WHERE status = 'waiting' ORDER BY priority ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
     }
 
     // ── Pruning ─────────────────────────────────────────────────────
@@ -948,6 +1110,8 @@ fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
 
     let requeue_val: i32 = row.get("requeue");
     let requeue_priority_val: Option<i32> = row.get("requeue_priority");
+    let parent_id: Option<i64> = row.get("parent_id");
+    let fail_fast_val: i32 = row.get("fail_fast");
 
     TaskRecord {
         id: row.get("id"),
@@ -964,6 +1128,8 @@ fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         started_at: started_at_str.map(|s| parse_datetime(&s)),
         requeue: requeue_val != 0,
         requeue_priority: requeue_priority_val.map(|p| Priority::new(p as u8)),
+        parent_id,
+        fail_fast: fail_fast_val != 0,
     }
 }
 
@@ -973,6 +1139,8 @@ fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
     let created_at_str: String = row.get("created_at");
     let started_at_str: Option<String> = row.get("started_at");
     let completed_at_str: String = row.get("completed_at");
+    let parent_id: Option<i64> = row.get("parent_id");
+    let fail_fast_val: i32 = row.get("fail_fast");
 
     TaskHistoryRecord {
         id: row.get("id"),
@@ -991,6 +1159,8 @@ fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
         started_at: started_at_str.map(|s| parse_datetime(&s)),
         completed_at: parse_datetime(&completed_at_str),
         duration_ms: row.get("duration_ms"),
+        parent_id,
+        fail_fast: fail_fast_val != 0,
     }
 }
 
@@ -1010,6 +1180,8 @@ mod tests {
             payload: Some(b"hello".to_vec()),
             expected_read_bytes: 1000,
             expected_write_bytes: 500,
+            parent_id: None,
+            fail_fast: true,
         }
     }
 
@@ -1185,6 +1357,8 @@ mod tests {
             payload: None,
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
         };
         let sub_b = TaskSubmission {
             task_type: "type_b".into(),
@@ -1193,6 +1367,8 @@ mod tests {
             payload: None,
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
         };
 
         let first = store.submit(&sub_a).await.unwrap();
@@ -1214,6 +1390,8 @@ mod tests {
             payload: Some(b"same-data".to_vec()),
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
         };
 
         let first = store.submit(&sub).await.unwrap();
@@ -1719,6 +1897,8 @@ mod tests {
             payload: Some(vec![0u8; MAX_PAYLOAD_BYTES + 1]),
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
         };
 
         // The oversized payload should fail the entire batch — no partial inserts.
@@ -1728,5 +1908,246 @@ mod tests {
         // The first task should NOT have been committed (transaction rolled back).
         let count = store.pending_count().await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── Hierarchy tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn parent_child_relationship_persisted() {
+        let store = test_store().await;
+
+        // Submit parent.
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+
+        // Submit child with parent_id.
+        let mut child_sub = make_submission("child-1", Priority::NORMAL);
+        child_sub.parent_id = Some(parent_id);
+        let child_id = store.submit(&child_sub).await.unwrap().id().unwrap();
+
+        // Verify parent_id is persisted.
+        let child = store.task_by_id(child_id).await.unwrap().unwrap();
+        assert_eq!(child.parent_id, Some(parent_id));
+
+        // Parent has no parent_id.
+        let parent = store.task_by_id(parent_id).await.unwrap().unwrap();
+        assert_eq!(parent.parent_id, None);
+    }
+
+    #[tokio::test]
+    async fn active_children_count_tracks_children() {
+        let store = test_store().await;
+
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+
+        // No children yet.
+        assert_eq!(store.active_children_count(parent_id).await.unwrap(), 0);
+
+        // Add two children.
+        for i in 0..2 {
+            let mut sub = make_submission(&format!("child-{i}"), Priority::NORMAL);
+            sub.parent_id = Some(parent_id);
+            store.submit(&sub).await.unwrap();
+        }
+        assert_eq!(store.active_children_count(parent_id).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn set_waiting_and_waiting_tasks() {
+        let store = test_store().await;
+
+        let sub = make_submission("waiter", Priority::NORMAL);
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        store.set_waiting(task.id).await.unwrap();
+
+        let t = store.task_by_id(task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Waiting);
+
+        let waiting = store.waiting_tasks().await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(store.waiting_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn try_resolve_parent_ready_to_finalize() {
+        let store = test_store().await;
+
+        // Create parent, pop it, set to waiting.
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        store.pop_next().await.unwrap();
+        store.set_waiting(parent_id).await.unwrap();
+
+        // Create and complete a child.
+        let mut child_sub = make_submission("child", Priority::NORMAL);
+        child_sub.parent_id = Some(parent_id);
+        store.submit(&child_sub).await.unwrap();
+        let child = store.pop_next().await.unwrap().unwrap();
+        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+
+        // Parent should be ready to finalize.
+        let resolution = store.try_resolve_parent(parent_id).await.unwrap();
+        assert_eq!(resolution, Some(ParentResolution::ReadyToFinalize));
+    }
+
+    #[tokio::test]
+    async fn try_resolve_parent_still_waiting() {
+        let store = test_store().await;
+
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        store.pop_next().await.unwrap();
+        store.set_waiting(parent_id).await.unwrap();
+
+        // Create two children, complete only one.
+        for i in 0..2 {
+            let mut sub = make_submission(&format!("child-{i}"), Priority::NORMAL);
+            sub.parent_id = Some(parent_id);
+            store.submit(&sub).await.unwrap();
+        }
+        let child = store.pop_next().await.unwrap().unwrap();
+        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+
+        let resolution = store.try_resolve_parent(parent_id).await.unwrap();
+        assert_eq!(resolution, Some(ParentResolution::StillWaiting));
+    }
+
+    #[tokio::test]
+    async fn try_resolve_parent_failed() {
+        let store = test_store().await;
+
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        store.pop_next().await.unwrap();
+        store.set_waiting(parent_id).await.unwrap();
+
+        // Create child, fail it permanently.
+        let mut child_sub = make_submission("child", Priority::NORMAL);
+        child_sub.parent_id = Some(parent_id);
+        store.submit(&child_sub).await.unwrap();
+        let child = store.pop_next().await.unwrap().unwrap();
+        store.fail(child.id, "boom", false, 0, 0, 0).await.unwrap();
+
+        let resolution = store.try_resolve_parent(parent_id).await.unwrap();
+        assert_eq!(
+            resolution,
+            Some(ParentResolution::Failed("1 child task(s) failed".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_children_removes_pending_returns_running() {
+        let store = test_store().await;
+
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+
+        // Pop the parent first so it's running (it was submitted first).
+        let _parent = store.pop_next().await.unwrap().unwrap();
+
+        // Create 3 children.
+        for i in 0..3 {
+            let mut sub = make_submission(&format!("child-{i}"), Priority::NORMAL);
+            sub.parent_id = Some(parent_id);
+            store.submit(&sub).await.unwrap();
+        }
+
+        // Pop one child so it's running.
+        let running_child = store.pop_next().await.unwrap().unwrap();
+
+        // Cancel children.
+        let running_ids = store.cancel_children(parent_id).await.unwrap();
+        assert_eq!(running_ids.len(), 1);
+        assert_eq!(running_ids[0], running_child.id);
+
+        // Pending children should be deleted.
+        assert_eq!(store.active_children_count(parent_id).await.unwrap(), 1);
+        // Only the running one remains.
+    }
+
+    #[tokio::test]
+    async fn parent_id_persisted_in_history() {
+        let store = test_store().await;
+
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+
+        // Pop the parent first (it was submitted first, same priority).
+        let _parent = store.pop_next().await.unwrap().unwrap();
+
+        let mut child_sub = make_submission("child", Priority::NORMAL);
+        child_sub.parent_id = Some(parent_id);
+        store.submit(&child_sub).await.unwrap();
+        let child = store.pop_next().await.unwrap().unwrap();
+
+        store.complete(child.id, &TaskResult::zero()).await.unwrap();
+
+        // Check history record has parent_id.
+        let hist = store.history(10, 0).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].parent_id, Some(parent_id));
+    }
+
+    #[tokio::test]
+    async fn fail_fast_field_persisted() {
+        let store = test_store().await;
+
+        let mut sub = make_submission("ff", Priority::NORMAL);
+        sub.fail_fast = false;
+        store.submit(&sub).await.unwrap();
+
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert!(!task.fail_fast);
+
+        store.complete(task.id, &TaskResult::zero()).await.unwrap();
+
+        let hist = store.history(10, 0).await.unwrap();
+        assert!(!hist[0].fail_fast);
+    }
+
+    #[tokio::test]
+    async fn set_running_for_finalize() {
+        let store = test_store().await;
+
+        let sub = make_submission("fin", Priority::NORMAL);
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.set_waiting(task.id).await.unwrap();
+
+        store.set_running_for_finalize(task.id).await.unwrap();
+        let t = store.task_by_id(task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Running);
+        assert!(t.started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn recover_preserves_waiting_parents() {
+        let store = test_store().await;
+
+        // Create a parent and a child.
+        let parent_sub = make_submission("parent", Priority::NORMAL);
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        store.pop_next().await.unwrap();
+        store.set_waiting(parent_id).await.unwrap();
+
+        let mut child_sub = make_submission("child", Priority::NORMAL);
+        child_sub.parent_id = Some(parent_id);
+        store.submit(&child_sub).await.unwrap();
+        let child = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(child.status, TaskStatus::Running);
+
+        // Simulate crash recovery.
+        store.recover_running().await.unwrap();
+
+        // Parent should still be waiting.
+        let parent = store.task_by_id(parent_id).await.unwrap().unwrap();
+        assert_eq!(parent.status, TaskStatus::Waiting);
+
+        // Child should be reset to pending.
+        let child = store.task_by_id(child.id).await.unwrap().unwrap();
+        assert_eq!(child.status, TaskStatus::Pending);
     }
 }

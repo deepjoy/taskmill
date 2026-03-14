@@ -1,3 +1,9 @@
+//! Dispatch gate: admission control for task dispatch.
+//!
+//! The [`DispatchGate`] trait decides whether a popped task should run or be
+//! requeued. The built-in [`DefaultDispatchGate`] applies backpressure
+//! throttling and IO-budget checks.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

@@ -1,3 +1,11 @@
+//! Executor registration, shared state, and the [`TaskContext`] passed to each task.
+//!
+//! Register one [`TaskExecutor`] per task type with the scheduler. At dispatch
+//! time the scheduler looks up the executor by name and calls
+//! [`execute`](TaskExecutor::execute) with a [`TaskContext`] containing the
+//! persisted record, a cancellation token, a progress reporter, and any
+//! shared application state.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -7,7 +15,8 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::scheduler::ProgressReporter;
-use crate::task::{TaskError, TaskRecord, TaskResult, TypedTask};
+use crate::store::{StoreError, TaskStore};
+use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskResult, TaskSubmission, TypedTask};
 
 // ── State Map ────────────────────────────────────────────────────────
 
@@ -21,7 +30,7 @@ use crate::task::{TaskError, TaskRecord, TaskResult, TypedTask};
 /// so that library consumers (e.g. shoebox inside a Tauri app) can inject
 /// state after the scheduler has been constructed by the parent.
 #[derive(Default)]
-pub struct StateMap {
+pub(crate) struct StateMap {
     inner: RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
@@ -69,6 +78,56 @@ impl StateMap {
     }
 }
 
+// ── Child Spawner ────────────────────────────────────────────────
+
+/// Handle for spawning child tasks from within an executor.
+///
+/// Wraps a [`TaskStore`] reference and the parent task ID so that
+/// child submissions automatically inherit the parent relationship.
+/// Holds a `Notify` reference to wake the scheduler run loop after
+/// spawning, so children are dispatched promptly.
+#[derive(Clone)]
+pub(crate) struct ChildSpawner {
+    store: TaskStore,
+    parent_id: i64,
+    work_notify: Arc<tokio::sync::Notify>,
+}
+
+impl ChildSpawner {
+    pub(crate) fn new(
+        store: TaskStore,
+        parent_id: i64,
+        work_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            store,
+            parent_id,
+            work_notify,
+        }
+    }
+
+    /// Submit a single child task. Sets `parent_id` automatically.
+    pub async fn spawn(&self, mut sub: TaskSubmission) -> Result<SubmitOutcome, StoreError> {
+        sub.parent_id = Some(self.parent_id);
+        let outcome = self.store.submit(&sub).await?;
+        self.work_notify.notify_one();
+        Ok(outcome)
+    }
+
+    /// Submit multiple child tasks in a single transaction.
+    pub async fn spawn_batch(
+        &self,
+        submissions: &mut [TaskSubmission],
+    ) -> Result<Vec<SubmitOutcome>, StoreError> {
+        for sub in submissions.iter_mut() {
+            sub.parent_id = Some(self.parent_id);
+        }
+        let outcomes = self.store.submit_batch(submissions).await?;
+        self.work_notify.notify_one();
+        Ok(outcomes)
+    }
+}
+
 // ── Task Context ─────────────────────────────────────────────────────
 
 /// Execution context passed to a [`TaskExecutor`].
@@ -84,8 +143,10 @@ pub struct TaskContext {
     pub token: CancellationToken,
     /// Report progress back to the scheduler (0.0–1.0).
     pub progress: ProgressReporter,
-    /// Shared application state set via [`SchedulerBuilder::app_state`].
+    /// Shared application state set via [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
     pub(crate) app_state: StateSnapshot,
+    /// Spawner for creating child tasks. `None` for non-hierarchical contexts.
+    pub(crate) child_spawner: Option<ChildSpawner>,
 }
 
 impl TaskContext {
@@ -98,7 +159,8 @@ impl TaskContext {
     }
 
     /// Retrieve shared application state registered via
-    /// [`SchedulerBuilder::app_state`] or [`Scheduler::register_state`].
+    /// [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state) or
+    /// [`Scheduler::register_state`](crate::Scheduler::register_state).
     ///
     /// Returns `None` if the type was never registered. Multiple types can
     /// coexist — each is keyed by its concrete `TypeId`.
@@ -114,6 +176,31 @@ impl TaskContext {
     /// ```
     pub fn state<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.app_state.get::<T>()
+    }
+
+    /// Spawn a child task that will be tracked under this task as parent.
+    ///
+    /// The child's `parent_id` is set automatically. Returns the submit
+    /// outcome, or `None` if this context was not created with hierarchy
+    /// support (should not happen in normal scheduler operation).
+    pub async fn spawn_child(&self, sub: TaskSubmission) -> Result<SubmitOutcome, StoreError> {
+        let spawner = self
+            .child_spawner
+            .as_ref()
+            .expect("spawn_child called on a context without ChildSpawner");
+        spawner.spawn(sub).await
+    }
+
+    /// Spawn multiple child tasks in a single transaction.
+    pub async fn spawn_children(
+        &self,
+        mut submissions: Vec<TaskSubmission>,
+    ) -> Result<Vec<SubmitOutcome>, StoreError> {
+        let spawner = self
+            .child_spawner
+            .as_ref()
+            .expect("spawn_children called on a context without ChildSpawner");
+        spawner.spawn_batch(&mut submissions).await
     }
 }
 
@@ -156,6 +243,21 @@ pub trait TaskExecutor: Send + Sync + 'static {
         &'a self,
         ctx: &'a TaskContext,
     ) -> impl Future<Output = Result<TaskResult, TaskError>> + Send + 'a;
+
+    /// Called after all children of a parent task have completed.
+    ///
+    /// Only invoked for tasks that spawned children via
+    /// [`TaskContext::spawn_child`]. The default implementation is a no-op
+    /// that returns zero IO bytes.
+    ///
+    /// Use this for cleanup or assembly work (e.g. calling
+    /// `CompleteMultipartUpload` after all parts have been uploaded).
+    fn finalize<'a>(
+        &'a self,
+        _ctx: &'a TaskContext,
+    ) -> impl Future<Output = Result<TaskResult, TaskError>> + Send + 'a {
+        async { Ok(TaskResult::zero()) }
+    }
 }
 
 /// Registry mapping task type names to their executors.
@@ -176,6 +278,11 @@ pub(crate) trait ErasedExecutor: Send + Sync + 'static {
         &'a self,
         ctx: &'a TaskContext,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>>;
+
+    fn finalize_erased<'a>(
+        &'a self,
+        ctx: &'a TaskContext,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>>;
 }
 
 impl<T: TaskExecutor> ErasedExecutor for T {
@@ -185,9 +292,17 @@ impl<T: TaskExecutor> ErasedExecutor for T {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>> {
         Box::pin(self.execute(ctx))
     }
+
+    fn finalize_erased<'a>(
+        &'a self,
+        ctx: &'a TaskContext,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>> {
+        Box::pin(self.finalize(ctx))
+    }
 }
 
 impl TaskTypeRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self {
             types: HashMap::new(),
@@ -221,6 +336,7 @@ impl TaskTypeRegistry {
         self.types.len()
     }
 
+    /// Returns `true` if no executors have been registered.
     pub fn is_empty(&self) -> bool {
         self.types.is_empty()
     }

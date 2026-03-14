@@ -1,3 +1,8 @@
+//! Cross-platform resource sampler using the [`sysinfo`](https://docs.rs/sysinfo) crate.
+//!
+//! Tracks CPU utilization and aggregate disk IO throughput across all mounted
+//! disks. Gated behind the `sysinfo-monitor` feature (enabled by default).
+
 use std::time::Instant;
 
 use sysinfo::{Disks, System};
@@ -17,6 +22,7 @@ pub struct SysinfoSampler {
 }
 
 impl SysinfoSampler {
+    /// Create a new sampler, taking an initial CPU and disk reading.
     pub fn new() -> Self {
         let mut sys = System::new();
         sys.refresh_cpu_usage();

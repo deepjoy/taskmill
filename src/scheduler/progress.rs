@@ -1,3 +1,9 @@
+//! Progress reporting and throughput-based extrapolation.
+//!
+//! Executors call [`ProgressReporter::report`] to emit percentage updates.
+//! The scheduler combines these with historical throughput data to produce
+//! [`EstimatedProgress`] snapshots for dashboard UIs.
+
 use serde::{Deserialize, Serialize};
 
 use crate::store::TaskStore;
@@ -9,8 +15,22 @@ use super::SchedulerEvent;
 
 /// Handle passed to executors for reporting progress back to the scheduler.
 ///
-/// Progress reports are emitted as `SchedulerEvent::Progress` events,
-/// making them available to the UI via the same broadcast channel.
+/// Progress reports are emitted as [`SchedulerEvent::Progress`]
+/// events, making them available to the UI via the same broadcast channel.
+///
+/// # Example
+///
+/// ```ignore
+/// // Inside a TaskExecutor::execute implementation:
+/// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+///     let items = vec![/* ... */];
+///     for (i, item) in items.iter().enumerate() {
+///         // process item...
+///         ctx.progress.report_fraction(i as u64 + 1, items.len() as u64, None);
+///     }
+///     Ok(TaskResult { actual_read_bytes: 0, actual_write_bytes: 0 })
+/// }
+/// ```
 #[derive(Clone)]
 pub struct ProgressReporter {
     task_id: i64,
