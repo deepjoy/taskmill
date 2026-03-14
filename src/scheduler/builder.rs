@@ -139,6 +139,18 @@ impl SchedulerBuilder {
         self
     }
 
+    /// Enable byte-level progress reporting at the given interval.
+    ///
+    /// When set, a background ticker task polls active tasks' byte counters
+    /// and emits [`TaskProgress`](super::TaskProgress) events on a dedicated
+    /// channel (via [`Scheduler::subscribe_progress`](super::Scheduler::subscribe_progress)).
+    ///
+    /// Default: `None` (disabled). Typical value: `Duration::from_millis(250)`.
+    pub fn progress_interval(mut self, interval: Duration) -> Self {
+        self.config.progress_interval = Some(interval);
+        self
+    }
+
     /// Add a backpressure source (used by the default gate).
     pub fn pressure_source(
         mut self,

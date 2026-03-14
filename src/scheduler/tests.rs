@@ -8,7 +8,7 @@ use crate::registry::{TaskContext, TaskExecutor, TaskTypeRegistry};
 use crate::store::TaskStore;
 use crate::task::{SubmitOutcome, TaskError, TaskSubmission};
 
-use super::{Scheduler, SchedulerConfig, SchedulerEvent};
+use super::{Scheduler, SchedulerConfig, SchedulerEvent, TaskProgress};
 
 struct InstantExecutor;
 
@@ -704,4 +704,186 @@ async fn no_children_completes_normally() {
     let key = crate::task::generate_dedup_key("test", Some(b"no-kids"));
     let lookup = sched.store().task_lookup(&key).await.unwrap();
     assert!(matches!(lookup, crate::task::TaskLookup::History(_)));
+}
+
+// ── Byte-level progress tests ─────────────────────────────────────
+
+/// An executor that reports byte-level progress incrementally.
+struct ByteProgressExecutor;
+
+impl TaskExecutor for ByteProgressExecutor {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        ctx.set_bytes_total(1_048_576);
+        for _ in 0..1024 {
+            ctx.add_bytes(1024);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn byte_progress_events_received() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
+
+    let config = SchedulerConfig {
+        progress_interval: Some(Duration::from_millis(50)),
+        ..Default::default()
+    };
+
+    let sched = Scheduler::new(
+        store,
+        config,
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let mut progress_rx = sched.subscribe_progress();
+
+    sched
+        .submit(&TaskSubmission::new("byte-test").key("bp1"))
+        .await
+        .unwrap();
+
+    // Run the scheduler.
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let handle = tokio::spawn(async move {
+        sched_clone.run(token_clone).await;
+    });
+
+    // Collect progress events.
+    let mut events: Vec<TaskProgress> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(evt)) = tokio::time::timeout(Duration::from_millis(200), progress_rx.recv()).await {
+            events.push(evt);
+            if events.len() >= 3 {
+                break;
+            }
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    // Should have received at least a few events.
+    assert!(
+        events.len() >= 2,
+        "expected at least 2 progress events, got {}",
+        events.len()
+    );
+
+    // bytes_completed should be increasing.
+    for window in events.windows(2) {
+        assert!(window[1].bytes_completed >= window[0].bytes_completed);
+    }
+
+    // bytes_total should be set.
+    assert_eq!(events[0].bytes_total, Some(1_048_576));
+
+    // Later events should have non-zero throughput.
+    let last = events.last().unwrap();
+    assert!(last.throughput_bps > 0.0, "expected non-zero throughput");
+}
+
+#[tokio::test]
+async fn lifecycle_events_not_polluted_by_byte_progress() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
+
+    let config = SchedulerConfig {
+        progress_interval: Some(Duration::from_millis(50)),
+        ..Default::default()
+    };
+
+    let sched = Scheduler::new(
+        store,
+        config,
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let mut lifecycle_rx = sched.subscribe();
+
+    sched
+        .submit(&TaskSubmission::new("byte-test").key("bp-lifecycle"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let handle = tokio::spawn(async move {
+        sched_clone.run(token_clone).await;
+    });
+
+    // Collect lifecycle events until Completed.
+    let mut lifecycle_events = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(evt)) = tokio::time::timeout(Duration::from_millis(200), lifecycle_rx.recv()).await {
+            let is_completed = matches!(evt, SchedulerEvent::Completed(..));
+            lifecycle_events.push(evt);
+            if is_completed {
+                break;
+            }
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    // Lifecycle events should only be Dispatched + Completed (no byte-level progress).
+    // There may be percent-based Progress events too, but no TaskProgress type in
+    // the lifecycle channel.
+    for evt in &lifecycle_events {
+        assert!(
+            matches!(
+                evt,
+                SchedulerEvent::Dispatched(..)
+                    | SchedulerEvent::Completed(..)
+                    | SchedulerEvent::Progress { .. }
+            ),
+            "unexpected lifecycle event: {evt:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn byte_progress_in_snapshot() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
+
+    let sched = Scheduler::new(
+        store,
+        SchedulerConfig::default(),
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    sched
+        .submit(&TaskSubmission::new("byte-test").key("bp-snap"))
+        .await
+        .unwrap();
+
+    sched.try_dispatch().await.unwrap();
+    // Let the executor run a bit so bytes are reported.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let snap = sched.snapshot().await.unwrap();
+    assert!(
+        !snap.byte_progress.is_empty(),
+        "expected byte_progress in snapshot"
+    );
+    assert_eq!(snap.byte_progress[0].bytes_total, Some(1_048_576));
+    assert!(snap.byte_progress[0].bytes_completed > 0);
 }

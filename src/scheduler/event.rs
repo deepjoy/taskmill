@@ -5,7 +5,7 @@ use tokio::time::Duration;
 
 use crate::priority::Priority;
 
-use super::progress::EstimatedProgress;
+use super::progress::{EstimatedProgress, TaskProgress};
 
 // ── Snapshot ────────────────────────────────────────────────────────
 
@@ -31,6 +31,8 @@ pub struct SchedulerSnapshot {
     pub pressure_breakdown: Vec<(String, f32)>,
     /// Current maximum concurrency setting.
     pub max_concurrency: usize,
+    /// Byte-level progress for tasks reporting transfer progress.
+    pub byte_progress: Vec<TaskProgress>,
     /// Whether the scheduler is globally paused.
     pub is_paused: bool,
 }
@@ -158,6 +160,11 @@ pub struct SchedulerConfig {
     pub throughput_sample_size: i32,
     /// Shutdown behavior. Default: [`ShutdownMode::Hard`].
     pub shutdown_mode: ShutdownMode,
+    /// Interval for byte-level progress ticker. `None` (default) disables it.
+    ///
+    /// When set, a background task polls active tasks' byte counters at this
+    /// interval and emits [`TaskProgress`] events on a dedicated channel.
+    pub progress_interval: Option<Duration>,
 }
 
 impl Default for SchedulerConfig {
@@ -169,6 +176,7 @@ impl Default for SchedulerConfig {
             poll_interval: Duration::from_millis(500),
             throughput_sample_size: 20,
             shutdown_mode: ShutdownMode::Hard,
+            progress_interval: None,
         }
     }
 }
