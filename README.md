@@ -12,11 +12,10 @@ throughput.
 
 ```rust
 use std::sync::Arc;
-use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use taskmill::{
     Scheduler, Priority, TaskSubmission, TaskExecutor,
-    TaskContext, TaskResult, TaskError, ShutdownMode,
+    TaskContext, TaskError,
 };
 
 struct ThumbnailGenerator;
@@ -24,9 +23,11 @@ struct ThumbnailGenerator;
 impl TaskExecutor for ThumbnailGenerator {
     async fn execute<'a>(
         &'a self, ctx: &'a TaskContext,
-    ) -> Result<TaskResult, TaskError> {
-        ctx.progress.report(0.5, Some("resizing".into()));
-        Ok(TaskResult { actual_read_bytes: 4096, actual_write_bytes: 1024 })
+    ) -> Result<(), TaskError> {
+        ctx.progress().report(0.5, Some("resizing".into()));
+        ctx.record_read_bytes(4096);
+        ctx.record_write_bytes(1024);
+        Ok(())
     }
 }
 
@@ -41,12 +42,11 @@ async fn main() {
         .await
         .unwrap();
 
-    scheduler.submit(&TaskSubmission::with_payload(
-        "thumbnail",
-        Priority::NORMAL,
-        &serde_json::json!({"path": "/photos/img.jpg"}),
-        4096, 1024,
-    ).unwrap()).await.unwrap();
+    let sub = TaskSubmission::new("thumbnail")
+        .payload_json(&serde_json::json!({"path": "/photos/img.jpg"}))
+        .unwrap()
+        .expected_io(4096, 1024);
+    scheduler.submit(&sub).await.unwrap();
 
     let token = CancellationToken::new();
     scheduler.run(token).await;

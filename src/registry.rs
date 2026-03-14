@@ -164,36 +164,45 @@ impl IoTracker {
 
 /// Execution context passed to a [`TaskExecutor`].
 ///
-/// Bundles the task record, cancellation token, progress reporter, and
-/// optional application state into a single value. This keeps the executor
-/// signature stable when new contextual data is added in the future.
+/// Provides access to the task record, cancellation token, progress reporter,
+/// shared application state, and scoped task submission. Use the accessor
+/// methods rather than accessing fields directly:
+///
+/// - [`record()`](Self::record) — the full [`TaskRecord`] with payload, priority, etc.
+/// - [`token()`](Self::token) — [`CancellationToken`] for preemption support
+/// - [`progress()`](Self::progress) — [`ProgressReporter`] for reporting progress
+/// - [`submit()`](Self::submit) / [`submit_typed()`](Self::submit_typed) — submit continuation tasks
+/// - [`spawn_child()`](Self::spawn_child) — spawn hierarchical child tasks
 pub struct TaskContext {
-    /// The full task record including payload, priority, and IO estimates.
-    pub record: TaskRecord,
-    /// Cancelled when the task is preempted. Check `token.is_cancelled()`
-    /// at natural yield points and return early if set.
-    pub token: CancellationToken,
-    /// Report progress back to the scheduler (0.0–1.0).
-    pub progress: ProgressReporter,
-    /// Handle to the scheduler that dispatched this task. Allows executors to
-    /// submit continuation tasks, look up other tasks, etc. without needing
-    /// a separate `OnceLock` or `Arc<Scheduler>` in application state.
-    pub scheduler: Scheduler,
-    /// Shared application state set via [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
+    pub(crate) record: TaskRecord,
+    pub(crate) token: CancellationToken,
+    pub(crate) progress: ProgressReporter,
+    pub(crate) scheduler: Scheduler,
     pub(crate) app_state: StateSnapshot,
-    /// Spawner for creating child tasks via [`spawn_child`](Self::spawn_child)
-    /// and [`spawn_children`](Self::spawn_children). Present for all tasks
-    /// dispatched by the scheduler — the parent relationship is set automatically
-    /// when children are spawned.
     pub(crate) child_spawner: Option<ChildSpawner>,
-    /// IO bytes accumulator fed by [`record_read_bytes`](Self::record_read_bytes)
-    /// and [`record_write_bytes`](Self::record_write_bytes). The scheduler reads
-    /// the final totals after the executor returns and stores them in history
-    /// for future IO budget estimation.
     pub(crate) io: Arc<IoTracker>,
 }
 
 impl TaskContext {
+    // ── Accessors ────────────────────────────────────────────────────
+
+    /// The persisted task record (id, key, priority, payload, etc.).
+    pub fn record(&self) -> &TaskRecord {
+        &self.record
+    }
+
+    /// Cancellation token — check `token().is_cancelled()` for preemption.
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    /// Progress reporter for this task.
+    pub fn progress(&self) -> &ProgressReporter {
+        &self.progress
+    }
+
+    // ── Payload ──────────────────────────────────────────────────────
+
     /// Deserialize the payload as a [`TypedTask`].
     ///
     /// Returns an error if the payload is missing or deserialization fails.
@@ -215,14 +224,7 @@ impl TaskContext {
             .ok_or_else(|| TaskError::new("missing payload"))
     }
 
-    /// Deserialize the payload as a [`TypedTask`].
-    ///
-    /// Convenience wrapper around [`TaskRecord::deserialize_payload`] that
-    /// mirrors the typed submission API.
-    #[deprecated(since = "2.0.0", note = "use `ctx.payload::<T>()` instead")]
-    pub fn deserialize_typed<T: TypedTask>(&self) -> Result<Option<T>, serde_json::Error> {
-        self.record.deserialize_payload()
-    }
+    // ── Shared state ─────────────────────────────────────────────────
 
     /// Retrieve shared application state registered via
     /// [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state) or
@@ -244,6 +246,8 @@ impl TaskContext {
         self.app_state.get::<T>()
     }
 
+    // ── IO tracking ──────────────────────────────────────────────────
+
     /// Record actual bytes read during this task's execution.
     ///
     /// Can be called multiple times — values are accumulated. The scheduler
@@ -259,6 +263,34 @@ impl TaskContext {
     pub fn record_write_bytes(&self, bytes: i64) {
         self.io.write_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
+
+    // ── Task submission (scoped scheduler access) ────────────────────
+
+    /// Submit a continuation or follow-up task.
+    ///
+    /// This is the primary way to enqueue new work from inside an executor
+    /// without exposing the full [`Scheduler`](crate::Scheduler) handle.
+    pub async fn submit(&self, sub: &TaskSubmission) -> Result<SubmitOutcome, StoreError> {
+        self.scheduler.submit(sub).await
+    }
+
+    /// Submit a [`TypedTask`], handling serialization automatically.
+    ///
+    /// Uses the priority from [`TypedTask::priority()`].
+    pub async fn submit_typed<T: TypedTask>(&self, task: &T) -> Result<SubmitOutcome, StoreError> {
+        self.scheduler.submit_typed(task).await
+    }
+
+    /// Submit a [`TypedTask`] with an explicit priority override.
+    pub async fn submit_typed_at<T: TypedTask>(
+        &self,
+        task: &T,
+        priority: crate::Priority,
+    ) -> Result<SubmitOutcome, StoreError> {
+        self.scheduler.submit_typed_at(task, priority).await
+    }
+
+    // ── Child tasks ──────────────────────────────────────────────────
 
     /// Spawn a child task that will be tracked under this task as parent.
     ///
@@ -308,7 +340,7 @@ impl TaskContext {
 ///         &'a self,
 ///         ctx: &'a TaskContext,
 ///     ) -> Result<(), TaskError> {
-///         ctx.progress.report(0.5, Some("halfway".into()));
+///         ctx.progress().report(0.5, Some("halfway".into()));
 ///         Ok(())
 ///     }
 /// }

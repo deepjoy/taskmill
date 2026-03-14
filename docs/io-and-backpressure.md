@@ -9,25 +9,18 @@ Taskmill combines two independent gating mechanisms — IO budget tracking and c
 Every `TaskSubmission` includes expected IO:
 
 ```rust
-let sub = TaskSubmission {
-    task_type: "scan".into(),
-    key: None,
-    priority: Priority::NORMAL,
-    payload: Some(data),
-    expected_read_bytes: 50_000,   // caller's estimate
-    expected_write_bytes: 10_000,
-};
+let sub = TaskSubmission::new("scan")
+    .payload_raw(data)
+    .expected_io(50_000, 10_000);  // caller's estimate
 ```
 
 ### Completion actuals
 
-Executors report actual IO in `TaskResult`:
+Executors report actual IO via context methods during execution:
 
 ```rust
-Ok(TaskResult {
-    actual_read_bytes: 48_312,
-    actual_write_bytes: 9_876,
-})
+ctx.record_read_bytes(48_312);
+ctx.record_write_bytes(9_876);
 ```
 
 Actual values are stored in `task_history` for learning.

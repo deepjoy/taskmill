@@ -15,11 +15,14 @@ Holds pending, running, and paused tasks.
 | `id` | INTEGER PRIMARY KEY | Insertion-order ID |
 | `task_type` | TEXT NOT NULL | Executor lookup name |
 | `key` | TEXT NOT NULL UNIQUE | SHA-256 dedup key |
+| `label` | TEXT NOT NULL | Human-readable display name (original dedup key or task type) |
 | `priority` | INTEGER NOT NULL | 0–255 (lower = higher priority) |
-| `status` | TEXT DEFAULT 'pending' | `pending`, `running`, or `paused` |
+| `status` | TEXT DEFAULT 'pending' | `pending`, `running`, `paused`, or `waiting` |
 | `payload` | BLOB | Opaque task data (max 1 MiB) |
 | `expected_read_bytes` | INTEGER | Estimated read IO |
 | `expected_write_bytes` | INTEGER | Estimated write IO |
+| `parent_id` | INTEGER | Parent task ID for child tasks (NULL for top-level) |
+| `fail_fast` | INTEGER DEFAULT 1 | Whether child failure cancels siblings and fails parent |
 | `retry_count` | INTEGER DEFAULT 0 | Number of retries so far |
 | `last_error` | TEXT | Most recent error message |
 | `created_at` | TEXT | ISO 8601 timestamp |
@@ -31,7 +34,7 @@ Holds pending, running, and paused tasks.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| *(all columns from `tasks`)* | | |
+| *(all columns from `tasks`, including `label`, `parent_id`, `fail_fast`)* | | |
 | `actual_read_bytes` | INTEGER | Reported by executor |
 | `actual_write_bytes` | INTEGER | Reported by executor |
 | `completed_at` | TEXT | ISO 8601 timestamp |
@@ -61,29 +64,33 @@ This resets any tasks that were mid-execution when the process died. The behavio
 
 Every task gets a SHA-256 key: `SHA-256(task_type + ":" + (explicit_key OR payload))`.
 
-- **Implicit key** — if no `key` is provided, the payload bytes are used. Tasks with the same type and payload get the same key.
-- **Explicit key** — set `TaskSubmission.key` to control deduplication yourself. Useful when two payloads represent the same logical work (e.g., different timestamps but same file path).
+- **Implicit key** — if no key is provided, the payload bytes are used. Tasks with the same type and payload get the same key.
+- **Explicit key** — use the `.key()` builder method to control deduplication yourself. Useful when two payloads represent the same logical work (e.g., different timestamps but same file path). The explicit key is also stored as the display `label`.
 - **Type scoping** — the task type is always part of the hash, so `("resize", payload)` and `("compress", payload)` never collide.
 
 ### Lifecycle
 
-A key is "occupied" while the task is in the `tasks` table (pending, running, paused, or retrying). When the task moves to `task_history` (completed or failed), the key is freed and can be resubmitted.
+A key is "occupied" while the task is in the `tasks` table (pending, running, paused, waiting, or retrying). When the task moves to `task_history` (completed or failed), the key is freed and can be resubmitted.
 
 ### Submission behavior
 
 ```rust
-// Returns Some(id) if inserted
-let id = scheduler.submit(&submission).await?;  // Ok(Some(42))
+use taskmill::SubmitOutcome;
 
-// Returns None if a task with the same key already exists
-let id = scheduler.submit(&submission).await?;  // Ok(None)
+let outcome = scheduler.submit(&submission).await?;
+match outcome {
+    SubmitOutcome::Inserted(id) => println!("new task: {id}"),
+    SubmitOutcome::Duplicate => println!("already queued"),
+    SubmitOutcome::Upgraded(id) => println!("priority upgraded: {id}"),
+    SubmitOutcome::Requeued(id) => println!("requeued from history: {id}"),
+}
 ```
 
 `submit_batch()` applies the same dedup within a single transaction:
 
 ```rust
-let ids = scheduler.submit_batch(&[sub1, sub2, sub3]).await?;
-// ids = [Some(1), None, Some(2)]  — sub2 was a duplicate
+let outcomes = scheduler.submit_batch(&[sub1, sub2, sub3]).await?;
+// outcomes: Vec<SubmitOutcome>  — sub2 might be Duplicate
 ```
 
 ### Looking up tasks by dedup key

@@ -114,16 +114,10 @@ impl Default for StoreConfig {
 /// let store = TaskStore::open_memory().await?;
 ///
 /// // Submit a task.
-/// let sub = TaskSubmission {
-///     task_type: "thumbnail".into(),
-///     dedup_key: Some("photo-1".into()),
-///     priority: Priority::NORMAL,
-///     payload: Some(br#"{"path":"/a.jpg"}"#.to_vec()),
-///     expected_read_bytes: 4096,
-///     expected_write_bytes: 1024,
-///     parent_id: None,
-///     fail_fast: true,
-/// };
+/// let sub = TaskSubmission::new("thumbnail")
+///     .key("photo-1")
+///     .payload_raw(br#"{"path":"/a.jpg"}"#.to_vec())
+///     .expected_io(4096, 1024);
 /// let outcome = store.submit(&sub).await?;
 /// assert!(outcome.is_inserted());
 ///
@@ -204,6 +198,9 @@ impl TaskStore {
         sqlx::raw_sql(include_str!("../migrations/001_tasks.sql"))
             .execute(&self.pool)
             .await?;
+        sqlx::raw_sql(include_str!("../migrations/002_add_label.sql"))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -266,11 +263,12 @@ impl TaskStore {
         let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&sub.task_type)
         .bind(&key)
+        .bind(&sub.label)
         .bind(priority)
         .bind(&sub.payload)
         .bind(sub.expected_read_bytes)
@@ -352,11 +350,12 @@ impl TaskStore {
             let priority = sub.priority.value() as i32;
             let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
             let result = sqlx::query(
-                "INSERT OR IGNORE INTO tasks (task_type, key, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(&key)
+            .bind(&sub.label)
             .bind(priority)
             .bind(&sub.payload)
             .bind(sub.expected_read_bytes)
@@ -513,13 +512,14 @@ impl TaskStore {
         // Insert into history.
         let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
         sqlx::query(
-            "INSERT INTO task_history (task_type, key, priority, status, payload,
+            "INSERT INTO task_history (task_type, key, label, priority, status, payload,
                 expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
                 retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
-             VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.task_type)
         .bind(&task.key)
+        .bind(&task.label)
         .bind(task.priority.value() as i32)
         .bind(&task.payload)
         .bind(task.expected_read_bytes)
@@ -624,13 +624,14 @@ impl TaskStore {
 
             let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
             sqlx::query(
-                "INSERT INTO task_history (task_type, key, priority, status, payload,
+                "INSERT INTO task_history (task_type, key, label, priority, status, payload,
                     expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
                     retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
-                 VALUES (?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&task.task_type)
             .bind(&task.key)
+            .bind(&task.label)
             .bind(task.priority.value() as i32)
             .bind(&task.payload)
             .bind(task.expected_read_bytes)
@@ -1163,6 +1164,7 @@ fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         id: row.get("id"),
         task_type: row.get("task_type"),
         key: row.get("key"),
+        label: row.get("label"),
         priority: Priority::new(priority_val as u8),
         status: status_str.parse().unwrap_or(TaskStatus::Pending),
         payload: row.get("payload"),
@@ -1192,6 +1194,7 @@ fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
         id: row.get("id"),
         task_type: row.get("task_type"),
         key: row.get("key"),
+        label: row.get("label"),
         priority: Priority::new(priority_val as u8),
         status: status_str.parse().unwrap_or(HistoryStatus::Failed),
         payload: row.get("payload"),
@@ -1219,16 +1222,11 @@ mod tests {
     }
 
     fn make_submission(key: &str, priority: Priority) -> TaskSubmission {
-        TaskSubmission {
-            task_type: "test".into(),
-            dedup_key: Some(key.into()),
-            priority,
-            payload: Some(b"hello".to_vec()),
-            expected_read_bytes: 1000,
-            expected_write_bytes: 500,
-            parent_id: None,
-            fail_fast: true,
-        }
+        TaskSubmission::new("test")
+            .key(key)
+            .priority(priority)
+            .payload_raw(b"hello".to_vec())
+            .expected_io(1000, 500)
     }
 
     #[tokio::test]
@@ -1393,26 +1391,8 @@ mod tests {
     async fn dedup_allows_same_key_different_types() {
         let store = test_store().await;
 
-        let sub_a = TaskSubmission {
-            task_type: "type_a".into(),
-            dedup_key: Some("shared-key".into()),
-            priority: Priority::NORMAL,
-            payload: None,
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            parent_id: None,
-            fail_fast: true,
-        };
-        let sub_b = TaskSubmission {
-            task_type: "type_b".into(),
-            dedup_key: Some("shared-key".into()),
-            priority: Priority::NORMAL,
-            payload: None,
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            parent_id: None,
-            fail_fast: true,
-        };
+        let sub_a = TaskSubmission::new("type_a").key("shared-key");
+        let sub_b = TaskSubmission::new("type_b").key("shared-key");
 
         let first = store.submit(&sub_a).await.unwrap();
         assert!(first.is_inserted());
@@ -1426,16 +1406,7 @@ mod tests {
     async fn dedup_by_payload_when_no_key() {
         let store = test_store().await;
 
-        let sub = TaskSubmission {
-            task_type: "ingest".into(),
-            dedup_key: None,
-            priority: Priority::NORMAL,
-            payload: Some(b"same-data".to_vec()),
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            parent_id: None,
-            fail_fast: true,
-        };
+        let sub = TaskSubmission::new("ingest").payload_raw(b"same-data".to_vec());
 
         let first = store.submit(&sub).await.unwrap();
         assert!(first.is_inserted());
@@ -1445,10 +1416,7 @@ mod tests {
         assert_eq!(second, SubmitOutcome::Duplicate);
 
         // Different payload → no dedup.
-        let sub2 = TaskSubmission {
-            payload: Some(b"different-data".to_vec()),
-            ..sub.clone()
-        };
+        let sub2 = TaskSubmission::new("ingest").payload_raw(b"different-data".to_vec());
         let third = store.submit(&sub2).await.unwrap();
         assert!(third.is_inserted());
     }
@@ -1930,16 +1898,9 @@ mod tests {
     async fn submit_batch_rejects_oversized_payload() {
         let store = test_store().await;
         let sub = make_submission("ok", Priority::NORMAL);
-        let big = TaskSubmission {
-            task_type: "test".into(),
-            dedup_key: Some("big".into()),
-            priority: Priority::NORMAL,
-            payload: Some(vec![0u8; MAX_PAYLOAD_BYTES + 1]),
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            parent_id: None,
-            fail_fast: true,
-        };
+        let big = TaskSubmission::new("test")
+            .key("big")
+            .payload_raw(vec![0u8; MAX_PAYLOAD_BYTES + 1]);
 
         // The oversized payload should fail the entire batch — no partial inserts.
         let err = store.submit_batch(&[sub.clone(), big]).await.unwrap_err();

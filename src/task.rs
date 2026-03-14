@@ -93,6 +93,10 @@ pub struct TaskRecord {
     pub id: i64,
     pub task_type: String,
     pub key: String,
+    /// Human-readable label for UI display. Carries the original dedup key
+    /// (or `task_type` if no explicit key was given). The `key` field holds
+    /// the SHA-256 hash used for deduplication.
+    pub label: String,
     pub priority: Priority,
     pub status: TaskStatus,
     pub payload: Option<Vec<u8>>,
@@ -132,6 +136,8 @@ pub struct TaskHistoryRecord {
     pub id: i64,
     pub task_type: String,
     pub key: String,
+    /// Human-readable label for UI display (see [`TaskRecord::label`]).
+    pub label: String,
     pub priority: Priority,
     pub status: HistoryStatus,
     pub payload: Option<Vec<u8>>,
@@ -276,6 +282,22 @@ pub fn generate_dedup_key(task_type: &str, payload: Option<&[u8]>) -> String {
 }
 
 /// Parameters for submitting a new task.
+///
+/// Use the builder-style constructor [`TaskSubmission::new`] for ergonomic
+/// construction with sensible defaults:
+///
+/// ```ignore
+/// use taskmill::{TaskSubmission, Priority};
+///
+/// let sub = TaskSubmission::new("thumbnail")
+///     .key("img-001")
+///     .priority(Priority::HIGH)
+///     .payload_json(&my_payload)?
+///     .expected_io(4096, 1024);
+/// ```
+///
+/// For strongly-typed tasks, prefer [`TaskSubmission::from_typed`] or
+/// [`Scheduler::submit_typed`](crate::Scheduler::submit_typed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskSubmission {
     pub task_type: String,
@@ -283,6 +305,9 @@ pub struct TaskSubmission {
     /// `task_type` and `payload`, so two submissions with the same type and
     /// payload are deduplicated automatically.
     pub dedup_key: Option<String>,
+    /// Human-readable label for UI display. Defaults to `dedup_key` (if set)
+    /// or `task_type`. Override with [`label()`](Self::label) if needed.
+    pub label: String,
     pub priority: Priority,
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
@@ -298,6 +323,104 @@ pub struct TaskSubmission {
 }
 
 impl TaskSubmission {
+    /// Create a new submission with sensible defaults.
+    ///
+    /// Defaults: `Priority::NORMAL`, no payload, no dedup key, zero IO
+    /// estimates, no parent, fail-fast enabled.
+    ///
+    /// Chain builder methods to customise:
+    ///
+    /// ```ignore
+    /// TaskSubmission::new("resize")
+    ///     .key("my-file.jpg")
+    ///     .priority(Priority::HIGH)
+    ///     .payload_json(&data)?
+    ///     .expected_io(4096, 1024)
+    /// ```
+    pub fn new(task_type: impl Into<String>) -> Self {
+        let task_type = task_type.into();
+        let label = task_type.clone();
+        Self {
+            task_type,
+            dedup_key: None,
+            label,
+            priority: Priority::NORMAL,
+            payload: None,
+            expected_read_bytes: 0,
+            expected_write_bytes: 0,
+            parent_id: None,
+            fail_fast: true,
+        }
+    }
+
+    /// Set an explicit dedup key.
+    ///
+    /// When set, deduplication is based on `hash(task_type + ":" + key)`
+    /// instead of the payload contents. Useful when different payloads
+    /// represent the same logical work (e.g. same file path with different
+    /// timestamps).
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        let key = key.into();
+        self.label = key.clone();
+        self.dedup_key = Some(key);
+        self
+    }
+
+    /// Override the display label.
+    ///
+    /// By default the label is derived from the dedup key (if set via
+    /// [`key()`](Self::key)) or the task type. Use this to provide a
+    /// custom human-readable description for UI display.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Set the scheduling priority. Default: [`Priority::NORMAL`].
+    pub fn priority(mut self, priority: Priority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Set the payload from a serializable value (JSON-encoded).
+    ///
+    /// Returns an error if serialization fails. The payload can be
+    /// deserialized in the executor via [`TaskContext::payload`](crate::TaskContext::payload).
+    pub fn payload_json<T: serde::Serialize>(
+        mut self,
+        data: &T,
+    ) -> Result<Self, serde_json::Error> {
+        self.payload = Some(serde_json::to_vec(data)?);
+        Ok(self)
+    }
+
+    /// Set the payload from raw bytes.
+    pub fn payload_raw(mut self, data: Vec<u8>) -> Self {
+        self.payload = Some(data);
+        self
+    }
+
+    /// Set expected IO bytes for budget-based scheduling.
+    ///
+    /// The scheduler uses these estimates to avoid saturating disk throughput
+    /// when [resource monitoring](crate::SchedulerBuilder::with_resource_monitoring)
+    /// is enabled. Default: 0 for both.
+    pub fn expected_io(mut self, read_bytes: i64, write_bytes: i64) -> Self {
+        self.expected_read_bytes = read_bytes;
+        self.expected_write_bytes = write_bytes;
+        self
+    }
+
+    /// Set the fail-fast flag for parent tasks that spawn children.
+    ///
+    /// When `true` (the default), the first child failure cancels siblings
+    /// and fails the parent immediately. When `false`, the parent waits for
+    /// all children to finish before resolving.
+    pub fn fail_fast(mut self, fail_fast: bool) -> Self {
+        self.fail_fast = fail_fast;
+        self
+    }
+
     /// Resolve the effective dedup key. Always incorporates the task type
     /// so different task types never collide, even with the same logical key.
     ///
@@ -314,6 +437,10 @@ impl TaskSubmission {
     ///
     /// The dedup key is auto-generated from the task type and serialized payload.
     /// Use `TaskRecord::deserialize_payload()` on the executor side to recover the type.
+    #[deprecated(
+        since = "2.0.0",
+        note = "use `TaskSubmission::new(task_type).payload_json(&data)?.priority(p).expected_io(r, w)` instead"
+    )]
     pub fn with_payload<T: serde::Serialize>(
         task_type: &str,
         priority: Priority,
@@ -321,17 +448,10 @@ impl TaskSubmission {
         expected_read_bytes: i64,
         expected_write_bytes: i64,
     ) -> Result<Self, serde_json::Error> {
-        let payload = serde_json::to_vec(data)?;
-        Ok(Self {
-            task_type: task_type.to_string(),
-            dedup_key: None,
-            priority,
-            payload: Some(payload),
-            expected_read_bytes,
-            expected_write_bytes,
-            parent_id: None,
-            fail_fast: true,
-        })
+        Ok(Self::new(task_type)
+            .priority(priority)
+            .payload_json(data)?
+            .expected_io(expected_read_bytes, expected_write_bytes))
     }
 }
 
@@ -384,17 +504,10 @@ impl TaskSubmission {
     /// Create a submission from a [`TypedTask`], serializing the payload and
     /// pulling task type, priority, and IO estimates from the trait.
     pub fn from_typed<T: TypedTask>(task: &T) -> Result<Self, serde_json::Error> {
-        let payload = serde_json::to_vec(task)?;
-        Ok(Self {
-            task_type: T::TASK_TYPE.to_string(),
-            dedup_key: None,
-            priority: task.priority(),
-            payload: Some(payload),
-            expected_read_bytes: task.expected_read_bytes(),
-            expected_write_bytes: task.expected_write_bytes(),
-            parent_id: None,
-            fail_fast: true,
-        })
+        Ok(Self::new(T::TASK_TYPE)
+            .priority(task.priority())
+            .payload_json(task)?
+            .expected_io(task.expected_read_bytes(), task.expected_write_bytes()))
     }
 }
 

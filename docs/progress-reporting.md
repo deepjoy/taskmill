@@ -4,26 +4,26 @@ Taskmill provides real-time progress tracking for running tasks, combining execu
 
 ## Reporting from executors
 
-Executors receive a `ProgressReporter` via `ctx.progress`:
+Executors receive a `ProgressReporter` via `ctx.progress()`:
 
 ```rust
 impl TaskExecutor for MyExecutor {
     async fn execute<'a>(
         &'a self, ctx: &'a TaskContext,
-    ) -> Result<TaskResult, TaskError> {
+    ) -> Result<(), TaskError> {
         let items = get_work_items();
 
         for (i, item) in items.iter().enumerate() {
             process(item).await;
 
             // Percentage-based (0.0 to 1.0)
-            ctx.progress.report(
+            ctx.progress().report(
                 (i + 1) as f32 / items.len() as f32,
                 Some(format!("processed {}/{}", i + 1, items.len())),
             );
         }
 
-        Ok(TaskResult { actual_read_bytes: 0, actual_write_bytes: 0 })
+        Ok(())
     }
 }
 ```
@@ -33,7 +33,7 @@ impl TaskExecutor for MyExecutor {
 For count-based progress:
 
 ```rust
-ctx.progress.report_fraction(processed, total, Some("importing".into()));
+ctx.progress().report_fraction(processed, total, Some("importing".into()));
 // Automatically computes: processed as f32 / total as f32
 ```
 
@@ -46,6 +46,7 @@ SchedulerEvent::Progress {
     task_id: 42,
     task_type: "resize".into(),
     key: "abc123".into(),
+    label: "my-image.jpg".into(),
     percent: 0.5,
     message: Some("resizing".into()),
 }
@@ -107,12 +108,12 @@ All scheduler state changes are broadcast as `SchedulerEvent` variants:
 
 | Event | When |
 |-------|------|
-| `Dispatched { task_id, task_type, key }` | Task popped from queue and executor spawned |
-| `Completed { task_id, task_type, key }` | Task finished successfully |
-| `Failed { task_id, task_type, key, error, will_retry }` | Task failed (includes whether it will be retried) |
-| `Preempted { task_id, task_type, key }` | Task paused for higher-priority work |
-| `Cancelled { task_id, task_type, key }` | Task cancelled via `scheduler.cancel()` |
-| `Progress { task_id, task_type, key, percent, message }` | Progress update from executor |
+| `Dispatched { task_id, task_type, key, label }` | Task popped from queue and executor spawned |
+| `Completed { task_id, task_type, key, label }` | Task finished successfully |
+| `Failed { task_id, task_type, key, label, error, will_retry }` | Task failed (includes whether it will be retried) |
+| `Preempted { task_id, task_type, key, label }` | Task paused for higher-priority work |
+| `Cancelled { task_id, task_type, key, label }` | Task cancelled via `scheduler.cancel()` |
+| `Progress { task_id, task_type, key, label, percent, message }` | Progress update from executor |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
 

@@ -78,18 +78,21 @@ pub enum SchedulerEvent {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
     },
     /// A task completed successfully.
     Completed {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
     },
     /// A task failed (may be retried or permanently failed).
     Failed {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
         error: String,
         will_retry: bool,
     },
@@ -98,18 +101,21 @@ pub enum SchedulerEvent {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
     },
     /// A task was cancelled by the application.
     Cancelled {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
     },
     /// Progress update from a running task.
     Progress {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
         /// Progress percentage (0.0 to 1.0).
         percent: f32,
         /// Optional human-readable message from the executor.
@@ -460,6 +466,7 @@ impl Scheduler {
                     task_id: *child_id,
                     task_type: at.record.task_type.clone(),
                     key: at.record.key.clone(),
+                    label: at.record.label.clone(),
                 });
             }
         }
@@ -472,6 +479,7 @@ impl Scheduler {
                 task_id,
                 task_type: at.record.task_type.clone(),
                 key: at.record.key.clone(),
+                label: at.record.label.clone(),
             });
             return Ok(true);
         }
@@ -1138,7 +1146,7 @@ mod tests {
     impl TaskExecutor for SlowExecutor {
         async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             tokio::select! {
-                _ = ctx.token.cancelled() => {
+                _ = ctx.token().cancelled() => {
                     Err(TaskError::new("cancelled"))
                 }
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {
@@ -1182,16 +1190,7 @@ mod tests {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("k1".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("k1"))
             .await
             .unwrap();
 
@@ -1229,16 +1228,7 @@ mod tests {
         );
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "unknown".into(),
-                dedup_key: Some("k".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("unknown").key("k"))
             .await
             .unwrap();
 
@@ -1253,16 +1243,7 @@ mod tests {
     async fn dedup_via_scheduler() {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
-        let sub = TaskSubmission {
-            task_type: "test".into(),
-            dedup_key: Some("dup".into()),
-            priority: Priority::NORMAL,
-            payload: None,
-            expected_read_bytes: 0,
-            expected_write_bytes: 0,
-            parent_id: None,
-            fail_fast: true,
-        };
+        let sub = TaskSubmission::new("test").key("dup");
 
         let first = sched.submit(&sub).await.unwrap();
         let second = sched.submit(&sub).await.unwrap();
@@ -1283,16 +1264,7 @@ mod tests {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
         let id = sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("cancel-me".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("cancel-me"))
             .await
             .unwrap()
             .id()
@@ -1316,16 +1288,7 @@ mod tests {
         let sched = setup(arc_erased(SlowExecutor)).await;
 
         let id = sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("cancel-running".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("cancel-running"))
             .await
             .unwrap()
             .id()
@@ -1345,16 +1308,7 @@ mod tests {
         let mut rx = sched.subscribe();
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("evt".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("evt"))
             .await
             .unwrap();
 
@@ -1378,16 +1332,7 @@ mod tests {
 
         // Both should share the same store.
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("shared".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("shared"))
             .await
             .unwrap();
 
@@ -1449,16 +1394,7 @@ mod tests {
         // Submit two tasks.
         for key in &["snap-a", "snap-b"] {
             sched
-                .submit(&TaskSubmission {
-                    task_type: "test".into(),
-                    dedup_key: Some(key.to_string()),
-                    priority: Priority::NORMAL,
-                    payload: None,
-                    expected_read_bytes: 0,
-                    expected_write_bytes: 0,
-                    parent_id: None,
-                    fail_fast: true,
-                })
+                .submit(&TaskSubmission::new("test").key(*key))
                 .await
                 .unwrap();
         }
@@ -1485,16 +1421,7 @@ mod tests {
         // Submit two tasks.
         for key in &["pa-1", "pa-2"] {
             sched
-                .submit(&TaskSubmission {
-                    task_type: "test".into(),
-                    dedup_key: Some(key.to_string()),
-                    priority: Priority::NORMAL,
-                    payload: None,
-                    expected_read_bytes: 0,
-                    expected_write_bytes: 0,
-                    parent_id: None,
-                    fail_fast: true,
-                })
+                .submit(&TaskSubmission::new("test").key(*key))
                 .await
                 .unwrap();
         }
@@ -1565,16 +1492,7 @@ mod tests {
             .unwrap();
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("state-test".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("state-test"))
             .await
             .unwrap();
 
@@ -1589,16 +1507,7 @@ mod tests {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("lookup-1".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("lookup-1"))
             .await
             .unwrap();
 
@@ -1614,16 +1523,7 @@ mod tests {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("lookup-done".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("lookup-done"))
             .await
             .unwrap();
 
@@ -1681,16 +1581,9 @@ mod tests {
     impl TaskExecutor for SpawningExecutor {
         async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             for i in 0..self.num_children {
-                let sub = TaskSubmission {
-                    task_type: "child".into(),
-                    dedup_key: Some(format!("child-{i}")),
-                    priority: ctx.record.priority,
-                    payload: None,
-                    expected_read_bytes: 0,
-                    expected_write_bytes: 0,
-                    parent_id: None, // spawn_child sets this
-                    fail_fast: true,
-                };
+                let sub = TaskSubmission::new("child")
+                    .key(format!("child-{i}"))
+                    .priority(ctx.record().priority);
                 ctx.spawn_child(sub).await?;
             }
             Ok(())
@@ -1706,16 +1599,9 @@ mod tests {
     impl TaskExecutor for FinalizeTrackingExecutor {
         async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             for i in 0..self.children {
-                let sub = TaskSubmission {
-                    task_type: "child".into(),
-                    dedup_key: Some(format!("ft-child-{i}")),
-                    priority: ctx.record.priority,
-                    payload: None,
-                    expected_read_bytes: 0,
-                    expected_write_bytes: 0,
-                    parent_id: None,
-                    fail_fast: true,
-                };
+                let sub = TaskSubmission::new("child")
+                    .key(format!("ft-child-{i}"))
+                    .priority(ctx.record().priority);
                 ctx.spawn_child(sub).await?;
             }
             Ok(())
@@ -1746,16 +1632,7 @@ mod tests {
 
         // Submit parent task.
         sched
-            .submit(&TaskSubmission {
-                task_type: "parent".into(),
-                dedup_key: Some("p1".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("parent").key("p1"))
             .await
             .unwrap();
 
@@ -1806,16 +1683,7 @@ mod tests {
         let mut rx = sched.subscribe();
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "parent".into(),
-                dedup_key: Some("p-complete".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("parent").key("p-complete"))
             .await
             .unwrap();
 
@@ -1879,16 +1747,7 @@ mod tests {
         let mut rx = sched.subscribe();
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "parent".into(),
-                dedup_key: Some("p-finalize".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("parent").key("p-finalize"))
             .await
             .unwrap();
 
@@ -1935,16 +1794,7 @@ mod tests {
         );
 
         let parent_id = sched
-            .submit(&TaskSubmission {
-                task_type: "parent".into(),
-                dedup_key: Some("p-cancel".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("parent").key("p-cancel"))
             .await
             .unwrap()
             .id()
@@ -1969,16 +1819,7 @@ mod tests {
         let sched = setup(arc_erased(InstantExecutor)).await;
 
         sched
-            .submit(&TaskSubmission {
-                task_type: "test".into(),
-                dedup_key: Some("no-kids".into()),
-                priority: Priority::NORMAL,
-                payload: None,
-                expected_read_bytes: 0,
-                expected_write_bytes: 0,
-                parent_id: None,
-                fail_fast: true,
-            })
+            .submit(&TaskSubmission::new("test").key("no-kids"))
             .await
             .unwrap();
 

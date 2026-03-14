@@ -29,7 +29,7 @@ use super::SchedulerEvent;
 ///     let items = vec![/* ... */];
 ///     for (i, item) in items.iter().enumerate() {
 ///         // process item...
-///         ctx.progress.report_fraction(i as u64 + 1, items.len() as u64, None);
+///         ctx.progress().report_fraction(i as u64 + 1, items.len() as u64, None);
 ///     }
 ///     Ok(())
 /// }
@@ -39,6 +39,7 @@ pub struct ProgressReporter {
     task_id: i64,
     task_type: String,
     key: String,
+    label: String,
     event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
 }
 
@@ -47,12 +48,14 @@ impl ProgressReporter {
         task_id: i64,
         task_type: String,
         key: String,
+        label: String,
         event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> Self {
         Self {
             task_id,
             task_type,
             key,
+            label,
             event_tx,
         }
     }
@@ -63,6 +66,7 @@ impl ProgressReporter {
             task_id: self.task_id,
             task_type: self.task_type.clone(),
             key: self.key.clone(),
+            label: self.label.clone(),
             percent: percent.clamp(0.0, 1.0),
             message,
         });
@@ -88,6 +92,7 @@ pub struct EstimatedProgress {
     pub task_id: i64,
     pub task_type: String,
     pub key: String,
+    pub label: String,
     /// Executor-reported progress (0.0 to 1.0), if available.
     pub reported_percent: Option<f32>,
     /// Throughput-extrapolated progress (0.0 to 1.0), if history data exists.
@@ -148,6 +153,7 @@ pub(crate) async fn extrapolate(
         task_id: record.id,
         task_type: record.task_type.clone(),
         key: record.key.clone(),
+        label: record.label.clone(),
         reported_percent: reported,
         extrapolated_percent: extrapolated,
         percent,
