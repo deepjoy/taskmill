@@ -206,8 +206,11 @@ impl TaskStore {
         sqlx::raw_sql(include_str!("../../migrations/001_tasks.sql"))
             .execute(&self.pool)
             .await?;
-        Self::run_alter_migration(&self.pool, include_str!("../../migrations/002_add_label.sql"))
-            .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../../migrations/002_add_label.sql"),
+        )
+        .await?;
         Self::run_alter_migration(
             &self.pool,
             include_str!("../../migrations/003_net_io_and_groups.sql"),

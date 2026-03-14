@@ -404,8 +404,8 @@ impl Scheduler {
             );
             self.inner
                 .store
-                .fail(
-                    task.id,
+                .fail_with_record(
+                    &task,
                     &format!("no executor registered for type '{}'", task.task_type),
                     false,
                     0,

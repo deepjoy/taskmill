@@ -247,8 +247,7 @@ impl SchedulerBuilder {
     /// Multiple types can be registered — each is keyed by its concrete
     /// `TypeId`.
     pub fn app_state_arc<T: Send + Sync + 'static>(mut self, state: Arc<T>) -> Self {
-        self.app_state_entries
-            .push((TypeId::of::<T>(), state));
+        self.app_state_entries.push((TypeId::of::<T>(), state));
         self
     }
 

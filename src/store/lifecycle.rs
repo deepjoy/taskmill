@@ -15,6 +15,7 @@ async fn insert_history(
     status: &str,
     metrics: &TaskMetrics,
     duration_ms: Option<i64>,
+    last_error: Option<&str>,
 ) -> Result<(), StoreError> {
     let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
     let retry_count = if status == "failed" {
@@ -44,7 +45,7 @@ async fn insert_history(
     .bind(metrics.net_rx_bytes)
     .bind(metrics.net_tx_bytes)
     .bind(retry_count)
-    .bind(&task.last_error)
+    .bind(last_error)
     .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
     .bind(
         task.started_at
@@ -60,24 +61,9 @@ async fn insert_history(
 }
 
 /// Compute the duration in milliseconds from `started_at` to now.
-async fn compute_duration_ms(
-    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
-    task: &TaskRecord,
-) -> Result<Option<i64>, StoreError> {
-    if task.started_at.is_some() {
-        let duration_ms: Option<i64> = sqlx::query_scalar(
-            "SELECT CAST((julianday('now') - julianday(?)) * 86400000 AS INTEGER)",
-        )
-        .bind(
-            task.started_at
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-        )
-        .fetch_one(&mut **conn)
-        .await?;
-        Ok(duration_ms)
-    } else {
-        Ok(None)
-    }
+fn compute_duration_ms(task: &TaskRecord) -> Option<i64> {
+    task.started_at
+        .map(|started| (chrono::Utc::now() - started).num_milliseconds())
 }
 
 impl TaskStore {
@@ -88,9 +74,12 @@ impl TaskStore {
     pub async fn peek_next(&self) -> Result<Option<TaskRecord>, StoreError> {
         let row = sqlx::query(
             "SELECT * FROM tasks
-             WHERE status = 'pending'
-             ORDER BY priority ASC, id ASC
-             LIMIT 1",
+             WHERE id = (
+                 SELECT id FROM tasks
+                 WHERE status = 'pending'
+                 ORDER BY priority ASC, id ASC
+                 LIMIT 1
+             )",
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -164,41 +153,79 @@ impl TaskStore {
         let Some(row) = row else { return Ok(()) };
         let task = row_to_task_record(&row);
 
-        let duration_ms = compute_duration_ms(&mut conn, &task).await?;
-
-        // Insert into history.
-        insert_history(&mut conn, &task, "completed", metrics, duration_ms).await?;
-
-        if task.requeue {
-            // Requeue flag set — reset to pending with requeue_priority
-            // instead of removing from the active queue.
-            let requeue_priority = task
-                .requeue_priority
-                .map(|p| p.value() as i32)
-                .unwrap_or(task.priority.value() as i32);
-            sqlx::query(
-                "UPDATE tasks SET status = 'pending', priority = ?,
-                    started_at = NULL, retry_count = 0, last_error = NULL,
-                    requeue = 0, requeue_priority = NULL
-                 WHERE id = ?",
-            )
-            .bind(requeue_priority)
-            .bind(id)
-            .execute(&mut *conn)
-            .await?;
-        } else {
-            // Remove from active queue.
-            sqlx::query("DELETE FROM tasks WHERE id = ?")
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
-        }
+        Self::complete_inner(&mut conn, &task, metrics).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
         tracing::debug!(task_id = id, "store.complete: COMMIT ok");
 
         self.maybe_prune().await;
+
+        Ok(())
+    }
+
+    /// Mark a task as completed using an in-memory record, avoiding the
+    /// redundant `SELECT *` round-trip. The `requeue` flag is still checked
+    /// from the database row since it may have been set by a concurrent
+    /// `submit()` while the task was running.
+    pub async fn complete_with_record(
+        &self,
+        task: &TaskRecord,
+        metrics: &TaskMetrics,
+    ) -> Result<(), StoreError> {
+        tracing::debug!(task_id = task.id, "store.complete_with_record: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+
+        Self::complete_inner(&mut conn, task, metrics).await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(task_id = task.id, "store.complete_with_record: COMMIT ok");
+
+        self.maybe_prune().await;
+
+        Ok(())
+    }
+
+    /// Shared completion logic: insert history, then handle requeue or delete.
+    async fn complete_inner(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        task: &TaskRecord,
+        metrics: &TaskMetrics,
+    ) -> Result<(), StoreError> {
+        let duration_ms = compute_duration_ms(task);
+
+        // Insert into history.
+        insert_history(
+            conn,
+            task,
+            "completed",
+            metrics,
+            duration_ms,
+            task.last_error.as_deref(),
+        )
+        .await?;
+
+        // Try to delete (normal completion, requeue = 0).
+        let del = sqlx::query("DELETE FROM tasks WHERE id = ? AND requeue = 0")
+            .bind(task.id)
+            .execute(&mut **conn)
+            .await?;
+
+        if del.rows_affected() == 0 {
+            // Requeue flag was set by a concurrent submit — reset to pending.
+            // No-op if the task was already deleted (cancelled).
+            sqlx::query(
+                "UPDATE tasks SET status = 'pending',
+                    priority = COALESCE(requeue_priority, priority),
+                    started_at = NULL, retry_count = 0, last_error = NULL,
+                    requeue = 0, requeue_priority = NULL
+                 WHERE id = ?",
+            )
+            .bind(task.id)
+            .execute(&mut **conn)
+            .await?;
+        }
 
         Ok(())
     }
@@ -223,8 +250,53 @@ impl TaskStore {
             .await?;
 
         let Some(row) = row else { return Ok(()) };
-        let mut task = row_to_task_record(&row);
+        let task = row_to_task_record(&row);
 
+        Self::fail_inner(&mut conn, &task, error, retryable, max_retries, metrics).await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(task_id = id, "store.fail: COMMIT ok");
+
+        self.maybe_prune().await;
+
+        Ok(())
+    }
+
+    /// Mark a task as failed using an in-memory record, avoiding the
+    /// redundant `SELECT *` round-trip.
+    pub async fn fail_with_record(
+        &self,
+        task: &TaskRecord,
+        error: &str,
+        retryable: bool,
+        max_retries: i32,
+        metrics: &TaskMetrics,
+    ) -> Result<(), StoreError> {
+        tracing::debug!(task_id = task.id, "store.fail_with_record: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+        tracing::debug!(task_id = task.id, "store.fail_with_record: BEGIN acquired");
+
+        Self::fail_inner(&mut conn, task, error, retryable, max_retries, metrics).await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(task_id = task.id, "store.fail_with_record: COMMIT ok");
+
+        self.maybe_prune().await;
+
+        Ok(())
+    }
+
+    /// Shared failure logic: retry or move to history.
+    async fn fail_inner(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        task: &TaskRecord,
+        error: &str,
+        retryable: bool,
+        max_retries: i32,
+        metrics: &TaskMetrics,
+    ) -> Result<(), StoreError> {
         if retryable && task.retry_count < max_retries {
             // Requeue with incremented retry count, same priority.
             sqlx::query(
@@ -233,29 +305,20 @@ impl TaskStore {
                  WHERE id = ?",
             )
             .bind(error)
-            .bind(id)
-            .execute(&mut *conn)
+            .bind(task.id)
+            .execute(&mut **conn)
             .await?;
         } else {
             // Permanent failure — move to history.
-            let duration_ms = compute_duration_ms(&mut conn, &task).await?;
+            let duration_ms = compute_duration_ms(task);
 
-            // Set last_error on the task before inserting into history.
-            task.last_error = Some(error.to_string());
-
-            insert_history(&mut conn, &task, "failed", metrics, duration_ms).await?;
+            insert_history(conn, task, "failed", metrics, duration_ms, Some(error)).await?;
 
             sqlx::query("DELETE FROM tasks WHERE id = ?")
-                .bind(id)
-                .execute(&mut *conn)
+                .bind(task.id)
+                .execute(&mut **conn)
                 .await?;
         }
-
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
-        drop(conn);
-        tracing::debug!(task_id = id, "store.fail: COMMIT ok");
-
-        self.maybe_prune().await;
 
         Ok(())
     }
