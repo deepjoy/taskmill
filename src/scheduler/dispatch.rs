@@ -23,6 +23,8 @@ pub(crate) struct ActiveTask {
     pub reported_progress: Option<f32>,
     /// When the last progress report was received.
     pub reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Handle to the spawned tokio task, set after spawn.
+    pub handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 // ── Active Task Map ────────────────────────────────────────────────
@@ -159,12 +161,37 @@ impl ActiveTaskMap {
         })
     }
 
-    /// Cancel all active tasks (for shutdown).
+    /// Store the `JoinHandle` for a task that was just spawned.
+    pub fn set_handle(&self, id: i64, handle: tokio::task::JoinHandle<()>) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(at) = map.get_mut(&id) {
+            at.handle = Some(handle);
+        }
+    }
+
+    /// Cancel all active tasks and abort their handles (hard shutdown).
     pub fn cancel_all(&self) {
         let mut active = self.inner.lock().unwrap();
         for (_, at) in active.drain() {
             at.token.cancel();
+            if let Some(h) = at.handle {
+                h.abort();
+            }
         }
+    }
+
+    /// Cancel all tokens, drain the map, and return the join handles
+    /// for graceful shutdown (caller can join with a timeout).
+    pub fn cancel_and_drain_handles(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut active = self.inner.lock().unwrap();
+        let mut handles = Vec::with_capacity(active.len());
+        for (_, at) in active.drain() {
+            at.token.cancel();
+            if let Some(h) = at.handle {
+                handles.push(h);
+            }
+        }
+        handles
     }
 
     /// Pause all active tasks: cancel their tokens and move them to paused
@@ -212,7 +239,7 @@ pub(crate) struct SpawnContext {
     pub max_retries: i32,
     pub app_state: crate::registry::StateSnapshot,
     pub work_notify: Arc<tokio::sync::Notify>,
-    pub scheduler: super::Scheduler,
+    pub scheduler: super::WeakScheduler,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -244,6 +271,7 @@ pub(crate) async fn spawn_task(
             token: child_token.clone(),
             reported_progress: None,
             reported_at: None,
+            handle: None,
         },
     );
 
@@ -261,7 +289,7 @@ pub(crate) async fn spawn_task(
             event_tx.clone(),
             active.clone(),
         ),
-        scheduler: scheduler.downgrade(),
+        scheduler,
         app_state,
         child_spawner: Some(child_spawner),
         io: io.clone(),
@@ -276,8 +304,10 @@ pub(crate) async fn spawn_task(
     });
 
     // Spawn executor.
+    let task_id_for_handle = task.id;
+    let active_for_handle = active.clone();
     let token_for_spawn = child_token.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let task_id = task.id;
         let result = match phase {
             ExecutionPhase::Execute => executor.execute_erased(&ctx).await,
@@ -447,6 +477,9 @@ pub(crate) async fn spawn_task(
             }
         }
     });
+
+    // Store the handle so shutdown can join it.
+    active_for_handle.set_handle(task_id_for_handle, handle);
 }
 
 /// Check if a waiting parent is ready for finalization or has failed,

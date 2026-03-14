@@ -296,6 +296,9 @@ impl TaskStore {
         let key = sub.effective_key();
         let priority = sub.priority.value() as i32;
         let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
+
+        let mut conn = self.begin_write().await?;
+
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
         let result = sqlx::query(
             "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key)
@@ -313,11 +316,12 @@ impl TaskStore {
         .bind(sub.parent_id)
         .bind(fail_fast_val)
         .bind(&sub.group_key)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT end");
 
         if result.rows_affected() > 0 {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
             return Ok(SubmitOutcome::Inserted(result.last_insert_rowid()));
         }
 
@@ -332,10 +336,11 @@ impl TaskStore {
         .bind(priority)
         .bind(&key)
         .bind(priority)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
 
         if let Some(r) = row {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
             return Ok(SubmitOutcome::Upgraded(r.get("id")));
         }
 
@@ -350,8 +355,10 @@ impl TaskStore {
         .bind(priority)
         .bind(&key)
         .bind(priority)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
 
         match row {
             Some(r) => Ok(SubmitOutcome::Requeued(r.get("id"))),

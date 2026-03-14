@@ -590,7 +590,7 @@ impl Scheduler {
                 max_retries: self.inner.max_retries,
                 app_state: self.inner.app_state.snapshot().await,
                 work_notify: Arc::clone(&self.inner.work_notify),
-                scheduler: self.clone(),
+                scheduler: self.downgrade(),
             },
             dispatch::ExecutionPhase::Execute,
         )
@@ -651,7 +651,7 @@ impl Scheduler {
                 max_retries: self.inner.max_retries,
                 app_state: self.inner.app_state.snapshot().await,
                 work_notify: Arc::clone(&self.inner.work_notify),
-                scheduler: self.clone(),
+                scheduler: self.downgrade(),
             },
             dispatch::ExecutionPhase::Finalize,
         )
@@ -751,23 +751,23 @@ impl Scheduler {
                     "graceful shutdown — waiting for running tasks"
                 );
 
+                // Cancel all tokens and collect handles for joining.
+                let handles = self.inner.active.cancel_and_drain_handles();
                 let deadline = tokio::time::Instant::now() + timeout;
-                loop {
-                    let count = self.inner.active.count();
-                    if count == 0 {
-                        tracing::info!("all tasks completed during graceful shutdown");
-                        break;
+
+                for handle in handles {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        tracing::warn!("graceful shutdown timeout — aborting remaining tasks");
+                        handle.abort();
+                        continue;
                     }
-                    if tokio::time::Instant::now() >= deadline {
-                        tracing::warn!(
-                            remaining = count,
-                            "graceful shutdown timeout — cancelling remaining tasks"
-                        );
-                        self.inner.active.cancel_all();
-                        break;
+                    if tokio::time::timeout(remaining, handle).await.is_err() {
+                        tracing::warn!("task did not finish within graceful shutdown timeout");
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
+
+                tracing::info!("graceful shutdown complete");
             }
         }
 
