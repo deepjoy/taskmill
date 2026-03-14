@@ -108,8 +108,8 @@
 //!         &'a self, ctx: &'a TaskContext,
 //!     ) -> Result<(), TaskError> {
 //!         let thumb: Thumbnail = ctx.payload()?;
-//!         ctx.progress.report(0.5, Some("resizing".into()));
-//!         // ... do work, check ctx.token.is_cancelled() ...
+//!         ctx.progress().report(0.5, Some("resizing".into()));
+//!         // ... do work, check ctx.token().is_cancelled() ...
 //!         ctx.record_read_bytes(4_096);
 //!         ctx.record_write_bytes(1_024);
 //!         Ok(())
@@ -229,16 +229,13 @@
 //!     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
 //!         let upload: MultipartUpload = ctx.payload()?;
 //!         for part in &upload.parts {
-//!             ctx.spawn_child(TaskSubmission {
-//!                 task_type: "upload-part".into(),
-//!                 dedup_key: Some(part.etag.clone()),
-//!                 priority: ctx.record.priority,
-//!                 payload: Some(serde_json::to_vec(part)?),
-//!                 expected_read_bytes: part.size as i64,
-//!                 expected_write_bytes: 0,
-//!                 parent_id: None, // set automatically by spawn_child
-//!                 fail_fast: true,
-//!             }).await?;
+//!             ctx.spawn_child(
+//!                 TaskSubmission::new("upload-part")
+//!                     .key(&part.etag)
+//!                     .priority(ctx.record().priority)
+//!                     .payload_json(part)?
+//!                     .expected_io(part.size as i64, 0),
+//!             ).await?;
 //!         }
 //!         Ok(())
 //!     }

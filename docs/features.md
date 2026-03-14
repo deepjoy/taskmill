@@ -49,13 +49,13 @@ A complete list of taskmill's capabilities.
 
 ## Retries
 
-- **Automatic requeue** — retryable failures (`TaskError { retryable: true }`) are requeued at the same priority with `retry_count += 1`.
+- **Automatic requeue** — retryable failures (`TaskError::retryable(msg)`) are requeued at the same priority with `retry_count += 1`.
 - **Configurable limit** — `max_retries` (default 3) controls how many times a task can be retried before permanent failure.
 - **Dedup preserved** — the key stays occupied during retries, preventing duplicate submission of in-progress work.
 
 ## Progress Reporting
 
-- **Executor-reported progress** — report percentage or fraction-based progress via `ctx.progress.report()` or `ctx.progress.report_fraction()`.
+- **Executor-reported progress** — report percentage or fraction-based progress via `ctx.progress().report()` or `ctx.progress().report_fraction()`.
 - **Throughput-based extrapolation** — for tasks without explicit reports, the scheduler extrapolates progress from historical average duration, capped at 99% to avoid false completion signals.
 - **Event-driven** — progress updates are emitted as `SchedulerEvent::Progress` for real-time UI updates.
 
@@ -72,13 +72,19 @@ A complete list of taskmill's capabilities.
 
 ## Typed Payloads
 
-- **Structured submission** — `TaskSubmission::with_payload()` serializes any `Serialize` type to JSON bytes.
-- **Type-safe deserialization** — `TaskRecord::deserialize_payload::<T>()` in executors.
-- **TypedTask trait** — define `TASK_TYPE`, default priority, and expected IO on your struct. Submit with `scheduler.submit_typed()` and deserialize with `ctx.deserialize_typed()`.
+- **Builder-style submission** — `TaskSubmission::new(type).payload_json(&data)?.expected_io(r, w)` for ergonomic construction with serialization.
+- **Type-safe deserialization** — `ctx.payload::<T>()?` in executors for zero-boilerplate extraction.
+- **TypedTask trait** — define `TASK_TYPE`, default priority, and expected IO on your struct. Submit with `scheduler.submit_typed()` and deserialize with `ctx.payload::<T>()`.
+
+## Child Tasks
+
+- **Hierarchical execution** — spawn child tasks from an executor via `ctx.spawn_child()`. The parent enters a `waiting` state and resumes for finalization after all children complete.
+- **Two-phase execution** — implement `TaskExecutor::finalize()` for assembly work after children finish (e.g. `CompleteMultipartUpload`).
+- **Fail-fast** — when enabled (default), the first child failure cancels siblings and fails the parent immediately.
 
 ## Batch Operations
 
-- **Bulk enqueue** — `submit_batch()` wraps many inserts in a single SQLite transaction. Returns `Vec<Option<i64>>` where `None` indicates deduplication.
+- **Bulk enqueue** — `submit_batch()` wraps many inserts in a single SQLite transaction. Returns `Vec<SubmitOutcome>` indicating whether each was inserted, upgraded, requeued, or deduplicated.
 
 ## Graceful Shutdown
 

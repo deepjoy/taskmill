@@ -43,28 +43,24 @@ Executors should check for cancellation at natural yield points:
 impl TaskExecutor for MyExecutor {
     async fn execute<'a>(
         &'a self, ctx: &'a TaskContext,
-    ) -> Result<TaskResult, TaskError> {
+    ) -> Result<(), TaskError> {
         for chunk in chunks {
             // Check before each unit of work
-            if ctx.token.is_cancelled() {
-                return Err(TaskError {
-                    message: "preempted".into(),
-                    retryable: true,
-                    actual_read_bytes: bytes_read_so_far,
-                    actual_write_bytes: bytes_written_so_far,
-                });
+            if ctx.token().is_cancelled() {
+                return Err(TaskError::retryable("preempted"));
             }
 
             process(chunk).await;
-            ctx.progress.report_fraction(i, total, None);
+            ctx.record_read_bytes(chunk.len() as i64);
+            ctx.progress().report_fraction(i, total, None);
         }
 
-        Ok(TaskResult { actual_read_bytes: total_read, actual_write_bytes: total_written })
+        Ok(())
     }
 }
 ```
 
-Returning a retryable error on preemption is optional — the scheduler handles pausing regardless. But it gives the executor a chance to report partial IO and clean up.
+Returning a retryable error on preemption is optional — the scheduler handles pausing regardless. But it gives the executor a chance to clean up.
 
 ### Configuring preemption threshold
 

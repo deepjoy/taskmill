@@ -18,16 +18,16 @@ taskmill = { path = "crates/taskmill", default-features = false }
 
 ## Implement an executor
 
-Each task type needs a `TaskExecutor` implementation. The executor receives a `TaskContext` containing:
+Each task type needs a `TaskExecutor` implementation. The executor receives a `TaskContext` with accessor methods:
 
-- `record` — the full `TaskRecord` with payload (up to 1 MiB), priority, retry count, etc.
-- `token` — a `CancellationToken` for preemption support
-- `progress` — a `ProgressReporter` for reporting progress back to the scheduler
-- Shared application state (if registered via `.app_state()` or `register_state()`)
+- `record()` — the full `TaskRecord` with payload (up to 1 MiB), priority, retry count, etc.
+- `token()` — a `CancellationToken` for preemption support
+- `progress()` — a `ProgressReporter` for reporting progress back to the scheduler
+- `state::<T>()` — shared application state (if registered via `.app_state()` or `register_state()`)
 
 ```rust
 use std::sync::Arc;
-use taskmill::{TaskExecutor, TaskContext, TaskResult, TaskError};
+use taskmill::{TaskExecutor, TaskContext, TaskError};
 
 struct ImageResizer;
 
@@ -35,29 +35,24 @@ impl TaskExecutor for ImageResizer {
     async fn execute<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> Result<TaskResult, TaskError> {
+    ) -> Result<(), TaskError> {
         // Deserialize your payload
-        let data: Option<serde_json::Value> = ctx.record.deserialize_payload()?;
+        let data: Option<serde_json::Value> = ctx.record().deserialize_payload()?;
 
         // Check for preemption at yield points
-        if ctx.token.is_cancelled() {
-            return Err(TaskError {
-                message: "preempted".into(),
-                retryable: true,
-                actual_read_bytes: 0,
-                actual_write_bytes: 0,
-            });
+        if ctx.token().is_cancelled() {
+            return Err(TaskError::retryable("preempted"));
         }
 
         // Report progress
-        ctx.progress.report(0.5, Some("resizing".into()));
+        ctx.progress().report(0.5, Some("resizing".into()));
 
         // Do work...
 
-        Ok(TaskResult {
-            actual_read_bytes: 4096,
-            actual_write_bytes: 1024,
-        })
+        // Report actual IO
+        ctx.record_read_bytes(4096);
+        ctx.record_write_bytes(1024);
+        Ok(())
     }
 }
 ```
@@ -95,26 +90,22 @@ async fn main() {
     });
 
     // Submit a single task with a typed payload.
-    scheduler.submit(&TaskSubmission::with_payload(
-        "resize",
-        Priority::NORMAL,
-        &serde_json::json!({"path": "/photos/image.jpg", "width": 300}),
-        4096,  // expected read bytes
-        1024,  // expected write bytes
-    ).unwrap()).await.unwrap();
+    let sub = TaskSubmission::new("resize")
+        .payload_json(&serde_json::json!({"path": "/photos/image.jpg", "width": 300}))
+        .unwrap()
+        .expected_io(4096, 1024);
+    scheduler.submit(&sub).await.unwrap();
 
     // Submit tasks in bulk (single SQLite transaction).
     let paths = vec!["/a.jpg", "/b.jpg", "/c.jpg"];
     let batch: Vec<_> = paths.iter().map(|p| {
-        TaskSubmission::with_payload(
-            "resize",
-            Priority::NORMAL,
-            &serde_json::json!({"path": p}),
-            4096, 1024,
-        ).unwrap()
+        TaskSubmission::new("resize")
+            .payload_json(&serde_json::json!({"path": p}))
+            .unwrap()
+            .expected_io(4096, 1024)
     }).collect();
-    let ids = scheduler.submit_batch(&batch).await.unwrap();
-    // ids[i] is Some(row_id) if inserted, None if deduplicated.
+    let outcomes = scheduler.submit_batch(&batch).await.unwrap();
+    // Each outcome is Inserted, Upgraded, Requeued, or Duplicate.
 
     // Run the scheduler loop (blocks until the token is cancelled).
     let token = CancellationToken::new();
@@ -151,7 +142,7 @@ scheduler.submit_typed(&ResizeTask {
 }).await?;
 
 // In the executor:
-let task: Option<ResizeTask> = ctx.deserialize_typed()?;
+let task: ResizeTask = ctx.payload()?;
 ```
 
 ## Manual wiring

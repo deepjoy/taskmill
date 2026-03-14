@@ -127,6 +127,7 @@ impl ActiveTaskMap {
                     task_id: id,
                     task_type: at.record.task_type.clone(),
                     key: at.record.key.clone(),
+                    label: at.record.label.clone(),
                 });
                 preempted.push(id);
             }
@@ -172,6 +173,7 @@ impl ActiveTaskMap {
                 task_id: id,
                 task_type: at.record.task_type.clone(),
                 key: at.record.key.clone(),
+                label: at.record.label.clone(),
             });
         }
         count
@@ -242,6 +244,7 @@ pub(crate) async fn spawn_task(
             task.id,
             task.task_type.clone(),
             task.key.clone(),
+            task.label.clone(),
             event_tx.clone(),
         ),
         scheduler,
@@ -255,6 +258,7 @@ pub(crate) async fn spawn_task(
         task_id: task.id,
         task_type: task.task_type.clone(),
         key: task.key.clone(),
+        label: task.label.clone(),
     });
 
     // Spawn progress listener — bridges broadcast events into the active map.
@@ -341,6 +345,7 @@ pub(crate) async fn spawn_task(
                     task_id,
                     task_type: task.task_type.clone(),
                     key: task.key.clone(),
+                    label: task.label.clone(),
                 });
 
                 // If this was a child task, check if parent is ready.
@@ -383,6 +388,7 @@ pub(crate) async fn spawn_task(
                     task_id,
                     task_type: task.task_type.clone(),
                     key: task.key.clone(),
+                    label: task.label.clone(),
                     error: te.message.clone(),
                     will_retry,
                 });
@@ -404,6 +410,7 @@ pub(crate) async fn spawn_task(
                                                 task_id: *rid,
                                                 task_type: at.record.task_type.clone(),
                                                 key: at.record.key.clone(),
+                                                label: at.record.label.clone(),
                                             });
                                         }
                                     }
@@ -424,6 +431,7 @@ pub(crate) async fn spawn_task(
                                     task_id: parent_id,
                                     task_type: parent.task_type.clone(),
                                     key: parent.key.clone(),
+                                    label: parent.label.clone(),
                                     error: msg,
                                     will_retry: false,
                                 });
@@ -477,6 +485,7 @@ async fn handle_parent_resolution(
                     task_id: parent_id,
                     task_type: parent.task_type.clone(),
                     key: parent.key.clone(),
+                    label: parent.label.clone(),
                     error: reason,
                     will_retry: false,
                 });

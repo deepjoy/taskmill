@@ -9,7 +9,7 @@ SQLite persistence, designed for desktop apps (Tauri) and background services.
 taskmill/
   src/
     lib.rs                 — public API re-exports
-    task.rs                — TaskRecord, TaskSubmission, TaskResult, TaskError, TypedTask, etc.
+    task.rs                — TaskRecord, TaskSubmission, TaskError, TypedTask, etc.
     priority.rs            — Priority newtype (u8, lower = higher priority)
     store.rs               — TaskStore: SQLite persistence, atomic pop, queries, retention
     registry.rs            — TaskExecutor trait (RPITIT), TaskContext, TaskTypeRegistry
@@ -25,6 +25,7 @@ taskmill/
       sysinfo_monitor.rs   — SysinfoSampler via `sysinfo` crate (feature-gated)
   migrations/
     001_tasks.sql          — tasks table, task_history table, indexes
+    002_add_label.sql       — adds human-readable label column
 ```
 
 ## Task lifecycle
@@ -39,7 +40,7 @@ Submit ──► Pending ──► Running ──► Completed  (moved to task_h
                 └─────────────────┘            (resumed when preemptors finish)
 ```
 
-Active-queue states (`tasks` table): `pending`, `running`, `paused`.
+Active-queue states (`tasks` table): `pending`, `running`, `paused`, `waiting`.
 Terminal states (`task_history` table): `completed`, `failed`.
 
 ## Data flow
@@ -67,6 +68,7 @@ flowchart TD
 | `id`                  | `INTEGER PRIMARY KEY` — insertion order within tier|
 | `task_type`           | Executor lookup name (e.g. `"scan-l3"`)            |
 | `key`                 | `UNIQUE` — SHA-256 deduplication key               |
+| `label`               | Human-readable display label (original key or type)|
 | `priority`            | `INTEGER NOT NULL` — 0 (highest) to 255 (lowest)  |
 | `status`              | `TEXT` — `pending`, `running`, or `paused`         |
 | `payload`             | `BLOB` — opaque, max 1 MiB, executor-defined       |
@@ -122,8 +124,9 @@ type is always incorporated so different types with identical payloads never
 collide.
 
 Enforcement uses the `UNIQUE(key)` constraint with `INSERT OR IGNORE` — a
-duplicate submission silently returns `None`. The key stays occupied while the
-task is active (including retries) and is freed when the task moves to history.
+duplicate submission returns `SubmitOutcome::Duplicate`. The key stays occupied
+while the task is active (including retries) and is freed when the task moves
+to history.
 
 ## Priority queue
 
@@ -323,7 +326,7 @@ When a task is submitted at or above `preempt_priority` (default `REALTIME`):
 3. On subsequent poll cycles, paused tasks are only resumed when no active
    preemptors remain — this prevents a thrashing loop of pause/resume/re-preempt.
 
-Executors cooperate by checking `ctx.token.is_cancelled()` at yield points. An
+Executors cooperate by checking `ctx.token().is_cancelled()` at yield points. An
 executor that ignores cancellation continues running but is no longer tracked;
 its completion or failure is still recorded normally.
 
@@ -362,8 +365,8 @@ All variants derive `Serialize`/`Deserialize`.
 
 ### Executor-reported
 
-Executors call `ctx.progress.report(percent, message)` or
-`ctx.progress.report_fraction(completed, total, message)`. These emit
+Executors call `ctx.progress().report(percent, message)` or
+`ctx.progress().report_fraction(completed, total, message)`. These emit
 `SchedulerEvent::Progress` and update the active task map.
 
 ### Throughput-extrapolated
@@ -510,7 +513,7 @@ app.manage(scheduler);  // Scheduler is Clone — no Arc needed
 #[tauri::command]
 async fn submit_task(
     scheduler: tauri::State<'_, Scheduler>,
-) -> Result<Option<i64>, StoreError> {
+) -> Result<SubmitOutcome, StoreError> {
     scheduler.submit(&submission).await
 }
 
