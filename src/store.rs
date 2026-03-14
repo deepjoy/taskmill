@@ -1379,7 +1379,10 @@ mod tests {
         store.submit(&sub_high).await.unwrap();
 
         // Permanent failure — requeue flag is dropped.
-        store.fail(task.id, "boom", false, 0, &TaskMetrics::default()).await.unwrap();
+        store
+            .fail(task.id, "boom", false, 0, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Key should be free for reuse.
         let outcome = store.submit(&sub).await.unwrap();
@@ -1487,7 +1490,10 @@ mod tests {
         store
             .complete(
                 task.id,
-                &TaskMetrics { read_bytes: 2000, write_bytes: 1000 },
+                &TaskMetrics {
+                    read_bytes: 2000,
+                    write_bytes: 1000,
+                },
             )
             .await
             .unwrap();
@@ -1531,11 +1537,26 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         // First fail: retry_count 0 < 1, requeued with retry_count=1.
-        store.fail(task.id, "err1", true, 1, &TaskMetrics::default()).await.unwrap();
+        store
+            .fail(task.id, "err1", true, 1, &TaskMetrics::default())
+            .await
+            .unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.retry_count, 1);
         // Second fail: retry_count 1 >= max_retries 1, moves to history.
-        store.fail(task.id, "err2", true, 1, &TaskMetrics { read_bytes: 100, write_bytes: 50 }).await.unwrap();
+        store
+            .fail(
+                task.id,
+                "err2",
+                true,
+                1,
+                &TaskMetrics {
+                    read_bytes: 100,
+                    write_bytes: 50,
+                },
+            )
+            .await
+            .unwrap();
 
         // Should be in history now.
         assert!(store.task_by_key(&key).await.unwrap().is_none());
@@ -1605,7 +1626,10 @@ mod tests {
             store
                 .complete(
                     task.id,
-                    &TaskMetrics { read_bytes: 1000, write_bytes: 500 },
+                    &TaskMetrics {
+                        read_bytes: 1000,
+                        write_bytes: 500,
+                    },
                 )
                 .await
                 .unwrap();
@@ -1683,7 +1707,10 @@ mod tests {
         store
             .complete(
                 task.id,
-                &TaskMetrics { read_bytes: 100, write_bytes: 50 },
+                &TaskMetrics {
+                    read_bytes: 100,
+                    write_bytes: 50,
+                },
             )
             .await
             .unwrap();
@@ -1999,7 +2026,10 @@ mod tests {
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
-        store.complete(child.id, &TaskMetrics::default()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Parent should be ready to finalize.
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
@@ -2022,7 +2052,10 @@ mod tests {
             store.submit(&sub).await.unwrap();
         }
         let child = store.pop_next().await.unwrap().unwrap();
-        store.complete(child.id, &TaskMetrics::default()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
         assert_eq!(resolution, Some(ParentResolution::StillWaiting));
@@ -2042,7 +2075,10 @@ mod tests {
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
-        store.fail(child.id, "boom", false, 0, &TaskMetrics::default()).await.unwrap();
+        store
+            .fail(child.id, "boom", false, 0, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let resolution = store.try_resolve_parent(parent_id).await.unwrap();
         assert_eq!(
@@ -2096,7 +2132,10 @@ mod tests {
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
 
-        store.complete(child.id, &TaskMetrics::default()).await.unwrap();
+        store
+            .complete(child.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         // Check history record has parent_id.
         let hist = store.history(10, 0).await.unwrap();
@@ -2115,7 +2154,10 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
         assert!(!task.fail_fast);
 
-        store.complete(task.id, &TaskMetrics::default()).await.unwrap();
+        store
+            .complete(task.id, &TaskMetrics::default())
+            .await
+            .unwrap();
 
         let hist = store.history(10, 0).await.unwrap();
         assert!(!hist[0].fail_fast);

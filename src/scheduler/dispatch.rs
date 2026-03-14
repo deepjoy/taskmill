@@ -332,10 +332,7 @@ pub(crate) async fn spawn_task(
                     }
                 }
 
-                if let Err(e) = store
-                    .complete(task_id, &metrics)
-                    .await
-                {
+                if let Err(e) = store.complete(task_id, &metrics).await {
                     tracing::error!(task_id, error = %e, "failed to record task completion");
                 }
                 // Remove from active tracking AFTER the store write completes.
@@ -375,13 +372,7 @@ pub(crate) async fn spawn_task(
                     "task failed"
                 );
                 if let Err(e) = store
-                    .fail(
-                        task_id,
-                        &te.message,
-                        te.retryable,
-                        max_retries,
-                        &metrics,
-                    )
+                    .fail(task_id, &te.message, te.retryable, max_retries, &metrics)
                     .await
                 {
                     tracing::error!(task_id, error = %e, "failed to record task failure");
@@ -419,7 +410,10 @@ pub(crate) async fn spawn_task(
                                 }
                                 // Fail the parent.
                                 let msg = format!("child task {task_id} failed: {}", te.message);
-                                if let Err(e) = store.fail(parent_id, &msg, false, 0, &TaskMetrics::default()).await {
+                                if let Err(e) = store
+                                    .fail(parent_id, &msg, false, 0, &TaskMetrics::default())
+                                    .await
+                                {
                                     tracing::error!(
                                         parent_id,
                                         error = %e,
@@ -473,7 +467,10 @@ async fn handle_parent_resolution(
         Ok(Some(ParentResolution::Failed(reason))) => {
             // All children done but some failed — fail the parent.
             if let Ok(Some(parent)) = store.task_by_id(parent_id).await {
-                if let Err(e) = store.fail(parent_id, &reason, false, 0, &TaskMetrics::default()).await {
+                if let Err(e) = store
+                    .fail(parent_id, &reason, false, 0, &TaskMetrics::default())
+                    .await
+                {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
                 }
                 let _ = event_tx.send(SchedulerEvent::Failed {

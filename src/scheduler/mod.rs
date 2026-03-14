@@ -27,7 +27,9 @@ use crate::registry::{TaskExecutor, TaskTypeRegistry};
 use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
-use crate::task::{generate_dedup_key, SubmitOutcome, TaskLookup, TaskMetrics, TaskSubmission, TypedTask};
+use crate::task::{
+    generate_dedup_key, SubmitOutcome, TaskLookup, TaskMetrics, TaskSubmission, TypedTask,
+};
 
 use dispatch::ActiveTaskMap;
 use gate::{DefaultDispatchGate, GateContext};
@@ -587,7 +589,13 @@ impl Scheduler {
             );
             self.inner
                 .store
-                .fail(parent_id, "no executor for finalize", false, 0, &TaskMetrics::default())
+                .fail(
+                    parent_id,
+                    "no executor for finalize",
+                    false,
+                    0,
+                    &TaskMetrics::default(),
+                )
                 .await?;
             return Ok(true);
         };
