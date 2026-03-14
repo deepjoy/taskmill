@@ -109,7 +109,7 @@ impl Default for StoreConfig {
 /// ```no_run
 /// # async fn example() -> Result<(), taskmill::store::StoreError> {
 /// use taskmill::store::TaskStore;
-/// use taskmill::task::{TaskSubmission, TaskMetrics, TaskStatus};
+/// use taskmill::task::{TaskSubmission, IoBudget, TaskStatus};
 /// use taskmill::priority::Priority;
 ///
 /// let store = TaskStore::open_memory().await?;
@@ -118,7 +118,7 @@ impl Default for StoreConfig {
 /// let sub = TaskSubmission::new("thumbnail")
 ///     .key("photo-1")
 ///     .payload_raw(br#"{"path":"/a.jpg"}"#.to_vec())
-///     .expected_io(4096, 1024);
+///     .expected_io(IoBudget::disk(4096, 1024));
 /// let outcome = store.submit(&sub).await?;
 /// assert!(outcome.is_inserted());
 ///
@@ -127,7 +127,7 @@ impl Default for StoreConfig {
 /// assert_eq!(task.status, TaskStatus::Running);
 ///
 /// // Complete it — moves to history.
-/// store.complete(task.id, &TaskMetrics { read_bytes: 4096, write_bytes: 1024, ..Default::default() }).await?;
+/// store.complete(task.id, &IoBudget::disk(4096, 1024)).await?;
 /// assert!(store.task_by_id(task.id).await?.is_none()); // gone from active queue
 /// # Ok(())
 /// # }

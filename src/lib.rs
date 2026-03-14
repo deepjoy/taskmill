@@ -60,24 +60,20 @@
 //!
 //! ## IO budgeting
 //!
-//! Each task declares expected read/write bytes (via [`TypedTask`] or
-//! [`TaskSubmission`] fields). The scheduler tracks running IO totals and,
-//! when [resource monitoring](SchedulerBuilder::with_resource_monitoring) is
-//! enabled, compares them against observed system disk throughput to avoid
-//! over-saturating the disk. Executors report actual IO via
-//! [`TaskContext::record_read_bytes`] / [`record_write_bytes`](TaskContext::record_write_bytes),
+//! Each task declares an [`IoBudget`] covering expected disk and network
+//! bytes (via [`TypedTask::expected_io`] or [`TaskSubmission::expected_io`]).
+//! The scheduler tracks running IO totals and, when
+//! [resource monitoring](SchedulerBuilder::with_resource_monitoring) is enabled,
+//! compares them against observed system throughput to avoid over-saturating
+//! the disk or network. Executors report actual IO via
+//! [`TaskContext::record_read_bytes`] / [`record_write_bytes`](TaskContext::record_write_bytes) /
+//! [`record_net_rx_bytes`](TaskContext::record_net_rx_bytes) /
+//! [`record_net_tx_bytes`](TaskContext::record_net_tx_bytes),
 //! which feeds back into historical throughput averages for future scheduling
 //! decisions.
 //!
-//! ### Network IO
-//!
-//! Tasks can also declare expected network IO via
-//! [`TaskSubmission::expected_net_io`] (or [`TypedTask::expected_net_rx_bytes`] /
-//! [`expected_net_tx_bytes`](TypedTask::expected_net_tx_bytes)). Executors report
-//! actual network bytes via [`TaskContext::record_net_rx_bytes`] /
-//! [`record_net_tx_bytes`](TaskContext::record_net_tx_bytes). To throttle tasks
-//! when network bandwidth is saturated, set a bandwidth cap with
-//! [`SchedulerBuilder::bandwidth_limit`] — this registers a built-in
+//! To throttle tasks when network bandwidth is saturated, set a bandwidth
+//! cap with [`SchedulerBuilder::bandwidth_limit`] — this registers a built-in
 //! [`NetworkPressure`] source that maps observed throughput to backpressure.
 //!
 //! ## Task groups
@@ -106,7 +102,7 @@
 //! use std::sync::Arc;
 //! use taskmill::{
 //!     Scheduler, TaskExecutor, TaskContext, TaskError,
-//!     TypedTask, Priority,
+//!     TypedTask, IoBudget, Priority,
 //! };
 //! use serde::{Serialize, Deserialize};
 //! use tokio_util::sync::CancellationToken;
@@ -117,8 +113,7 @@
 //!
 //! impl TypedTask for Thumbnail {
 //!     const TASK_TYPE: &'static str = "thumbnail";
-//!     fn expected_read_bytes(&self) -> i64 { 4_096 }
-//!     fn expected_write_bytes(&self) -> i64 { 1_024 }
+//!     fn expected_io(&self) -> IoBudget { IoBudget::disk(4_096, 1_024) }
 //! }
 //!
 //! // 2. Implement the executor.
@@ -223,11 +218,11 @@
 //! tokio::spawn(async move {
 //!     while let Ok(event) = rx.recv().await {
 //!         match event {
-//!             SchedulerEvent::Progress { task_id, percent, message, .. } => {
-//!                 update_progress_bar(task_id, percent, message);
+//!             SchedulerEvent::Progress { header, percent, message } => {
+//!                 update_progress_bar(header.task_id, percent, message);
 //!             }
-//!             SchedulerEvent::Completed { task_id, .. } => {
-//!                 mark_done(task_id);
+//!             SchedulerEvent::Completed(header) => {
+//!                 mark_done(header.task_id);
 //!             }
 //!             _ => {}
 //!         }
@@ -256,7 +251,7 @@
 //! // Tasks declare their group via the submission:
 //! let sub = TaskSubmission::new("upload-part")
 //!     .group("s3://my-bucket")
-//!     .payload_json(&part)?;
+//!     .payload_json(&part);
 //! scheduler.submit(&sub).await?;
 //!
 //! // Adjust at runtime:
@@ -279,8 +274,8 @@
 //!                 TaskSubmission::new("upload-part")
 //!                     .key(&part.etag)
 //!                     .priority(ctx.record().priority)
-//!                     .payload_json(part)?
-//!                     .expected_io(part.size as i64, 0),
+//!                     .payload_json(part)
+//!                     .expected_io(IoBudget::disk(part.size as i64, 0)),
 //!             ).await?;
 //!         }
 //!         Ok(())
@@ -339,13 +334,12 @@ pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
     EstimatedProgress, GroupLimits, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
-    SchedulerEvent, SchedulerSnapshot, ShutdownMode,
+    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
-    generate_dedup_key, HistoryStatus, ParentResolution, SubmitOutcome, TaskError,
-    TaskHistoryRecord, TaskLookup, TaskMetrics, TaskRecord, TaskStatus, TaskSubmission, TypeStats,
-    TypedTask,
+    generate_dedup_key, HistoryStatus, IoBudget, ParentResolution, SubmitOutcome, TaskError,
+    TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus, TaskSubmission, TypeStats, TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

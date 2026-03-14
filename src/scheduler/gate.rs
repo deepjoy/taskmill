@@ -127,8 +127,8 @@ impl DispatchGate for DefaultDispatchGate {
             if !has_io_headroom(task, ctx).await? {
                 tracing::trace!(
                     task_type = task.task_type,
-                    expected_read = task.expected_read_bytes,
-                    expected_write = task.expected_write_bytes,
+                    expected_read = task.expected_io.disk_read,
+                    expected_write = task.expected_io.disk_write,
                     "task deferred — disk IO budget exhausted — requeuing"
                 );
                 return Ok(false);
@@ -138,8 +138,8 @@ impl DispatchGate for DefaultDispatchGate {
             if !has_net_io_headroom(task, ctx).await? {
                 tracing::trace!(
                     task_type = task.task_type,
-                    expected_rx = task.expected_net_rx_bytes,
-                    expected_tx = task.expected_net_tx_bytes,
+                    expected_rx = task.expected_io.net_rx,
+                    expected_tx = task.expected_io.net_tx,
                     "task deferred — network IO budget exhausted — requeuing"
                 );
                 return Ok(false);
@@ -213,9 +213,9 @@ pub async fn has_io_headroom(task: &TaskRecord, ctx: &GateContext<'_>) -> Result
     let write_capacity = snapshot.io_write_bytes_per_sec * 2.0;
 
     let read_ok = read_capacity == 0.0
-        || (running_read + task.expected_read_bytes) as f64 <= read_capacity * 0.8;
+        || (running_read + task.expected_io.disk_read) as f64 <= read_capacity * 0.8;
     let write_ok = write_capacity == 0.0
-        || (running_write + task.expected_write_bytes) as f64 <= write_capacity * 0.8;
+        || (running_write + task.expected_io.disk_write) as f64 <= write_capacity * 0.8;
 
     Ok(read_ok && write_ok)
 }
@@ -231,7 +231,7 @@ pub async fn has_net_io_headroom(
     ctx: &GateContext<'_>,
 ) -> Result<bool, StoreError> {
     // If the task doesn't declare any network IO, always allow.
-    if task.expected_net_rx_bytes == 0 && task.expected_net_tx_bytes == 0 {
+    if task.expected_io.net_rx == 0 && task.expected_io.net_tx == 0 {
         return Ok(true);
     }
 
@@ -250,9 +250,9 @@ pub async fn has_net_io_headroom(
     let tx_capacity = snapshot.net_tx_bytes_per_sec * 2.0;
 
     let rx_ok =
-        rx_capacity == 0.0 || (running_rx + task.expected_net_rx_bytes) as f64 <= rx_capacity * 0.8;
+        rx_capacity == 0.0 || (running_rx + task.expected_io.net_rx) as f64 <= rx_capacity * 0.8;
     let tx_ok =
-        tx_capacity == 0.0 || (running_tx + task.expected_net_tx_bytes) as f64 <= tx_capacity * 0.8;
+        tx_capacity == 0.0 || (running_tx + task.expected_io.net_tx) as f64 <= tx_capacity * 0.8;
 
     Ok(rx_ok && tx_ok)
 }

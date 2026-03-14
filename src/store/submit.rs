@@ -15,6 +15,10 @@ pub(crate) async fn submit_one(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     sub: &TaskSubmission,
 ) -> Result<SubmitOutcome, StoreError> {
+    if let Some(ref err) = sub.payload_error {
+        return Err(StoreError::Serialization(err.clone()));
+    }
+
     let key = sub.effective_key();
     let priority = sub.priority.value() as i32;
     let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
@@ -28,10 +32,10 @@ pub(crate) async fn submit_one(
     .bind(&sub.label)
     .bind(priority)
     .bind(&sub.payload)
-    .bind(sub.expected_read_bytes)
-    .bind(sub.expected_write_bytes)
-    .bind(sub.expected_net_rx_bytes)
-    .bind(sub.expected_net_tx_bytes)
+    .bind(sub.expected_io.disk_read)
+    .bind(sub.expected_io.disk_write)
+    .bind(sub.expected_io.net_rx)
+    .bind(sub.expected_io.net_tx)
     .bind(sub.parent_id)
     .bind(fail_fast_val)
     .bind(&sub.group_key)
@@ -137,7 +141,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use crate::priority::Priority;
-    use crate::task::{SubmitOutcome, TaskMetrics, TaskSubmission, MAX_PAYLOAD_BYTES};
+    use crate::task::{IoBudget, SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
 
     use super::super::TaskStore;
 
@@ -150,7 +154,7 @@ mod tests {
             .key(key)
             .priority(priority)
             .payload_raw(b"hello".to_vec())
-            .expected_io(1000, 500)
+            .expected_io(IoBudget::disk(1000, 500))
     }
 
     #[tokio::test]
@@ -222,10 +226,7 @@ mod tests {
         assert!(running.requeue);
         assert_eq!(running.requeue_priority, Some(Priority::HIGH));
 
-        store
-            .complete(task.id, &TaskMetrics::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let requeued = store.task_by_key(&key).await.unwrap().unwrap();
         assert_eq!(requeued.status, crate::task::TaskStatus::Pending);
@@ -286,7 +287,7 @@ mod tests {
         store.submit(&sub_high).await.unwrap();
 
         store
-            .fail(task.id, "boom", false, 0, &TaskMetrics::default())
+            .fail(task.id, "boom", false, 0, &IoBudget::default())
             .await
             .unwrap();
 

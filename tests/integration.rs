@@ -236,8 +236,8 @@ async fn priority_ordering_dispatches_highest_first() {
 
         // Drain dispatched events.
         while let Ok(evt) = rx.try_recv() {
-            if let SchedulerEvent::Dispatched { label, .. } = evt {
-                dispatch_order.push(label);
+            if let SchedulerEvent::Dispatched(ref h) = evt {
+                dispatch_order.push(h.label.clone());
             }
         }
     }
@@ -284,7 +284,7 @@ async fn retryable_error_retries_then_succeeds() {
     // Wait for completion.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let completed = wait_for_event(&mut rx, deadline, |evt| {
-        matches!(evt, SchedulerEvent::Completed { .. })
+        matches!(evt, SchedulerEvent::Completed(..))
     })
     .await;
 
@@ -405,10 +405,10 @@ async fn preemption_resumes_after_preemptor_completes() {
 
     while tokio::time::Instant::now() < deadline && !(saw_preempted && saw_urgent_complete) {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Ok(SchedulerEvent::Preempted { label, .. })) if label == "bg-work" => {
+            Ok(Ok(SchedulerEvent::Preempted(ref h))) if h.label == "bg-work" => {
                 saw_preempted = true;
             }
-            Ok(Ok(SchedulerEvent::Completed { label, .. })) if label == "urgent" => {
+            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.label == "urgent" => {
                 saw_urgent_complete = true;
             }
             _ => {}
@@ -566,7 +566,7 @@ async fn group_concurrency_limits_dispatch() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut completed = 0;
     while tokio::time::Instant::now() < deadline && completed < 5 {
-        if let Ok(Ok(SchedulerEvent::Completed { .. })) =
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
             tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
         {
             completed += 1;
@@ -626,7 +626,7 @@ async fn run_loop_processes_queue_to_completion() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut completed = 0;
     while tokio::time::Instant::now() < deadline && completed < 20 {
-        if let Ok(Ok(SchedulerEvent::Completed { .. })) =
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
             tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
         {
             completed += 1;
@@ -684,7 +684,7 @@ async fn concurrent_tasks_respect_max_concurrency() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut completed = 0;
     while tokio::time::Instant::now() < deadline && completed < 10 {
-        if let Ok(Ok(SchedulerEvent::Completed { .. })) =
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
             tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
         {
             completed += 1;
@@ -749,7 +749,7 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
     let parent_failed = wait_for_event(
         &mut rx,
         deadline,
-        |evt| matches!(evt, SchedulerEvent::Failed { task_type, .. } if task_type == "parent"),
+        |evt| matches!(evt, SchedulerEvent::Failed { ref header, .. } if header.task_type == "parent"),
     )
     .await;
 
@@ -805,7 +805,7 @@ async fn non_fail_fast_waits_for_all_children() {
     let parent_completed = wait_for_event(
         &mut rx,
         deadline,
-        |evt| matches!(evt, SchedulerEvent::Completed { task_type, .. } if task_type == "parent"),
+        |evt| matches!(evt, SchedulerEvent::Completed(ref h) if h.task_type == "parent"),
     )
     .await;
 
@@ -918,8 +918,9 @@ async fn io_metrics_recorded_in_history() {
     let key = taskmill::generate_dedup_key("test", Some(b"io-track"));
     let history = sched.store().history_by_key(&key).await.unwrap();
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].actual_read_bytes, Some(4096));
-    assert_eq!(history[0].actual_write_bytes, Some(1024));
+    let actual = history[0].actual_io.unwrap();
+    assert_eq!(actual.disk_read, 4096);
+    assert_eq!(actual.disk_write, 1024);
 }
 
 // ═══════════════════════════════════════════════════════════════════

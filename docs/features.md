@@ -31,8 +31,8 @@ A complete list of taskmill's capabilities.
 
 ## IO Awareness
 
-- **Expected/actual IO tracking** — submit estimated read/write bytes; executors report actual bytes on completion.
-- **Network IO tracking** — tasks can declare expected network RX/TX bytes via `expected_net_io()` and report actuals via `ctx.record_net_rx_bytes()` / `ctx.record_net_tx_bytes()`.
+- **Expected/actual IO tracking** — submit an `IoBudget` (disk read/write, network rx/tx); executors report actual bytes on completion.
+- **Network IO tracking** — tasks can declare expected network RX/TX bytes via `IoBudget::net()` and report actuals via `ctx.record_net_rx_bytes()` / `ctx.record_net_tx_bytes()`.
 - **IO budget gating** — the scheduler compares running task IO estimates against EWMA-smoothed system throughput. New work is deferred when cumulative IO would exceed 80% of observed disk capacity.
 - **Learning from history** — `avg_throughput()` and `history_stats()` compute per-type IO averages from actual completions, enabling callers to refine estimates over time.
 
@@ -70,7 +70,7 @@ A complete list of taskmill's capabilities.
 
 ## Lifecycle Events
 
-- **Broadcast channel** — subscribe via `scheduler.subscribe()` to receive `SchedulerEvent` variants: `Dispatched`, `Completed`, `Failed`, `Preempted`, `Cancelled`, `Progress`, `Waiting`, `Paused`, `Resumed`.
+- **Broadcast channel** — subscribe via `scheduler.subscribe()` to receive `SchedulerEvent` variants: `Dispatched`, `Completed`, `Failed`, `Preempted`, `Cancelled`, `Progress`, `Waiting`, `Paused`, `Resumed`. Task-specific variants share a `TaskEventHeader` with `task_id`, `task_type`, `key`, and `label`.
 - **Tauri-ready** — all events are `Serialize`, designed for direct bridging to frontend via `app_handle.emit()`.
 
 ## Task Management
@@ -81,9 +81,9 @@ A complete list of taskmill's capabilities.
 
 ## Typed Payloads
 
-- **Builder-style submission** — `TaskSubmission::new(type).payload_json(&data)?.expected_io(r, w)` for ergonomic construction with serialization. Use `.label("display name")` to set a human-readable display label independent of the dedup key.
+- **Builder-style submission** — `TaskSubmission::new(type).payload_json(&data).expected_io(budget)` for ergonomic construction with serialization. Serialization errors are deferred to submit time. Use `.label("display name")` to set a human-readable display label independent of the dedup key.
 - **Type-safe deserialization** — `ctx.payload::<T>()?` in executors for zero-boilerplate extraction.
-- **TypedTask trait** — define `TASK_TYPE`, default priority, and expected IO on your struct. Submit with `scheduler.submit_typed()` and deserialize with `ctx.payload::<T>()`.
+- **TypedTask trait** — define `TASK_TYPE`, default priority, expected IO, key, and label on your struct. Submit with `scheduler.submit_typed()` and deserialize with `ctx.payload::<T>()`.
 
 ## Child Tasks
 

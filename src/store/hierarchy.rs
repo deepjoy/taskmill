@@ -154,7 +154,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use crate::priority::Priority;
-    use crate::task::{ParentResolution, TaskMetrics, TaskStatus, TaskSubmission};
+    use crate::task::{IoBudget, ParentResolution, TaskStatus, TaskSubmission};
 
     use super::super::TaskStore;
 
@@ -167,7 +167,7 @@ mod tests {
             .key(key)
             .priority(priority)
             .payload_raw(b"hello".to_vec())
-            .expected_io(1000, 500)
+            .expected_io(IoBudget::disk(1000, 500))
     }
 
     #[tokio::test]
@@ -237,7 +237,7 @@ mod tests {
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
         store
-            .complete(child.id, &TaskMetrics::default())
+            .complete(child.id, &IoBudget::default())
             .await
             .unwrap();
 
@@ -261,7 +261,7 @@ mod tests {
         }
         let child = store.pop_next().await.unwrap().unwrap();
         store
-            .complete(child.id, &TaskMetrics::default())
+            .complete(child.id, &IoBudget::default())
             .await
             .unwrap();
 
@@ -283,7 +283,7 @@ mod tests {
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
         store
-            .fail(child.id, "boom", false, 0, &TaskMetrics::default())
+            .fail(child.id, "boom", false, 0, &IoBudget::default())
             .await
             .unwrap();
 
@@ -333,7 +333,7 @@ mod tests {
         let child = store.pop_next().await.unwrap().unwrap();
 
         store
-            .complete(child.id, &TaskMetrics::default())
+            .complete(child.id, &IoBudget::default())
             .await
             .unwrap();
 
@@ -353,10 +353,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
         assert!(!task.fail_fast);
 
-        store
-            .complete(task.id, &TaskMetrics::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let hist = store.history(10, 0).await.unwrap();
         assert!(!hist[0].fail_fast);

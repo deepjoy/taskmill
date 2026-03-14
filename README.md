@@ -14,7 +14,7 @@ throughput.
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use taskmill::{
-    Scheduler, Priority, TaskSubmission, TaskExecutor,
+    Scheduler, Priority, IoBudget, TaskSubmission, TaskExecutor,
     TaskContext, TaskError,
 };
 
@@ -44,8 +44,7 @@ async fn main() {
 
     let sub = TaskSubmission::new("thumbnail")
         .payload_json(&serde_json::json!({"path": "/photos/img.jpg"}))
-        .unwrap()
-        .expected_io(4096, 1024);
+        .expected_io(IoBudget::disk(4096, 1024));
     scheduler.submit(&sub).await.unwrap();
 
     let token = CancellationToken::new();

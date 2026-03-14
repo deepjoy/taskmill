@@ -48,7 +48,9 @@ use crate::store::TaskStore;
 use dispatch::ActiveTaskMap;
 
 pub use builder::SchedulerBuilder;
-pub use event::{SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode};
+pub use event::{
+    SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
+};
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter};
 

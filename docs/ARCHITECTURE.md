@@ -72,8 +72,10 @@ flowchart TD
 | `priority`            | `INTEGER NOT NULL` — 0 (highest) to 255 (lowest)  |
 | `status`              | `TEXT` — `pending`, `running`, or `paused`         |
 | `payload`             | `BLOB` — opaque, max 1 MiB, executor-defined       |
-| `expected_read_bytes` | Caller's IO estimate for scheduling decisions      |
-| `expected_write_bytes`| Caller's IO estimate for scheduling decisions      |
+| `expected_read_bytes` | Caller's disk read IO estimate (part of `IoBudget`)|
+| `expected_write_bytes`| Caller's disk write IO estimate (part of `IoBudget`)|
+| `expected_net_rx_bytes`| Caller's network RX estimate (part of `IoBudget`) |
+| `expected_net_tx_bytes`| Caller's network TX estimate (part of `IoBudget`) |
 | `retry_count`         | Incremented on each retryable failure              |
 | `last_error`          | Most recent error message (for diagnostics)        |
 | `started_at`          | Set when popped; cleared on pause                  |
@@ -90,8 +92,10 @@ insert into `task_history` in one transaction). Additional columns:
 
 | Column                | Purpose                                            |
 |-----------------------|----------------------------------------------------|
-| `actual_read_bytes`   | Reported by executor on completion                 |
-| `actual_write_bytes`  | Reported by executor on completion                 |
+| `actual_read_bytes`   | Reported by executor on completion (part of `IoBudget`) |
+| `actual_write_bytes`  | Reported by executor on completion (part of `IoBudget`) |
+| `actual_net_rx_bytes` | Reported by executor on completion (part of `IoBudget`) |
+| `actual_net_tx_bytes` | Reported by executor on completion (part of `IoBudget`) |
 | `completed_at`        | Timestamp of completion or failure                 |
 | `duration_ms`         | Computed from `started_at` to `completed_at`       |
 
@@ -253,10 +257,10 @@ knowing the concrete gate type.
 
 ### Expected vs actual IO
 
-Callers provide `expected_read_bytes` / `expected_write_bytes` on submission.
-Executors report `actual_read_bytes` / `actual_write_bytes` on completion. The
-history table stores both, enabling learning via `avg_throughput()` and
-`history_stats()`.
+Callers provide an `IoBudget` (disk read/write, network rx/tx) on submission.
+Executors report actual IO via context methods on completion. The history table
+stores both expected and actual values, enabling learning via `avg_throughput()`
+and `history_stats()`.
 
 ### IO budget heuristic
 
@@ -350,14 +354,18 @@ Executor returns Err(TaskError)
 
 | Event       | When                                         |
 |-------------|----------------------------------------------|
-| `Dispatched`| Task popped and executor spawned             |
-| `Completed` | Task finished successfully                   |
-| `Failed`    | Task failed (includes `will_retry` flag)     |
-| `Preempted` | Task paused for higher-priority work         |
-| `Cancelled` | Task cancelled via `cancel()`                |
-| `Progress`  | Executor reported progress (0.0–1.0)         |
+| `Dispatched(TaskEventHeader)` | Task popped and executor spawned |
+| `Completed(TaskEventHeader)`  | Task finished successfully       |
+| `Failed { header, error, will_retry }` | Task failed (includes retry flag) |
+| `Preempted(TaskEventHeader)`  | Task paused for higher-priority work |
+| `Cancelled(TaskEventHeader)`  | Task cancelled via `cancel()`    |
+| `Progress { header, percent, message }` | Progress update from executor |
+| `Waiting { task_id, children_count }` | Parent entered waiting state |
 | `Paused`    | Scheduler globally paused                    |
 | `Resumed`   | Scheduler globally resumed                   |
+
+Task-specific variants share a `TaskEventHeader` containing `task_id`,
+`task_type`, `key`, and `label`. Use `event.header()` to access it generically.
 
 All variants derive `Serialize`/`Deserialize`.
 

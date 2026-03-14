@@ -1,6 +1,6 @@
 //! Task lifecycle transitions: pop, complete, fail, pause, resume.
 
-use crate::task::{TaskMetrics, TaskRecord};
+use crate::task::{IoBudget, TaskRecord};
 
 use super::row_mapping::row_to_task_record;
 use super::{StoreError, TaskStore};
@@ -13,7 +13,7 @@ async fn insert_history(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     task: &TaskRecord,
     status: &str,
-    metrics: &TaskMetrics,
+    metrics: &IoBudget,
     duration_ms: Option<i64>,
     last_error: Option<&str>,
 ) -> Result<(), StoreError> {
@@ -36,14 +36,14 @@ async fn insert_history(
     .bind(task.priority.value() as i32)
     .bind(status)
     .bind(&task.payload)
-    .bind(task.expected_read_bytes)
-    .bind(task.expected_write_bytes)
-    .bind(task.expected_net_rx_bytes)
-    .bind(task.expected_net_tx_bytes)
-    .bind(metrics.read_bytes)
-    .bind(metrics.write_bytes)
-    .bind(metrics.net_rx_bytes)
-    .bind(metrics.net_tx_bytes)
+    .bind(task.expected_io.disk_read)
+    .bind(task.expected_io.disk_write)
+    .bind(task.expected_io.net_rx)
+    .bind(task.expected_io.net_tx)
+    .bind(metrics.disk_read)
+    .bind(metrics.disk_write)
+    .bind(metrics.net_rx)
+    .bind(metrics.net_tx)
     .bind(retry_count)
     .bind(last_error)
     .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -140,7 +140,7 @@ impl TaskStore {
     }
 
     /// Mark a task as completed and move it to history.
-    pub async fn complete(&self, id: i64, metrics: &TaskMetrics) -> Result<(), StoreError> {
+    pub async fn complete(&self, id: i64, metrics: &IoBudget) -> Result<(), StoreError> {
         tracing::debug!(task_id = id, "store.complete: BEGIN tx");
         let mut conn = self.begin_write().await?;
 
@@ -171,7 +171,7 @@ impl TaskStore {
     pub async fn complete_with_record(
         &self,
         task: &TaskRecord,
-        metrics: &TaskMetrics,
+        metrics: &IoBudget,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = task.id, "store.complete_with_record: BEGIN tx");
         let mut conn = self.begin_write().await?;
@@ -191,7 +191,7 @@ impl TaskStore {
     async fn complete_inner(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         task: &TaskRecord,
-        metrics: &TaskMetrics,
+        metrics: &IoBudget,
     ) -> Result<(), StoreError> {
         let duration_ms = compute_duration_ms(task);
 
@@ -238,7 +238,7 @@ impl TaskStore {
         error: &str,
         retryable: bool,
         max_retries: i32,
-        metrics: &TaskMetrics,
+        metrics: &IoBudget,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = id, "store.fail: BEGIN tx");
         let mut conn = self.begin_write().await?;
@@ -271,7 +271,7 @@ impl TaskStore {
         error: &str,
         retryable: bool,
         max_retries: i32,
-        metrics: &TaskMetrics,
+        metrics: &IoBudget,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = task.id, "store.fail_with_record: BEGIN tx");
         let mut conn = self.begin_write().await?;
@@ -295,7 +295,7 @@ impl TaskStore {
         error: &str,
         retryable: bool,
         max_retries: i32,
-        metrics: &TaskMetrics,
+        metrics: &IoBudget,
     ) -> Result<(), StoreError> {
         if retryable && task.retry_count < max_retries {
             // Requeue with incremented retry count, same priority.
@@ -345,7 +345,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use crate::priority::Priority;
-    use crate::task::{HistoryStatus, TaskMetrics, TaskStatus, TaskSubmission};
+    use crate::task::{HistoryStatus, IoBudget, TaskStatus, TaskSubmission};
 
     use super::super::TaskStore;
 
@@ -358,7 +358,7 @@ mod tests {
             .key(key)
             .priority(priority)
             .payload_raw(b"hello".to_vec())
-            .expected_io(1000, 500)
+            .expected_io(IoBudget::disk(1000, 500))
     }
 
     #[tokio::test]
@@ -396,14 +396,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .complete(
-                task.id,
-                &TaskMetrics {
-                    read_bytes: 2000,
-                    write_bytes: 1000,
-                    ..Default::default()
-                },
-            )
+            .complete(task.id, &IoBudget::disk(2000, 1000))
             .await
             .unwrap();
 
@@ -412,7 +405,7 @@ mod tests {
         let hist = store.history_by_key(&key).await.unwrap();
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].status, HistoryStatus::Completed);
-        assert_eq!(hist[0].actual_read_bytes, Some(2000));
+        assert_eq!(hist[0].actual_io.unwrap().disk_read, 2000);
     }
 
     #[tokio::test]
@@ -424,7 +417,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .fail(task.id, "transient error", true, 3, &TaskMetrics::default())
+            .fail(task.id, "transient error", true, 3, &IoBudget::default())
             .await
             .unwrap();
 
@@ -443,23 +436,13 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .fail(task.id, "err1", true, 1, &TaskMetrics::default())
+            .fail(task.id, "err1", true, 1, &IoBudget::default())
             .await
             .unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.retry_count, 1);
         store
-            .fail(
-                task.id,
-                "err2",
-                true,
-                1,
-                &TaskMetrics {
-                    read_bytes: 100,
-                    write_bytes: 50,
-                    ..Default::default()
-                },
-            )
+            .fail(task.id, "err2", true, 1, &IoBudget::disk(100, 50))
             .await
             .unwrap();
 
@@ -493,14 +476,18 @@ mod tests {
     async fn running_io_totals() {
         let store = test_store().await;
 
-        let mut sub = make_submission("io-1", Priority::NORMAL);
-        sub.expected_read_bytes = 5000;
-        sub.expected_write_bytes = 2000;
+        let sub = TaskSubmission::new("test")
+            .key("io-1")
+            .priority(Priority::NORMAL)
+            .payload_raw(b"hello".to_vec())
+            .expected_io(IoBudget::disk(5000, 2000));
         store.submit(&sub).await.unwrap();
 
-        let mut sub2 = make_submission("io-2", Priority::NORMAL);
-        sub2.expected_read_bytes = 3000;
-        sub2.expected_write_bytes = 1000;
+        let sub2 = TaskSubmission::new("test")
+            .key("io-2")
+            .priority(Priority::NORMAL)
+            .payload_raw(b"hello".to_vec())
+            .expected_io(IoBudget::disk(3000, 1000));
         store.submit(&sub2).await.unwrap();
 
         store.pop_next().await.unwrap();
@@ -517,10 +504,7 @@ mod tests {
         let sub = make_submission("reuse", Priority::NORMAL);
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
-        store
-            .complete(task.id, &TaskMetrics::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let outcome = store.submit(&sub).await.unwrap();
         assert!(outcome.is_inserted());

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 use crate::priority::Priority;
-use crate::task::{HistoryStatus, TaskHistoryRecord, TaskRecord, TaskStatus};
+use crate::task::{HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus};
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
     // SQLite stores as "YYYY-MM-DD HH:MM:SS". Parse with chrono.
@@ -32,10 +32,12 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         priority: Priority::new(priority_val as u8),
         status: status_str.parse().unwrap_or(TaskStatus::Pending),
         payload: row.get("payload"),
-        expected_read_bytes: row.get("expected_read_bytes"),
-        expected_write_bytes: row.get("expected_write_bytes"),
-        expected_net_rx_bytes: row.get("expected_net_rx_bytes"),
-        expected_net_tx_bytes: row.get("expected_net_tx_bytes"),
+        expected_io: IoBudget {
+            disk_read: row.get("expected_read_bytes"),
+            disk_write: row.get("expected_write_bytes"),
+            net_rx: row.get("expected_net_rx_bytes"),
+            net_tx: row.get("expected_net_tx_bytes"),
+        },
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
         created_at: parse_datetime(&created_at_str),
@@ -57,6 +59,18 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
     let parent_id: Option<i64> = row.get("parent_id");
     let fail_fast_val: i32 = row.get("fail_fast");
 
+    // Actual IO: if all four columns are NULL, return None; otherwise construct IoBudget.
+    let actual_read: Option<i64> = row.get("actual_read_bytes");
+    let actual_write: Option<i64> = row.get("actual_write_bytes");
+    let actual_rx: Option<i64> = row.get("actual_net_rx_bytes");
+    let actual_tx: Option<i64> = row.get("actual_net_tx_bytes");
+    let actual_io = actual_read.map(|dr| IoBudget {
+        disk_read: dr,
+        disk_write: actual_write.unwrap_or(0),
+        net_rx: actual_rx.unwrap_or(0),
+        net_tx: actual_tx.unwrap_or(0),
+    });
+
     TaskHistoryRecord {
         id: row.get("id"),
         task_type: row.get("task_type"),
@@ -65,14 +79,13 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         priority: Priority::new(priority_val as u8),
         status: status_str.parse().unwrap_or(HistoryStatus::Failed),
         payload: row.get("payload"),
-        expected_read_bytes: row.get("expected_read_bytes"),
-        expected_write_bytes: row.get("expected_write_bytes"),
-        expected_net_rx_bytes: row.get("expected_net_rx_bytes"),
-        expected_net_tx_bytes: row.get("expected_net_tx_bytes"),
-        actual_read_bytes: row.get("actual_read_bytes"),
-        actual_write_bytes: row.get("actual_write_bytes"),
-        actual_net_rx_bytes: row.get("actual_net_rx_bytes"),
-        actual_net_tx_bytes: row.get("actual_net_tx_bytes"),
+        expected_io: IoBudget {
+            disk_read: row.get("expected_read_bytes"),
+            disk_write: row.get("expected_write_bytes"),
+            net_rx: row.get("expected_net_rx_bytes"),
+            net_tx: row.get("expected_net_tx_bytes"),
+        },
+        actual_io,
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
         created_at: parse_datetime(&created_at_str),
