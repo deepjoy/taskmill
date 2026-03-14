@@ -102,7 +102,9 @@ pub struct TaskRecord {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    /// Estimated network receive bytes for IO budget scheduling.
     pub expected_net_rx_bytes: i64,
+    /// Estimated network transmit bytes for IO budget scheduling.
     pub expected_net_tx_bytes: i64,
     pub retry_count: i32,
     pub last_error: Option<String>,
@@ -148,11 +150,15 @@ pub struct TaskHistoryRecord {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    /// Estimated network receive bytes declared at submission.
     pub expected_net_rx_bytes: i64,
+    /// Estimated network transmit bytes declared at submission.
     pub expected_net_tx_bytes: i64,
     pub actual_read_bytes: Option<i64>,
     pub actual_write_bytes: Option<i64>,
+    /// Actual network receive bytes reported by the executor.
     pub actual_net_rx_bytes: Option<i64>,
+    /// Actual network transmit bytes reported by the executor.
     pub actual_net_tx_bytes: Option<i64>,
     pub retry_count: i32,
     pub last_error: Option<String>,
@@ -170,14 +176,20 @@ pub struct TaskHistoryRecord {
 
 /// Accumulated IO metrics captured by the scheduler after an executor finishes.
 ///
-/// Executors report metrics incrementally via [`TaskContext::record_read_bytes`](crate::TaskContext::record_read_bytes)
-/// and [`TaskContext::record_write_bytes`](crate::TaskContext::record_write_bytes).
+/// Executors report metrics incrementally via [`TaskContext::record_read_bytes`](crate::TaskContext::record_read_bytes),
+/// [`record_write_bytes`](crate::TaskContext::record_write_bytes),
+/// [`record_net_rx_bytes`](crate::TaskContext::record_net_rx_bytes), and
+/// [`record_net_tx_bytes`](crate::TaskContext::record_net_tx_bytes).
 /// This struct is the snapshot read by the scheduler — executors never construct it directly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskMetrics {
+    /// Actual disk bytes read during execution.
     pub read_bytes: i64,
+    /// Actual disk bytes written during execution.
     pub write_bytes: i64,
+    /// Actual network bytes received during execution.
     pub net_rx_bytes: i64,
+    /// Actual network bytes transmitted during execution.
     pub net_tx_bytes: i64,
 }
 
@@ -325,7 +337,9 @@ pub struct TaskSubmission {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    /// Estimated network receive bytes for IO budget scheduling.
     pub expected_net_rx_bytes: i64,
+    /// Estimated network transmit bytes for IO budget scheduling.
     pub expected_net_tx_bytes: i64,
     /// Parent task ID for hierarchical tasks. Set automatically by
     /// [`TaskContext::spawn_child`](crate::TaskContext::spawn_child).

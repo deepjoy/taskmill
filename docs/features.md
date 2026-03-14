@@ -15,6 +15,13 @@ A complete list of taskmill's capabilities.
 - **Atomic dispatch** — pop operations use `UPDATE ... WHERE id = (SELECT ...) RETURNING *` for race-free claiming with no lost tasks.
 - **Runtime-adjustable concurrency** — change `max_concurrency` at runtime via `set_max_concurrency()`.
 
+## Task Groups
+
+- **Per-group concurrency** — assign tasks to named groups via `.group(key)` on `TaskSubmission` or `TypedTask::group_key()`. The scheduler limits how many tasks in the same group can run concurrently.
+- **Configurable limits** — set per-group limits at build time with `.group_concurrency(group, limit)` or a default for all groups with `.default_group_concurrency(limit)`.
+- **Runtime-adjustable** — change limits at runtime via `set_group_limit()`, `remove_group_limit()`, and `set_default_group_concurrency()`.
+- **Independent of global concurrency** — group limits are checked *in addition to* `max_concurrency`. A task must pass both the global and group gate to be dispatched.
+
 ## Deduplication
 
 - **Key-based dedup** — each task gets a SHA-256 key derived from `task_type + payload` (or an explicit key). A `UNIQUE(key)` constraint with `INSERT OR IGNORE` prevents duplicate submissions.
@@ -25,15 +32,17 @@ A complete list of taskmill's capabilities.
 ## IO Awareness
 
 - **Expected/actual IO tracking** — submit estimated read/write bytes; executors report actual bytes on completion.
+- **Network IO tracking** — tasks can declare expected network RX/TX bytes via `expected_net_io()` and report actuals via `ctx.record_net_rx_bytes()` / `ctx.record_net_tx_bytes()`.
 - **IO budget gating** — the scheduler compares running task IO estimates against EWMA-smoothed system throughput. New work is deferred when cumulative IO would exceed 80% of observed disk capacity.
 - **Learning from history** — `avg_throughput()` and `history_stats()` compute per-type IO averages from actual completions, enabling callers to refine estimates over time.
 
 ## Resource Monitoring
 
-- **Cross-platform** — CPU and disk IO via `sysinfo` on Linux, macOS, and Windows. Feature-gated under `sysinfo-monitor` (enabled by default).
+- **Cross-platform** — CPU, disk IO, and network throughput via `sysinfo` on Linux, macOS, and Windows. Feature-gated under `sysinfo-monitor` (enabled by default).
 - **EWMA smoothing** — raw samples are smoothed with an exponentially weighted moving average (alpha=0.3, configurable) to avoid spiky readings.
 - **Two-trait design** — `ResourceSampler` (raw platform readings) and `ResourceReader` (smoothed snapshots) are separated for testability and custom implementations.
 - **Custom samplers** — disable the `sysinfo-monitor` feature and provide your own `ResourceSampler` for containers, cgroups, or mobile platforms.
+- **Network bandwidth pressure** — built-in `NetworkPressure` source maps observed RX+TX throughput against a configurable bandwidth cap to backpressure. Enable via `.bandwidth_limit(bytes_per_sec)` on the builder.
 
 ## Backpressure
 
@@ -61,7 +70,7 @@ A complete list of taskmill's capabilities.
 
 ## Lifecycle Events
 
-- **Broadcast channel** — subscribe via `scheduler.subscribe()` to receive `SchedulerEvent` variants: `Dispatched`, `Completed`, `Failed`, `Preempted`, `Cancelled`, `Progress`, `Paused`, `Resumed`.
+- **Broadcast channel** — subscribe via `scheduler.subscribe()` to receive `SchedulerEvent` variants: `Dispatched`, `Completed`, `Failed`, `Preempted`, `Cancelled`, `Progress`, `Waiting`, `Paused`, `Resumed`.
 - **Tauri-ready** — all events are `Serialize`, designed for direct bridging to frontend via `app_handle.emit()`.
 
 ## Task Management
@@ -72,7 +81,7 @@ A complete list of taskmill's capabilities.
 
 ## Typed Payloads
 
-- **Builder-style submission** — `TaskSubmission::new(type).payload_json(&data)?.expected_io(r, w)` for ergonomic construction with serialization.
+- **Builder-style submission** — `TaskSubmission::new(type).payload_json(&data)?.expected_io(r, w)` for ergonomic construction with serialization. Use `.label("display name")` to set a human-readable display label independent of the dedup key.
 - **Type-safe deserialization** — `ctx.payload::<T>()?` in executors for zero-boilerplate extraction.
 - **TypedTask trait** — define `TASK_TYPE`, default priority, and expected IO on your struct. Submit with `scheduler.submit_typed()` and deserialize with `ctx.payload::<T>()`.
 

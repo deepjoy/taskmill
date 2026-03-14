@@ -1,10 +1,10 @@
 //! The scheduler: configuration, event stream, and the main run loop.
 //!
 //! [`Scheduler`] coordinates task execution — popping from the
-//! [`TaskStore`], applying [backpressure](crate::backpressure)
-//! and IO-budget checks, preempting lower-priority work, and emitting
-//! [`SchedulerEvent`]s for UI integration. Use [`SchedulerBuilder`] for
-//! ergonomic construction.
+//! [`TaskStore`], applying [backpressure](crate::backpressure),
+//! IO-budget checks, and [group concurrency](crate::GroupLimits) limits,
+//! preempting lower-priority work, and emitting [`SchedulerEvent`]s for UI
+//! integration. Use [`SchedulerBuilder`] for ergonomic construction.
 //!
 //! See the [crate-level docs](crate) for a full walkthrough of the task
 //! lifecycle, common patterns, and how the dispatch loop works.

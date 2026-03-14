@@ -1,14 +1,16 @@
 //! System resource monitoring for IO-aware scheduling.
 //!
-//! Implement [`ResourceSampler`] to feed CPU and disk IO metrics into the
-//! scheduler, or use the built-in [`sysinfo_monitor`] module (enabled by the
-//! `sysinfo-monitor` feature) for cross-platform monitoring. Enable via
-//! [`SchedulerBuilder::with_resource_monitoring`](crate::SchedulerBuilder::with_resource_monitoring)
+//! Implement [`ResourceSampler`] to feed CPU, disk IO, and network throughput
+//! metrics into the scheduler, or use the built-in [`sysinfo_monitor`] module
+//! (enabled by the `sysinfo-monitor` feature) for cross-platform monitoring.
+//! Enable via [`SchedulerBuilder::with_resource_monitoring`](crate::SchedulerBuilder::with_resource_monitoring)
 //! or provide a custom sampler with
 //! [`SchedulerBuilder::resource_sampler`](crate::SchedulerBuilder::resource_sampler).
 //!
 //! The scheduler reads the latest EWMA-smoothed snapshot via [`ResourceReader`]
-//! when making IO-budget dispatch decisions.
+//! when making IO-budget dispatch decisions. For network-aware throttling, use
+//! [`SchedulerBuilder::bandwidth_limit`](crate::SchedulerBuilder::bandwidth_limit)
+//! to register a built-in [`NetworkPressure`](network_pressure::NetworkPressure) source.
 
 pub mod sampler;
 

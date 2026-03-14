@@ -114,6 +114,7 @@ All scheduler state changes are broadcast as `SchedulerEvent` variants:
 | `Preempted { task_id, task_type, key, label }` | Task paused for higher-priority work |
 | `Cancelled { task_id, task_type, key, label }` | Task cancelled via `scheduler.cancel()` |
 | `Progress { task_id, task_type, key, label, percent, message }` | Progress update from executor |
+| `Waiting { task_id, children_count }` | Parent task entered waiting state after spawning children |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
 

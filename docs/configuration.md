@@ -142,6 +142,9 @@ All `SchedulerBuilder` methods:
 | `with_resource_monitoring()` | Enable platform resource monitoring. |
 | `resource_sampler(sampler)` | Provide a custom `ResourceSampler`. |
 | `sampler_config(config)` | Configure sample interval and smoothing. |
+| `bandwidth_limit(bytes_per_sec)` | Set a network bandwidth cap; registers a built-in `NetworkPressure` source. |
+| `default_group_concurrency(n)` | Default concurrency limit for grouped tasks (0 = unlimited). |
+| `group_concurrency(group, n)` | Per-group concurrency limit override. |
 | `app_state(state)` | Register a state type (multiple types can coexist). |
 | `app_state_arc(arc)` | Register a state type from a pre-existing `Arc`. |
 | `build()` | Build and return the `Scheduler`. |
