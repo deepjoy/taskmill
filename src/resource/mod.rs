@@ -12,6 +12,8 @@
 
 pub mod sampler;
 
+pub mod network_pressure;
+
 #[cfg(feature = "sysinfo-monitor")]
 pub mod sysinfo_monitor;
 
@@ -26,6 +28,10 @@ pub struct ResourceSnapshot {
     pub io_read_bytes_per_sec: f64,
     /// Disk write throughput in bytes/sec (EWMA-smoothed).
     pub io_write_bytes_per_sec: f64,
+    /// Network receive throughput in bytes/sec (EWMA-smoothed).
+    pub net_rx_bytes_per_sec: f64,
+    /// Network transmit throughput in bytes/sec (EWMA-smoothed).
+    pub net_tx_bytes_per_sec: f64,
 }
 
 impl Default for ResourceSnapshot {
@@ -34,6 +40,8 @@ impl Default for ResourceSnapshot {
             cpu_usage: 0.0,
             io_read_bytes_per_sec: 0.0,
             io_write_bytes_per_sec: 0.0,
+            net_rx_bytes_per_sec: 0.0,
+            net_tx_bytes_per_sec: 0.0,
         }
     }
 }

@@ -102,6 +102,8 @@ pub struct TaskRecord {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    pub expected_net_rx_bytes: i64,
+    pub expected_net_tx_bytes: i64,
     pub retry_count: i32,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -114,6 +116,9 @@ pub struct TaskRecord {
     /// fails the parent immediately. When `false`, the parent waits for all
     /// children to finish before resolving.
     pub fail_fast: bool,
+    /// Optional group key for per-group concurrency limiting (e.g. an
+    /// endpoint URL). Tasks in the same group share a concurrency budget.
+    pub group_key: Option<String>,
 }
 
 impl TaskRecord {
@@ -143,8 +148,12 @@ pub struct TaskHistoryRecord {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    pub expected_net_rx_bytes: i64,
+    pub expected_net_tx_bytes: i64,
     pub actual_read_bytes: Option<i64>,
     pub actual_write_bytes: Option<i64>,
+    pub actual_net_rx_bytes: Option<i64>,
+    pub actual_net_tx_bytes: Option<i64>,
     pub retry_count: i32,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -155,6 +164,8 @@ pub struct TaskHistoryRecord {
     pub parent_id: Option<i64>,
     /// Whether the parent used fail-fast semantics.
     pub fail_fast: bool,
+    /// Optional group key for per-group concurrency limiting.
+    pub group_key: Option<String>,
 }
 
 /// Accumulated IO metrics captured by the scheduler after an executor finishes.
@@ -166,6 +177,8 @@ pub struct TaskHistoryRecord {
 pub struct TaskMetrics {
     pub read_bytes: i64,
     pub write_bytes: i64,
+    pub net_rx_bytes: i64,
+    pub net_tx_bytes: i64,
 }
 
 /// Reported by the executor on failure.
@@ -312,6 +325,8 @@ pub struct TaskSubmission {
     pub payload: Option<Vec<u8>>,
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
+    pub expected_net_rx_bytes: i64,
+    pub expected_net_tx_bytes: i64,
     /// Parent task ID for hierarchical tasks. Set automatically by
     /// [`TaskContext::spawn_child`](crate::TaskContext::spawn_child).
     pub parent_id: Option<i64>,
@@ -320,6 +335,12 @@ pub struct TaskSubmission {
     /// children to finish before resolving. Only meaningful for parent tasks
     /// that spawn children.
     pub fail_fast: bool,
+    /// Optional group key for per-group concurrency limiting.
+    ///
+    /// Tasks with the same group key share a concurrency budget controlled
+    /// by [`SchedulerBuilder::group_concurrency`](crate::SchedulerBuilder::group_concurrency).
+    /// Use this to prevent hammering a single endpoint (e.g. `"s3://my-bucket"`).
+    pub group_key: Option<String>,
 }
 
 impl TaskSubmission {
@@ -348,8 +369,11 @@ impl TaskSubmission {
             payload: None,
             expected_read_bytes: 0,
             expected_write_bytes: 0,
+            expected_net_rx_bytes: 0,
+            expected_net_tx_bytes: 0,
             parent_id: None,
             fail_fast: true,
+            group_key: None,
         }
     }
 
@@ -400,7 +424,7 @@ impl TaskSubmission {
         self
     }
 
-    /// Set expected IO bytes for budget-based scheduling.
+    /// Set expected disk IO bytes for budget-based scheduling.
     ///
     /// The scheduler uses these estimates to avoid saturating disk throughput
     /// when [resource monitoring](crate::SchedulerBuilder::with_resource_monitoring)
@@ -408,6 +432,26 @@ impl TaskSubmission {
     pub fn expected_io(mut self, read_bytes: i64, write_bytes: i64) -> Self {
         self.expected_read_bytes = read_bytes;
         self.expected_write_bytes = write_bytes;
+        self
+    }
+
+    /// Set expected network IO bytes for budget-based scheduling.
+    ///
+    /// The scheduler uses these estimates to avoid saturating network bandwidth
+    /// when [resource monitoring](crate::SchedulerBuilder::with_resource_monitoring)
+    /// is enabled. Default: 0 for both.
+    pub fn expected_net_io(mut self, rx_bytes: i64, tx_bytes: i64) -> Self {
+        self.expected_net_rx_bytes = rx_bytes;
+        self.expected_net_tx_bytes = tx_bytes;
+        self
+    }
+
+    /// Set the group key for per-group concurrency limiting.
+    ///
+    /// Tasks with the same group key share a concurrency budget. Use this
+    /// to prevent hammering a single endpoint (e.g. `"s3://my-bucket"`).
+    pub fn group(mut self, group_key: impl Into<String>) -> Self {
+        self.group_key = Some(group_key.into());
         self
     }
 
@@ -484,13 +528,23 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// Unique name used to register and look up the executor.
     const TASK_TYPE: &'static str;
 
-    /// Estimated bytes this task will read. Default: 0.
+    /// Estimated bytes this task will read from disk. Default: 0.
     fn expected_read_bytes(&self) -> i64 {
         0
     }
 
-    /// Estimated bytes this task will write. Default: 0.
+    /// Estimated bytes this task will write to disk. Default: 0.
     fn expected_write_bytes(&self) -> i64 {
+        0
+    }
+
+    /// Estimated bytes this task will receive over the network. Default: 0.
+    fn expected_net_rx_bytes(&self) -> i64 {
+        0
+    }
+
+    /// Estimated bytes this task will transmit over the network. Default: 0.
+    fn expected_net_tx_bytes(&self) -> i64 {
         0
     }
 
@@ -498,16 +552,24 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     fn priority(&self) -> Priority {
         Priority::NORMAL
     }
+
+    /// Optional group key for per-group concurrency limiting. Default: `None`.
+    fn group_key(&self) -> Option<String> {
+        None
+    }
 }
 
 impl TaskSubmission {
     /// Create a submission from a [`TypedTask`], serializing the payload and
-    /// pulling task type, priority, and IO estimates from the trait.
+    /// pulling task type, priority, IO estimates, and group key from the trait.
     pub fn from_typed<T: TypedTask>(task: &T) -> Result<Self, serde_json::Error> {
-        Ok(Self::new(T::TASK_TYPE)
+        let mut sub = Self::new(T::TASK_TYPE)
             .priority(task.priority())
             .payload_json(task)?
-            .expected_io(task.expected_read_bytes(), task.expected_write_bytes()))
+            .expected_io(task.expected_read_bytes(), task.expected_write_bytes())
+            .expected_net_io(task.expected_net_rx_bytes(), task.expected_net_tx_bytes());
+        sub.group_key = task.group_key();
+        Ok(sub)
     }
 }
 
@@ -627,6 +689,49 @@ mod tests {
         let sub = TaskSubmission::from_typed(&Minimal).unwrap();
         assert_eq!(sub.expected_read_bytes, 0);
         assert_eq!(sub.expected_write_bytes, 0);
+        assert_eq!(sub.expected_net_rx_bytes, 0);
+        assert_eq!(sub.expected_net_tx_bytes, 0);
         assert_eq!(sub.priority, Priority::NORMAL);
+        assert!(sub.group_key.is_none());
+    }
+
+    #[test]
+    fn typed_task_with_network_and_group() {
+        #[derive(Serialize, Deserialize)]
+        struct S3Upload {
+            bucket: String,
+            size: i64,
+        }
+
+        impl TypedTask for S3Upload {
+            const TASK_TYPE: &'static str = "s3-upload";
+
+            fn expected_net_tx_bytes(&self) -> i64 {
+                self.size
+            }
+
+            fn group_key(&self) -> Option<String> {
+                Some(format!("s3://{}", self.bucket))
+            }
+        }
+
+        let task = S3Upload {
+            bucket: "my-bucket".into(),
+            size: 10_000_000,
+        };
+        let sub = TaskSubmission::from_typed(&task).unwrap();
+        assert_eq!(sub.expected_net_tx_bytes, 10_000_000);
+        assert_eq!(sub.expected_net_rx_bytes, 0);
+        assert_eq!(sub.group_key.as_deref(), Some("s3://my-bucket"));
+    }
+
+    #[test]
+    fn submission_builder_net_io_and_group() {
+        let sub = TaskSubmission::new("upload")
+            .expected_net_io(5000, 10000)
+            .group("s3://bucket-a");
+        assert_eq!(sub.expected_net_rx_bytes, 5000);
+        assert_eq!(sub.expected_net_tx_bytes, 10000);
+        assert_eq!(sub.group_key.as_deref(), Some("s3://bucket-a"));
     }
 }

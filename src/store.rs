@@ -126,7 +126,7 @@ impl Default for StoreConfig {
 /// assert_eq!(task.status, TaskStatus::Running);
 ///
 /// // Complete it — moves to history.
-/// store.complete(task.id, &TaskMetrics { read_bytes: 4096, write_bytes: 1024 }).await?;
+/// store.complete(task.id, &TaskMetrics { read_bytes: 4096, write_bytes: 1024, ..Default::default() }).await?;
 /// assert!(store.task_by_id(task.id).await?.is_none()); // gone from active queue
 /// # Ok(())
 /// # }
@@ -201,6 +201,9 @@ impl TaskStore {
         sqlx::raw_sql(include_str!("../migrations/002_add_label.sql"))
             .execute(&self.pool)
             .await?;
+        sqlx::raw_sql(include_str!("../migrations/003_net_io_and_groups.sql"))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -263,8 +266,8 @@ impl TaskStore {
         let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&sub.task_type)
         .bind(&key)
@@ -273,8 +276,11 @@ impl TaskStore {
         .bind(&sub.payload)
         .bind(sub.expected_read_bytes)
         .bind(sub.expected_write_bytes)
+        .bind(sub.expected_net_rx_bytes)
+        .bind(sub.expected_net_tx_bytes)
         .bind(sub.parent_id)
         .bind(fail_fast_val)
+        .bind(&sub.group_key)
         .execute(&self.pool)
         .await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT end");
@@ -350,8 +356,8 @@ impl TaskStore {
             let priority = sub.priority.value() as i32;
             let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
             let result = sqlx::query(
-                "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, parent_id, fail_fast)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(&key)
@@ -360,8 +366,11 @@ impl TaskStore {
             .bind(&sub.payload)
             .bind(sub.expected_read_bytes)
             .bind(sub.expected_write_bytes)
+            .bind(sub.expected_net_rx_bytes)
+            .bind(sub.expected_net_tx_bytes)
             .bind(sub.parent_id)
             .bind(fail_fast_val)
+            .bind(&sub.group_key)
             .execute(&mut *conn)
             .await?;
 
@@ -480,8 +489,6 @@ impl TaskStore {
 
     /// Mark a task as completed and move it to history.
     pub async fn complete(&self, id: i64, metrics: &TaskMetrics) -> Result<(), StoreError> {
-        let actual_read_bytes = metrics.read_bytes;
-        let actual_write_bytes = metrics.write_bytes;
         tracing::debug!(task_id = id, "store.complete: BEGIN tx");
         let mut conn = self.begin_write().await?;
 
@@ -513,9 +520,10 @@ impl TaskStore {
         let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
         sqlx::query(
             "INSERT INTO task_history (task_type, key, label, priority, status, payload,
-                expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
-                retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
-             VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
+                actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
+                retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key)
+             VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.task_type)
         .bind(&task.key)
@@ -524,8 +532,12 @@ impl TaskStore {
         .bind(&task.payload)
         .bind(task.expected_read_bytes)
         .bind(task.expected_write_bytes)
-        .bind(actual_read_bytes)
-        .bind(actual_write_bytes)
+        .bind(task.expected_net_rx_bytes)
+        .bind(task.expected_net_tx_bytes)
+        .bind(metrics.read_bytes)
+        .bind(metrics.write_bytes)
+        .bind(metrics.net_rx_bytes)
+        .bind(metrics.net_tx_bytes)
         .bind(task.retry_count)
         .bind(&task.last_error)
         .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -536,6 +548,7 @@ impl TaskStore {
         .bind(duration_ms)
         .bind(task.parent_id)
         .bind(fail_fast_val)
+        .bind(&task.group_key)
         .execute(&mut *conn)
         .await?;
 
@@ -625,9 +638,10 @@ impl TaskStore {
             let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
             sqlx::query(
                 "INSERT INTO task_history (task_type, key, label, priority, status, payload,
-                    expected_read_bytes, expected_write_bytes, actual_read_bytes, actual_write_bytes,
-                    retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast)
-                 VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
+                    actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
+                    retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key)
+                 VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&task.task_type)
             .bind(&task.key)
@@ -636,8 +650,12 @@ impl TaskStore {
             .bind(&task.payload)
             .bind(task.expected_read_bytes)
             .bind(task.expected_write_bytes)
+            .bind(task.expected_net_rx_bytes)
+            .bind(task.expected_net_tx_bytes)
             .bind(metrics.read_bytes)
             .bind(metrics.write_bytes)
+            .bind(metrics.net_rx_bytes)
+            .bind(metrics.net_tx_bytes)
             .bind(task.retry_count + 1)
             .bind(error)
             .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
@@ -645,6 +663,7 @@ impl TaskStore {
             .bind(duration_ms)
             .bind(task.parent_id)
             .bind(fail_fast_val)
+            .bind(&task.group_key)
             .execute(&mut *conn)
             .await?;
 
@@ -778,6 +797,27 @@ impl TaskStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Sum of expected network rx/tx bytes for all running tasks.
+    pub async fn running_net_io_totals(&self) -> Result<(i64, i64), StoreError> {
+        let row: (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(expected_net_rx_bytes), 0), COALESCE(SUM(expected_net_tx_bytes), 0)
+             FROM tasks WHERE status = 'running'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Count of running tasks in a specific group.
+    pub async fn running_count_for_group(&self, group_key: &str) -> Result<i64, StoreError> {
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE group_key = ? AND status = 'running'")
+                .bind(group_key)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count.0)
     }
 
     // ── Query: history ──────────────────────────────────────────────
@@ -1170,6 +1210,8 @@ fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         payload: row.get("payload"),
         expected_read_bytes: row.get("expected_read_bytes"),
         expected_write_bytes: row.get("expected_write_bytes"),
+        expected_net_rx_bytes: row.get("expected_net_rx_bytes"),
+        expected_net_tx_bytes: row.get("expected_net_tx_bytes"),
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
         created_at: parse_datetime(&created_at_str),
@@ -1178,6 +1220,7 @@ fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         requeue_priority: requeue_priority_val.map(|p| Priority::new(p as u8)),
         parent_id,
         fail_fast: fail_fast_val != 0,
+        group_key: row.get("group_key"),
     }
 }
 
@@ -1200,8 +1243,12 @@ fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
         payload: row.get("payload"),
         expected_read_bytes: row.get("expected_read_bytes"),
         expected_write_bytes: row.get("expected_write_bytes"),
+        expected_net_rx_bytes: row.get("expected_net_rx_bytes"),
+        expected_net_tx_bytes: row.get("expected_net_tx_bytes"),
         actual_read_bytes: row.get("actual_read_bytes"),
         actual_write_bytes: row.get("actual_write_bytes"),
+        actual_net_rx_bytes: row.get("actual_net_rx_bytes"),
+        actual_net_tx_bytes: row.get("actual_net_tx_bytes"),
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
         created_at: parse_datetime(&created_at_str),
@@ -1210,6 +1257,7 @@ fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
         duration_ms: row.get("duration_ms"),
         parent_id,
         fail_fast: fail_fast_val != 0,
+        group_key: row.get("group_key"),
     }
 }
 
@@ -1461,6 +1509,7 @@ mod tests {
                 &TaskMetrics {
                     read_bytes: 2000,
                     write_bytes: 1000,
+                    ..Default::default()
                 },
             )
             .await
@@ -1521,6 +1570,7 @@ mod tests {
                 &TaskMetrics {
                     read_bytes: 100,
                     write_bytes: 50,
+                    ..Default::default()
                 },
             )
             .await
@@ -1597,6 +1647,7 @@ mod tests {
                     &TaskMetrics {
                         read_bytes: 1000,
                         write_bytes: 500,
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1678,6 +1729,7 @@ mod tests {
                 &TaskMetrics {
                     read_bytes: 100,
                     write_bytes: 50,
+                    ..Default::default()
                 },
             )
             .await

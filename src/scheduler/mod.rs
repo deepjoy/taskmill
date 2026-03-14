@@ -34,6 +34,7 @@ use crate::task::{
 use dispatch::ActiveTaskMap;
 use gate::{DefaultDispatchGate, GateContext};
 
+pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter};
 
 // ── Snapshot ────────────────────────────────────────────────────────
@@ -227,6 +228,8 @@ struct SchedulerInner {
     paused: AtomicBool,
     /// Wakes the run loop when new work is submitted or the scheduler is resumed.
     work_notify: Arc<Notify>,
+    /// Per-group concurrency limits.
+    group_limits: GroupLimits,
 }
 
 /// IO-aware priority scheduler.
@@ -292,6 +295,7 @@ impl Scheduler {
                 app_state,
                 paused: AtomicBool::new(false),
                 work_notify: Arc::new(Notify::new()),
+                group_limits: GroupLimits::new(),
             }),
         }
     }
@@ -511,6 +515,7 @@ impl Scheduler {
         let gate_ctx = GateContext {
             store: &self.inner.store,
             resource_reader: reader_guard.as_ref(),
+            group_limits: Some(&self.inner.group_limits),
         };
 
         // Admission check while the task is still pending — no running
@@ -842,6 +847,25 @@ impl Scheduler {
     pub fn is_paused(&self) -> bool {
         self.inner.paused.load(AtomicOrdering::Acquire)
     }
+
+    /// Set the concurrency limit for a specific task group.
+    ///
+    /// Tasks with a matching `group_key` will be throttled so that at most
+    /// `limit` run concurrently, independent of the global concurrency cap.
+    pub fn set_group_limit(&self, group: impl Into<String>, limit: usize) {
+        self.inner.group_limits.set_limit(group.into(), limit);
+    }
+
+    /// Remove a per-group concurrency override, falling back to the default.
+    pub fn remove_group_limit(&self, group: &str) {
+        self.inner.group_limits.remove_limit(group);
+    }
+
+    /// Set the default concurrency limit for any grouped task without a
+    /// specific override. `0` means unlimited.
+    pub fn set_default_group_concurrency(&self, limit: usize) {
+        self.inner.group_limits.set_default(limit);
+    }
 }
 
 // ── Builder ─────────────────────────────────────────────────────────
@@ -879,6 +903,9 @@ pub struct SchedulerBuilder {
     custom_sampler: Option<Box<dyn ResourceSampler>>,
     sampler_config: SamplerConfig,
     app_state_entries: Vec<(std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>)>,
+    bandwidth_limit_bps: Option<f64>,
+    default_group_concurrency: usize,
+    group_concurrency_overrides: Vec<(String, usize)>,
 }
 
 impl SchedulerBuilder {
@@ -896,6 +923,9 @@ impl SchedulerBuilder {
             custom_sampler: None,
             sampler_config: SamplerConfig::default(),
             app_state_entries: Vec::new(),
+            bandwidth_limit_bps: None,
+            default_group_concurrency: 0,
+            group_concurrency_overrides: Vec::new(),
         }
     }
 
@@ -1001,6 +1031,39 @@ impl SchedulerBuilder {
         self
     }
 
+    /// Set a network bandwidth cap (combined RX+TX, in bytes per second).
+    ///
+    /// Registers a built-in [`NetworkPressure`](crate::resource::network_pressure::NetworkPressure)
+    /// source that maps observed throughput to backpressure. When throughput
+    /// approaches this limit, low-priority tasks are throttled.
+    ///
+    /// Requires resource monitoring to be enabled (either
+    /// [`with_resource_monitoring`](Self::with_resource_monitoring) or a custom
+    /// [`resource_sampler`](Self::resource_sampler)).
+    pub fn bandwidth_limit(mut self, max_bytes_per_sec: f64) -> Self {
+        self.bandwidth_limit_bps = Some(max_bytes_per_sec);
+        self.enable_resource_monitoring = true;
+        self
+    }
+
+    /// Set the default concurrency limit for any grouped task.
+    ///
+    /// `0` means unlimited (no limit for groups without an explicit override).
+    /// Default: 0.
+    pub fn default_group_concurrency(mut self, limit: usize) -> Self {
+        self.default_group_concurrency = limit;
+        self
+    }
+
+    /// Set a concurrency limit for a specific task group.
+    ///
+    /// Tasks with a matching `group_key` will be limited to at most `limit`
+    /// concurrent executions.
+    pub fn group_concurrency(mut self, group: impl Into<String>, limit: usize) -> Self {
+        self.group_concurrency_overrides.push((group.into(), limit));
+        self
+    }
+
     /// Register shared application state accessible from every executor via
     /// [`TaskContext::state`](crate::TaskContext::state).
     ///
@@ -1069,11 +1132,29 @@ impl SchedulerBuilder {
             registry.register_erased(&name, executor);
         }
 
+        // Prepare resource monitoring reader early so NetworkPressure can
+        // reference it before the gate is boxed.
+        let reader = if self.enable_resource_monitoring {
+            Some(SmoothedReader::new())
+        } else {
+            None
+        };
+
         // Build gate from pressure sources + policy.
         let mut pressure = CompositePressure::new();
         for source in self.pressure_sources {
             pressure.add_source(source);
         }
+
+        // Register NetworkPressure if a bandwidth limit was set.
+        if let (Some(bw_limit), Some(ref reader)) = (self.bandwidth_limit_bps, &reader) {
+            let net_pressure = crate::resource::network_pressure::NetworkPressure::new(
+                Arc::new(reader.clone()) as Arc<dyn ResourceReader>,
+                bw_limit,
+            );
+            pressure.add_source(Box::new(net_pressure));
+        }
+
         let policy = self
             .policy
             .unwrap_or_else(ThrottlePolicy::default_three_tier);
@@ -1086,8 +1167,23 @@ impl SchedulerBuilder {
         let scheduler =
             Scheduler::with_gate(store, self.config, Arc::new(registry), gate, app_state);
 
+        // Apply group concurrency limits.
+        if self.default_group_concurrency > 0 {
+            scheduler
+                .inner
+                .group_limits
+                .set_default(self.default_group_concurrency);
+        }
+        for (group, limit) in self.group_concurrency_overrides {
+            scheduler.inner.group_limits.set_limit(group, limit);
+        }
+
         // Set up resource monitoring.
-        if self.enable_resource_monitoring {
+        if let Some(reader) = reader {
+            scheduler
+                .set_resource_reader(Arc::new(reader.clone()))
+                .await;
+
             #[cfg(feature = "sysinfo-monitor")]
             let sampler: Box<dyn ResourceSampler> = self
                 .custom_sampler
@@ -1097,11 +1193,6 @@ impl SchedulerBuilder {
             let sampler: Box<dyn ResourceSampler> = self
                 .custom_sampler
                 .expect("resource monitoring enabled but no custom sampler provided and sysinfo-monitor feature is disabled");
-
-            let reader = SmoothedReader::new();
-            scheduler
-                .set_resource_reader(Arc::new(reader.clone()))
-                .await;
 
             // Spawn sampler loop — it will stop when the scheduler's sampler_token is cancelled.
             let sampler_arc = Arc::new(tokio::sync::Mutex::new(sampler));

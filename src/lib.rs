@@ -288,10 +288,11 @@ pub mod task;
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
+pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    EstimatedProgress, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
+    EstimatedProgress, GroupLimits, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
     SchedulerEvent, SchedulerSnapshot, ShutdownMode,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};

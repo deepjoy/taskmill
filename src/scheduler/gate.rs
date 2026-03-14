@@ -4,9 +4,13 @@
 //! requeued. The built-in [`DefaultDispatchGate`] applies backpressure
 //! throttling and IO-budget checks.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use tokio::sync::RwLock;
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::resource::ResourceReader;
@@ -27,6 +31,8 @@ pub struct GateContext<'a> {
     pub store: &'a TaskStore,
     /// The current resource reader, if monitoring is enabled.
     pub resource_reader: Option<&'a Arc<dyn ResourceReader>>,
+    /// Group concurrency limits (if configured).
+    pub group_limits: Option<&'a GroupLimits>,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -119,15 +125,45 @@ impl DispatchGate for DefaultDispatchGate {
                 return Ok(false);
             }
 
-            // IO budget check.
+            // IO budget check (disk).
             if !has_io_headroom(task, ctx).await? {
                 tracing::trace!(
                     task_type = task.task_type,
                     expected_read = task.expected_read_bytes,
                     expected_write = task.expected_write_bytes,
-                    "task deferred — IO budget exhausted — requeuing"
+                    "task deferred — disk IO budget exhausted — requeuing"
                 );
                 return Ok(false);
+            }
+
+            // Network IO budget check.
+            if !has_net_io_headroom(task, ctx).await? {
+                tracing::trace!(
+                    task_type = task.task_type,
+                    expected_rx = task.expected_net_rx_bytes,
+                    expected_tx = task.expected_net_tx_bytes,
+                    "task deferred — network IO budget exhausted — requeuing"
+                );
+                return Ok(false);
+            }
+
+            // Group concurrency check.
+            if let Some(group_key) = &task.group_key {
+                if let Some(limits) = ctx.group_limits {
+                    if let Some(limit) = limits.limit_for(group_key) {
+                        let running = ctx.store.running_count_for_group(group_key).await?;
+                        if running >= limit as i64 {
+                            tracing::trace!(
+                                task_type = task.task_type,
+                                group = group_key,
+                                running,
+                                limit,
+                                "task deferred — group concurrency saturated — requeuing"
+                            );
+                            return Ok(false);
+                        }
+                    }
+                }
             }
 
             Ok(true)
@@ -184,4 +220,113 @@ pub async fn has_io_headroom(task: &TaskRecord, ctx: &GateContext<'_>) -> Result
         || (running_write + task.expected_write_bytes) as f64 <= write_capacity * 0.8;
 
     Ok(read_ok && write_ok)
+}
+
+// ── Network IO Budget ─────────────────────────────────────────────
+
+/// Check if there is network IO headroom for a task given current running
+/// network IO and system capacity.
+///
+/// Parallel to [`has_io_headroom`] but for network throughput.
+pub async fn has_net_io_headroom(
+    task: &TaskRecord,
+    ctx: &GateContext<'_>,
+) -> Result<bool, StoreError> {
+    // If the task doesn't declare any network IO, always allow.
+    if task.expected_net_rx_bytes == 0 && task.expected_net_tx_bytes == 0 {
+        return Ok(true);
+    }
+
+    let Some(reader) = ctx.resource_reader else {
+        return Ok(true);
+    };
+
+    let snapshot = reader.latest();
+    if snapshot.net_rx_bytes_per_sec == 0.0 && snapshot.net_tx_bytes_per_sec == 0.0 {
+        return Ok(true);
+    }
+
+    let (running_rx, running_tx) = ctx.store.running_net_io_totals().await?;
+
+    let rx_capacity = snapshot.net_rx_bytes_per_sec * 2.0;
+    let tx_capacity = snapshot.net_tx_bytes_per_sec * 2.0;
+
+    let rx_ok =
+        rx_capacity == 0.0 || (running_rx + task.expected_net_rx_bytes) as f64 <= rx_capacity * 0.8;
+    let tx_ok =
+        tx_capacity == 0.0 || (running_tx + task.expected_net_tx_bytes) as f64 <= tx_capacity * 0.8;
+
+    Ok(rx_ok && tx_ok)
+}
+
+// ── Group Limits ──────────────────────────────────────────────────
+
+/// Per-group concurrency limits for task dispatch.
+///
+/// Groups allow throttling tasks that target the same resource (e.g. an S3
+/// endpoint) independently from global concurrency. Each task can optionally
+/// carry a `group_key`; the scheduler checks the running count for that group
+/// against the configured limit before dispatching.
+///
+/// A default limit applies to any group without a specific override. Set
+/// the default to `0` (the initial value) to disable group limiting for
+/// groups without explicit overrides.
+pub struct GroupLimits {
+    default: AtomicUsize,
+    overrides: RwLock<HashMap<String, usize>>,
+}
+
+impl Default for GroupLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GroupLimits {
+    /// Create a new `GroupLimits` with no default limit and no overrides.
+    pub fn new() -> Self {
+        Self {
+            default: AtomicUsize::new(0),
+            overrides: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the effective limit for a group.
+    ///
+    /// Returns the per-group override if set, otherwise the default limit.
+    /// Returns `None` if neither is configured (default is 0 = unlimited).
+    pub fn limit_for(&self, group: &str) -> Option<usize> {
+        // Fast path: check overrides with a read lock.
+        if let Some(&limit) = self.overrides.blocking_read().get(group) {
+            return Some(limit);
+        }
+        let default = self.default.load(Ordering::Relaxed);
+        if default > 0 {
+            Some(default)
+        } else {
+            None
+        }
+    }
+
+    /// Set a concurrency limit for a specific group.
+    pub fn set_limit(&self, group: String, limit: usize) {
+        self.overrides.blocking_write().insert(group, limit);
+    }
+
+    /// Remove the per-group override, falling back to the default.
+    pub fn remove_limit(&self, group: &str) {
+        self.overrides.blocking_write().remove(group);
+    }
+
+    /// Set the default limit applied to groups without a specific override.
+    ///
+    /// `0` means unlimited (no group limiting for unconfigured groups).
+    pub fn set_default(&self, limit: usize) {
+        self.default.store(limit, Ordering::Relaxed);
+    }
+
+    /// Read the current default limit.
+    pub fn default_limit(&self) -> usize {
+        self.default.load(Ordering::Relaxed)
+    }
 }
