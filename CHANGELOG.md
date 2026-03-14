@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/deepjoy/taskmill/compare/v0.2.0...v0.3.0) - 2026-03-14
+
+### Added
+
+- add network IO pressure and per-group concurrency limiting ([#7](https://github.com/deepjoy/taskmill/pull/7))
+
+### Other
+
+- [**breaking**] builder pattern for TaskSubmission and accessor methods for TaskContext ([#6](https://github.com/deepjoy/taskmill/pull/6))
+- [**breaking**] simplify executor API with incremental IO tracking and expanded docs ([#4](https://github.com/deepjoy/taskmill/pull/4))
+
 ## [0.2.0](https://github.com/deepjoy/taskmill/compare/v0.1.1...v0.2.0) - 2026-03-14
 
 ### Added
