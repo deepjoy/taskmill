@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::resource::ResourceReader;
@@ -297,7 +295,7 @@ impl GroupLimits {
     /// Returns `None` if neither is configured (default is 0 = unlimited).
     pub fn limit_for(&self, group: &str) -> Option<usize> {
         // Fast path: check overrides with a read lock.
-        if let Some(&limit) = self.overrides.blocking_read().get(group) {
+        if let Some(&limit) = self.overrides.read().unwrap().get(group) {
             return Some(limit);
         }
         let default = self.default.load(Ordering::Relaxed);
@@ -310,12 +308,12 @@ impl GroupLimits {
 
     /// Set a concurrency limit for a specific group.
     pub fn set_limit(&self, group: String, limit: usize) {
-        self.overrides.blocking_write().insert(group, limit);
+        self.overrides.write().unwrap().insert(group, limit);
     }
 
     /// Remove the per-group override, falling back to the default.
     pub fn remove_limit(&self, group: &str) {
-        self.overrides.blocking_write().remove(group);
+        self.overrides.write().unwrap().remove(group);
     }
 
     /// Set the default limit applied to groups without a specific override.
