@@ -1,82 +1,41 @@
 # Persistence & Recovery
 
-Taskmill persists all task state to SQLite, ensuring work survives process restarts, crashes, and power loss.
+Taskmill persists all task state to SQLite. Work survives process restarts, crashes, and power loss — no manual recovery needed.
 
-## SQLite schema
+## What survives a crash
 
-Two tables manage the task lifecycle:
+When your app starts up, taskmill automatically recovers:
 
-### `tasks` — active queue
+- **All queued tasks** are still in the queue at their original priority.
+- **Running tasks** are reset to pending and re-dispatched. The crash doesn't count as a retry.
+- **Dedup keys stay occupied** — no duplicate submissions sneak in during recovery.
+- **Retry counts are preserved** — a task that had retried twice before the crash still has two retries used.
 
-Holds pending, running, and paused tasks.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | INTEGER PRIMARY KEY | Insertion-order ID |
-| `task_type` | TEXT NOT NULL | Executor lookup name |
-| `key` | TEXT NOT NULL UNIQUE | SHA-256 dedup key |
-| `label` | TEXT NOT NULL | Human-readable display name (original dedup key or task type) |
-| `priority` | INTEGER NOT NULL | 0–255 (lower = higher priority) |
-| `status` | TEXT DEFAULT 'pending' | `pending`, `running`, `paused`, or `waiting` |
-| `payload` | BLOB | Opaque task data (max 1 MiB) |
-| `expected_read_bytes` | INTEGER | Estimated disk read IO (part of `IoBudget`) |
-| `expected_write_bytes` | INTEGER | Estimated disk write IO (part of `IoBudget`) |
-| `expected_net_rx_bytes` | INTEGER | Estimated network RX (part of `IoBudget`) |
-| `expected_net_tx_bytes` | INTEGER | Estimated network TX (part of `IoBudget`) |
-| `parent_id` | INTEGER | Parent task ID for child tasks (NULL for top-level) |
-| `fail_fast` | INTEGER DEFAULT 1 | Whether child failure cancels siblings and fails parent |
-| `retry_count` | INTEGER DEFAULT 0 | Number of retries so far |
-| `last_error` | TEXT | Most recent error message |
-| `created_at` | TEXT | ISO 8601 timestamp |
-| `started_at` | TEXT | Set when dispatched, cleared on pause |
-
-**Index:** `idx_tasks_pending(status, priority ASC, id ASC) WHERE status = 'pending'` — partial index for efficient priority-ordered pop.
-
-### `task_history` — completed and failed tasks
-
-| Column | Type | Description |
-|--------|------|-------------|
-| *(all columns from `tasks`, including `label`, `parent_id`, `fail_fast`)* | | |
-| `actual_read_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
-| `actual_write_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
-| `actual_net_rx_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
-| `actual_net_tx_bytes` | INTEGER | Reported by executor (part of `IoBudget`) |
-| `completed_at` | TEXT | ISO 8601 timestamp |
-| `duration_ms` | INTEGER | Wall-clock duration |
-| `status` | TEXT | `completed` or `failed` |
-
-**Index:** `idx_history_type_completed(task_type, completed_at DESC) WHERE status = 'completed'` — for per-type history queries and throughput calculations.
-
-## Crash recovery
-
-On startup, `TaskStore::open()` runs a recovery query:
-
-```sql
-UPDATE tasks SET status = 'pending', started_at = NULL WHERE status = 'running'
-```
-
-This resets any tasks that were mid-execution when the process died. The behavior:
-
-- Tasks return to the priority queue at their original priority
-- `retry_count` is preserved (crash doesn't count as a retry)
-- Dedup keys remain occupied (no duplicate submissions during recovery)
-- Tasks are re-dispatched in priority order on the next scheduler cycle
+The guarantee is **at-least-once execution**: a task might run partially, crash, and re-run from the beginning. Design your executors to be idempotent (or to check for partial work) so re-execution is safe.
 
 ## Deduplication
 
-### How keys are generated
+A common problem: your app submits "upload photo.jpg" twice because the user clicked a button while a sync was already running. Without dedup, you'd upload the same file twice.
 
-Every task gets a SHA-256 key: `SHA-256(task_type + ":" + (explicit_key OR payload))`.
+Taskmill prevents this automatically. Every task gets a unique key derived from its type and payload. If you submit a task with a key that's already in the queue, the duplicate is silently ignored.
 
-- **Implicit key** — if no key is provided, the payload bytes are used. Tasks with the same type and payload get the same key.
-- **Explicit key** — use the `.key()` builder method to control deduplication yourself. Useful when two payloads represent the same logical work (e.g., different timestamps but same file path). The explicit key is also stored as the display `label`.
-- **Type scoping** — the task type is always part of the hash, so `("resize", payload)` and `("compress", payload)` never collide.
+### How keys work
 
-### Lifecycle
+The key is `SHA-256(task_type + ":" + payload)`. Two tasks with the same type and payload always get the same key.
 
-A key is "occupied" while the task is in the `tasks` table (pending, running, paused, waiting, or retrying). When the task moves to `task_history` (completed or failed), the key is freed and can be resubmitted.
+You can also provide explicit keys when the default isn't right — for example, when two payloads represent the same logical work (different timestamps but same file path):
 
-### Submission behavior
+```rust
+let sub = TaskSubmission::new("upload")
+    .payload_json(&data)
+    .key("/photos/img.jpg");  // dedup on file path, not full payload
+```
+
+### Key lifecycle
+
+A key is "occupied" while the task is active — pending, running, paused, waiting, or retrying. When the task completes or permanently fails (moves to history), the key is freed and the same work can be submitted again.
+
+### Submission outcomes
 
 ```rust
 use taskmill::SubmitOutcome;
@@ -99,6 +58,8 @@ let outcomes = scheduler.submit_batch(&[sub1, sub2, sub3]).await?;
 
 ### Looking up tasks by dedup key
 
+Check whether a task has been submitted (or has already completed):
+
 ```rust
 use taskmill::TaskLookup;
 
@@ -110,13 +71,13 @@ match lookup {
 }
 ```
 
-## History retention
+## History and retention
 
-Without pruning, `task_history` grows without bound. Configure automatic retention:
+Completed and failed tasks are moved to a history table. Without pruning, this table grows without bound. Configure automatic retention to keep it manageable.
 
-### By count
+### Recommended settings
 
-Keep the N most recent records:
+For most desktop apps, keeping the last 10,000 records is a good default:
 
 ```rust
 use taskmill::{StoreConfig, RetentionPolicy};
@@ -146,7 +107,7 @@ let scheduler = Scheduler::builder()
 
 ### Pruning frequency
 
-Pruning is amortized — it runs every N task completions (default 100, configurable via `StoreConfig::prune_interval`). Pruning errors are logged but don't affect the completed task.
+Pruning is amortized — it runs every N task completions (default 100, configurable via `StoreConfig::prune_interval`). This keeps per-task overhead low. Pruning errors are logged but don't affect the completed task.
 
 ### Manual pruning
 
@@ -156,13 +117,65 @@ let deleted = store.prune_history_by_count(5_000).await?;
 let deleted = store.prune_history_by_age(30).await?;
 ```
 
-## WAL mode
+## Testing with in-memory stores
 
-The database uses SQLite WAL (Write-Ahead Logging) for concurrent reads with serialized writes. This means multiple readers can query task status while the scheduler is dispatching work.
+For tests, use an in-memory database that doesn't touch the filesystem:
 
-## Connection pooling
+```rust
+let store = TaskStore::open_memory().await?;
+```
 
-The default pool size is 16 connections. Configure via `StoreConfig::max_connections`:
+## SQLite details
+
+You normally don't need to know the schema, but it's documented here for debugging and advanced use.
+
+### `tasks` — active queue
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PRIMARY KEY | Insertion-order ID |
+| `task_type` | TEXT NOT NULL | Executor lookup name |
+| `key` | TEXT NOT NULL UNIQUE | SHA-256 dedup key |
+| `label` | TEXT NOT NULL | Human-readable display name |
+| `priority` | INTEGER NOT NULL | 0–255 (lower = higher priority) |
+| `status` | TEXT DEFAULT 'pending' | `pending`, `running`, `paused`, or `waiting` |
+| `payload` | BLOB | Opaque task data (max 1 MiB) |
+| `expected_read_bytes` | INTEGER | Estimated disk read IO |
+| `expected_write_bytes` | INTEGER | Estimated disk write IO |
+| `expected_net_rx_bytes` | INTEGER | Estimated network RX |
+| `expected_net_tx_bytes` | INTEGER | Estimated network TX |
+| `parent_id` | INTEGER | Parent task ID (NULL for top-level) |
+| `fail_fast` | INTEGER DEFAULT 1 | Whether child failure cancels siblings |
+| `retry_count` | INTEGER DEFAULT 0 | Retries so far |
+| `last_error` | TEXT | Most recent error message |
+| `created_at` | TEXT | ISO 8601 timestamp |
+| `started_at` | TEXT | Set when dispatched, cleared on pause |
+
+**Index:** `idx_tasks_pending(status, priority ASC, id ASC) WHERE status = 'pending'` — partial index for fast priority-ordered dispatch.
+
+### `task_history` — completed and failed tasks
+
+All columns from `tasks`, plus:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `actual_read_bytes` | INTEGER | Reported by executor |
+| `actual_write_bytes` | INTEGER | Reported by executor |
+| `actual_net_rx_bytes` | INTEGER | Reported by executor |
+| `actual_net_tx_bytes` | INTEGER | Reported by executor |
+| `completed_at` | TEXT | ISO 8601 timestamp |
+| `duration_ms` | INTEGER | Wall-clock duration |
+| `status` | TEXT | `completed` or `failed` |
+
+**Index:** `idx_history_type_completed(task_type, completed_at DESC) WHERE status = 'completed'` — for per-type history queries and throughput calculations.
+
+### WAL mode
+
+The database uses SQLite WAL (Write-Ahead Logging) for concurrent reads with serialized writes. Multiple Tauri commands can query task status simultaneously while the scheduler is dispatching work.
+
+### Connection pooling
+
+The default pool size is 16 connections. Increase via `StoreConfig::max_connections` if you have many concurrent readers:
 
 ```rust
 let scheduler = Scheduler::builder()
@@ -172,12 +185,4 @@ let scheduler = Scheduler::builder()
     })
     .build()
     .await?;
-```
-
-## In-memory store for testing
-
-For tests, use an in-memory database that doesn't touch the filesystem:
-
-```rust
-let store = TaskStore::open_memory().await?;
 ```

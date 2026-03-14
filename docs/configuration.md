@@ -1,17 +1,38 @@
 # Configuration
 
+## Recommended defaults
+
+For most Tauri desktop apps, the defaults work well. Here's what you might want to change:
+
+```rust
+use std::time::Duration;
+use taskmill::{Scheduler, ShutdownMode, StoreConfig, RetentionPolicy};
+
+let scheduler = Scheduler::builder()
+    .store_path("tasks.db")
+    .max_concurrency(8)                  // match your IO parallelism
+    .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
+    .with_resource_monitoring()
+    .store_config(StoreConfig {
+        retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
+        ..Default::default()
+    })
+    .build()
+    .await?;
+```
+
 ## SchedulerConfig
 
 Controls scheduling behavior. Set via builder methods or pass directly to `Scheduler::new()`.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `max_concurrency` | `usize` | 4 | Maximum concurrent running tasks. Adjustable at runtime via `set_max_concurrency()`. |
-| `max_retries` | `i32` | 3 | Retry limit before a task is permanently failed. |
-| `preempt_priority` | `Priority` | `REALTIME` (0) | Tasks at or above this priority trigger preemption of lower-priority work. |
-| `poll_interval` | `Duration` | 500ms | Sleep between scheduler dispatch cycles. The scheduler also wakes on `Notify` signals. |
-| `throughput_sample_size` | `i32` | 20 | Number of recent completions used for throughput-based progress extrapolation. |
-| `shutdown_mode` | `ShutdownMode` | `Hard` | `Hard` cancels all tasks immediately. `Graceful(Duration)` waits up to the timeout. |
+| Field | Type | Default | Description | Guidance |
+|-------|------|---------|-------------|----------|
+| `max_concurrency` | `usize` | 4 | Maximum concurrent running tasks. Adjustable at runtime via `set_max_concurrency()`. | Match your IO parallelism — 4–8 for disk-heavy, higher for network-heavy. |
+| `max_retries` | `i32` | 3 | Retry limit before permanent failure. | Increase for flaky networks; decrease for tasks where retrying is wasteful. |
+| `preempt_priority` | `Priority` | `REALTIME` (0) | Tasks at or above this priority trigger preemption. | Leave at `REALTIME` unless you need user-initiated tasks to preempt. |
+| `poll_interval` | `Duration` | 500ms | Sleep between dispatch cycles. The scheduler also wakes immediately on submit. | Lower = more responsive but slightly more CPU. 250ms is fine for interactive apps. |
+| `throughput_sample_size` | `i32` | 20 | Recent completions used for progress extrapolation. | More = smoother estimates but slower to adapt to changes in task behavior. |
+| `shutdown_mode` | `ShutdownMode` | `Hard` | `Hard` cancels immediately. `Graceful(Duration)` waits for running tasks. | Always use `Graceful` for desktop apps to avoid data loss. |
 
 ### Builder methods
 
@@ -33,13 +54,11 @@ let scheduler = Scheduler::builder()
 
 Controls the SQLite connection pool and history retention.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `max_connections` | `u32` | 16 | SQLite connection pool size. |
-| `retention_policy` | `Option<RetentionPolicy>` | `None` | Automatic history pruning. `MaxCount(n)` or `MaxAgeDays(n)`. |
-| `prune_interval` | `u64` | 100 | Number of task completions between automatic prune runs. |
-
-### Builder method
+| Field | Type | Default | Description | Guidance |
+|-------|------|---------|-------------|----------|
+| `max_connections` | `u32` | 16 | SQLite connection pool size. | Increase if you have many concurrent Tauri commands querying task state. |
+| `retention_policy` | `Option<RetentionPolicy>` | `None` | Automatic history pruning. | Set this — without it, history grows without bound. `MaxCount(10_000)` is a good start. |
+| `prune_interval` | `u64` | 100 | Completions between automatic prune runs. | Lower for apps that complete many tasks quickly; higher for slow-completing tasks. |
 
 ```rust
 use taskmill::{StoreConfig, RetentionPolicy};
@@ -57,14 +76,12 @@ let scheduler = Scheduler::builder()
 
 ## SamplerConfig
 
-Controls the resource monitoring background loop.
+Controls the resource monitoring background loop. Only relevant if you call `.with_resource_monitoring()` or provide a custom `ResourceSampler`.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `interval` | `Duration` | 1s | How often to sample system resources. |
-| `ewma_alpha` | `f64` | 0.3 | EWMA smoothing factor. Higher = more responsive to changes, lower = smoother. |
-
-### Builder method
+| Field | Type | Default | Description | Guidance |
+|-------|------|---------|-------------|----------|
+| `interval` | `Duration` | 1s | How often to sample system resources. | 500ms for interactive apps; 2s for background services. |
+| `ewma_alpha` | `f64` | 0.3 | Smoothing factor. Higher = more responsive, lower = smoother. | 0.2 for steady workloads, 0.5 for bursty workloads. See [IO & Backpressure](io-and-backpressure.md#ewma-smoothing). |
 
 ```rust
 use std::time::Duration;
@@ -85,7 +102,7 @@ let scheduler = Scheduler::builder()
 | Variant | Behavior |
 |---------|----------|
 | `Hard` | Cancel all running tasks immediately when the scheduler stops. |
-| `Graceful(Duration)` | Stop dispatching new tasks, wait for running tasks to complete (up to the timeout), then force-cancel any remaining. Stops the resource sampler afterward. |
+| `Graceful(Duration)` | Stop dispatching new tasks, wait for running tasks to complete (up to the timeout), then force-cancel any remaining. |
 
 ## RetentionPolicy
 
@@ -96,30 +113,97 @@ let scheduler = Scheduler::builder()
 
 ## Priority constants
 
-| Constant | Value | Notes |
-|----------|-------|-------|
-| `Priority::REALTIME` | 0 | Highest. Never throttled. Triggers preemption. |
-| `Priority::HIGH` | 64 | |
-| `Priority::NORMAL` | 128 | Default for most tasks. |
-| `Priority::BACKGROUND` | 192 | |
-| `Priority::IDLE` | 255 | Lowest. |
+| Constant | Value | Typical use |
+|----------|-------|-------------|
+| `Priority::REALTIME` | 0 | User-blocking, triggers preemption. |
+| `Priority::HIGH` | 64 | User-initiated actions. |
+| `Priority::NORMAL` | 128 | App-initiated work (default). |
+| `Priority::BACKGROUND` | 192 | Maintenance tasks. |
+| `Priority::IDLE` | 255 | Truly optional work. |
 
 Custom: `Priority::new(n)` for any `u8` value.
+
+## Graceful shutdown
+
+When the scheduler stops (the `CancellationToken` passed to `run()` is cancelled):
+
+- **`Hard`** (default) — all running tasks are immediately cancelled.
+- **`Graceful(Duration)`** — the scheduler stops dispatching new tasks, waits for running tasks to finish up to the timeout, then cancels any stragglers.
+
+Both modes stop the resource sampler. **For desktop apps, always use `Graceful` to avoid interrupting in-progress uploads or file operations.**
+
+## Application state
+
+Executors often need shared services (HTTP clients, database connections, caches). Rather than capturing `Arc<T>` per executor, register state on the builder:
+
+```rust
+let scheduler = Scheduler::builder()
+    .app_state(MyServices { http, db, cache })
+    .app_state(FeatureFlags { dark_mode: true })  // multiple types can coexist
+    .build()
+    .await?;
+
+// In any executor:
+let svc = ctx.state::<MyServices>().expect("state not registered");
+```
+
+State is keyed by `TypeId` — each type has one instance, shared across all tasks. Libraries that embed a shared scheduler can inject their own state after build:
+
+```rust
+scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
+```
 
 ## Feature flags
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `sysinfo-monitor` | Enabled | Cross-platform CPU and disk IO monitoring via `sysinfo`. Disable for mobile targets or custom samplers. |
-
-### Disabling platform monitoring
+| `sysinfo-monitor` | Enabled | Cross-platform CPU, disk IO, and network monitoring via `sysinfo`. Disable for mobile targets or when using a custom sampler. |
 
 ```toml
-[dependencies]
-taskmill = { path = "crates/taskmill", default-features = false }
+# Disable platform monitoring
+taskmill = { version = "0.3", default-features = false }
 ```
 
 When disabled, you can still provide a custom `ResourceSampler` via `.resource_sampler()`.
+
+## Tuning for specific workloads
+
+### Desktop app with file processing
+
+```rust
+Scheduler::builder()
+    .max_concurrency(4)          // don't overwhelm the disk
+    .with_resource_monitoring()  // auto-defer when disk is busy
+    .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
+    .store_config(StoreConfig {
+        retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
+        ..Default::default()
+    })
+```
+
+### Upload/download service
+
+```rust
+Scheduler::builder()
+    .max_concurrency(16)         // network tasks can run in parallel
+    .with_resource_monitoring()
+    .bandwidth_limit(50_000_000.0)  // 50 MB/s cap
+    .group_concurrency("uploads", 4)  // per-endpoint limits
+    .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(30)))
+```
+
+### Background indexer
+
+```rust
+Scheduler::builder()
+    .max_concurrency(2)          // stay out of the way
+    .with_resource_monitoring()
+    .sampler_config(SamplerConfig {
+        ewma_alpha: 0.2,         // smooth — don't react to spikes
+        ..Default::default()
+    })
+    .shutdown_mode(ShutdownMode::Hard)  // indexing can restart
+```
 
 ## Builder reference
 
