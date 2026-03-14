@@ -1,8 +1,11 @@
 //! Progress reporting and throughput-based extrapolation.
 //!
-//! Executors call [`ProgressReporter::report`] to emit percentage updates.
-//! The scheduler combines these with historical throughput data to produce
-//! [`EstimatedProgress`] snapshots for dashboard UIs.
+//! Executors call [`ProgressReporter::report`] (via [`TaskContext::progress`](crate::TaskContext::progress))
+//! to emit percentage updates as [`SchedulerEvent::Progress`]
+//! events. The scheduler combines these with historical throughput data to
+//! produce [`EstimatedProgress`] snapshots, available via
+//! [`Scheduler::estimated_progress`](super::Scheduler::estimated_progress) or
+//! the [`SchedulerSnapshot`](super::SchedulerSnapshot).
 
 use serde::{Deserialize, Serialize};
 

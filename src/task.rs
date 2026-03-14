@@ -4,6 +4,11 @@
 //! [`TaskSubmission`] for enqueuing work, [`TaskRecord`] for in-flight tasks,
 //! [`TaskHistoryRecord`] for completed/failed results, and [`TypedTask`] for
 //! strongly-typed task payloads with built-in serialization.
+//!
+//! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit) or
+//! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed). Executors
+//! receive a [`TaskContext`](crate::TaskContext) with the deserialized record
+//! and report results via [`TaskError`].
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
@@ -159,8 +164,16 @@ pub struct TaskMetrics {
 
 /// Reported by the executor on failure.
 ///
-/// Use the convenience constructors [`TaskError::new`] and
-/// [`TaskError::retryable`] for the common case where IO bytes are zero.
+/// The scheduler uses the [`retryable`](Self::retryable) flag to decide
+/// whether to requeue the task or move it to history as permanently failed:
+///
+/// - **Non-retryable** ([`TaskError::new`]): the task moves directly to the
+///   history table with status `failed`. Use this for logic errors, invalid
+///   payloads, or conditions that won't change on retry.
+/// - **Retryable** ([`TaskError::retryable`]): the task is requeued as
+///   `pending` with an incremented retry count, keeping the same priority.
+///   After [`SchedulerConfig::max_retries`](crate::SchedulerConfig::max_retries)
+///   attempts (default 3), the task fails permanently.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskError {
     pub message: String,
@@ -168,7 +181,8 @@ pub struct TaskError {
 }
 
 impl TaskError {
-    /// Create a non-retryable error.
+    /// Create a **non-retryable** error. The task will fail permanently and
+    /// move to the history table.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -176,7 +190,9 @@ impl TaskError {
         }
     }
 
-    /// Create a retryable error.
+    /// Create a **retryable** error. The task will be requeued as pending
+    /// and retried up to [`SchedulerConfig::max_retries`](crate::SchedulerConfig::max_retries)
+    /// times before failing permanently.
     pub fn retryable(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -324,8 +340,10 @@ impl TaskSubmission {
 ///
 /// Implementing this trait collapses the 6 fields of [`TaskSubmission`] into a
 /// derive-friendly pattern. Use [`Scheduler::submit_typed`](crate::Scheduler::submit_typed)
-/// to submit and [`TaskContext::deserialize_typed`](crate::TaskContext::deserialize_typed)
-/// on the executor side.
+/// to submit and [`TaskContext::payload`](crate::TaskContext::payload) on the
+/// executor side to deserialize. Each `TypedTask` must have a corresponding
+/// [`TaskExecutor`](crate::TaskExecutor) registered under the same
+/// [`TASK_TYPE`](Self::TASK_TYPE) name.
 ///
 /// # Example
 ///

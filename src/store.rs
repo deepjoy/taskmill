@@ -3,6 +3,12 @@
 //! [`TaskStore`] manages the active task queue and completed/failed history
 //! in a single SQLite database. It handles deduplication, priority upgrades,
 //! retries, parent-child hierarchy, and automatic history pruning.
+//!
+//! Most users interact with the store through [`Scheduler`](crate::Scheduler)
+//! methods like [`submit`](crate::Scheduler::submit) and
+//! [`task_lookup`](crate::Scheduler::task_lookup). Direct access is available
+//! via [`Scheduler::store()`](crate::Scheduler::store) for queries and
+//! diagnostics.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,6 +98,45 @@ impl Default for StoreConfig {
 }
 
 /// SQLite-backed persistence layer for the task queue and history.
+///
+/// Most users interact with [`TaskStore`] indirectly through [`Scheduler`](crate::Scheduler),
+/// but direct access is available via [`Scheduler::store()`](crate::Scheduler::store) for
+/// queries and diagnostics.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), taskmill::store::StoreError> {
+/// use taskmill::store::TaskStore;
+/// use taskmill::task::{TaskSubmission, TaskMetrics, TaskStatus};
+/// use taskmill::priority::Priority;
+///
+/// let store = TaskStore::open_memory().await?;
+///
+/// // Submit a task.
+/// let sub = TaskSubmission {
+///     task_type: "thumbnail".into(),
+///     dedup_key: Some("photo-1".into()),
+///     priority: Priority::NORMAL,
+///     payload: Some(br#"{"path":"/a.jpg"}"#.to_vec()),
+///     expected_read_bytes: 4096,
+///     expected_write_bytes: 1024,
+///     parent_id: None,
+///     fail_fast: true,
+/// };
+/// let outcome = store.submit(&sub).await?;
+/// assert!(outcome.is_inserted());
+///
+/// // Pop the highest-priority task and mark it running.
+/// let task = store.pop_next().await?.unwrap();
+/// assert_eq!(task.status, TaskStatus::Running);
+///
+/// // Complete it — moves to history.
+/// store.complete(task.id, &TaskMetrics { read_bytes: 4096, write_bytes: 1024 }).await?;
+/// assert!(store.task_by_id(task.id).await?.is_none()); // gone from active queue
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct TaskStore {
     pool: SqlitePool,

@@ -1,10 +1,13 @@
 //! Executor registration, shared state, and the [`TaskContext`] passed to each task.
 //!
-//! Register one [`TaskExecutor`] per task type with the scheduler. At dispatch
+//! Register one [`TaskExecutor`] per task type via
+//! [`SchedulerBuilder::executor`](crate::SchedulerBuilder::executor) or
+//! [`typed_executor`](crate::SchedulerBuilder::typed_executor). At dispatch
 //! time the scheduler looks up the executor by name and calls
 //! [`execute`](TaskExecutor::execute) with a [`TaskContext`] containing the
 //! persisted record, a cancellation token, a progress reporter, and any
-//! shared application state.
+//! shared application state registered via
+//! [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -178,9 +181,15 @@ pub struct TaskContext {
     pub scheduler: Scheduler,
     /// Shared application state set via [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
     pub(crate) app_state: StateSnapshot,
-    /// Spawner for creating child tasks. `None` for non-hierarchical contexts.
+    /// Spawner for creating child tasks via [`spawn_child`](Self::spawn_child)
+    /// and [`spawn_children`](Self::spawn_children). Present for all tasks
+    /// dispatched by the scheduler — the parent relationship is set automatically
+    /// when children are spawned.
     pub(crate) child_spawner: Option<ChildSpawner>,
-    /// IO bytes accumulator — read by the scheduler after execution.
+    /// IO bytes accumulator fed by [`record_read_bytes`](Self::record_read_bytes)
+    /// and [`record_write_bytes`](Self::record_write_bytes). The scheduler reads
+    /// the final totals after the executor returns and stores them in history
+    /// for future IO budget estimation.
     pub(crate) io: Arc<IoTracker>,
 }
 

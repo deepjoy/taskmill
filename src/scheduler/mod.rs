@@ -1,9 +1,13 @@
 //! The scheduler: configuration, event stream, and the main run loop.
 //!
-//! [`Scheduler`] coordinates task execution — popping from the store,
-//! applying backpressure and IO-budget checks, preempting lower-priority
-//! work, and emitting [`SchedulerEvent`]s for UI integration. Use
-//! [`SchedulerBuilder`] for ergonomic construction.
+//! [`Scheduler`] coordinates task execution — popping from the
+//! [`TaskStore`], applying [backpressure](crate::backpressure)
+//! and IO-budget checks, preempting lower-priority work, and emitting
+//! [`SchedulerEvent`]s for UI integration. Use [`SchedulerBuilder`] for
+//! ergonomic construction.
+//!
+//! See the [crate-level docs](crate) for a full walkthrough of the task
+//! lifecycle, common patterns, and how the dispatch loop works.
 
 pub(crate) mod dispatch;
 pub(crate) mod gate;
@@ -131,20 +135,47 @@ pub enum ShutdownMode {
 }
 
 /// Scheduler configuration.
+///
+/// All fields have sensible defaults (see [`Default`] impl). Most users
+/// configure via [`SchedulerBuilder`] methods rather than constructing
+/// this directly.
 pub struct SchedulerConfig {
     /// Maximum concurrent running tasks. Adjusted dynamically via
-    /// [`Scheduler::set_max_concurrency`].
+    /// [`Scheduler::set_max_concurrency`]. Default: 4.
+    ///
+    /// Increase for IO-bound workloads where tasks spend most of their time
+    /// waiting on network or disk. Decrease for CPU-bound work or when running
+    /// on battery/mobile.
     pub max_concurrency: usize,
     /// Maximum retries before permanent failure. Default: 3.
+    ///
+    /// Only applies to tasks that return [`TaskError::retryable`](crate::TaskError::retryable). Non-retryable
+    /// errors fail immediately regardless of this setting.
     pub max_retries: i32,
-    /// Priority threshold: tasks at or above this priority (lower numeric value)
-    /// trigger preemption of lower-priority running tasks.
+    /// Priority threshold for preemption. Tasks at or above this priority
+    /// (lower numeric value = higher priority) trigger preemption of
+    /// lower-priority running tasks. Default: [`Priority::REALTIME`].
+    ///
+    /// Set to [`Priority::HIGH`] if you want `HIGH`-priority tasks to also
+    /// preempt. Set to `Priority::new(0)` to effectively disable preemption
+    /// (only priority 0 would trigger it).
     pub preempt_priority: Priority,
     /// Interval between scheduler polls when idle. Default: 500ms.
+    ///
+    /// The scheduler also wakes immediately on task submission, so this mainly
+    /// affects how quickly paused tasks are resumed and how often housekeeping
+    /// runs. Lower values increase responsiveness at the cost of CPU usage.
+    /// On mobile targets, the notify-based wake means the CPU can sleep between
+    /// submissions regardless of this interval.
     pub poll_interval: Duration,
-    /// How many recent tasks to consider for IO throughput estimation.
+    /// How many recent completed tasks to sample for IO throughput estimation.
+    /// Default: 20.
+    ///
+    /// Used by the IO budget gate to estimate how much disk bandwidth running
+    /// tasks consume. Larger values smooth out outliers but adapt more slowly
+    /// to changing workloads.
     pub throughput_sample_size: i32,
-    /// Shutdown behavior. Default: Hard.
+    /// Shutdown behavior. Default: [`ShutdownMode::Hard`].
     pub shutdown_mode: ShutdownMode,
 }
 

@@ -1,9 +1,12 @@
 //! Composable backpressure for throttling task dispatch.
 //!
 //! Implement [`PressureSource`] to feed external signals (API load, memory
-//! pressure, queue depth, etc.) into the scheduler. Multiple sources are
-//! combined via [`CompositePressure`], and [`ThrottlePolicy`] maps the
-//! aggregate pressure to per-priority throttle decisions.
+//! pressure, queue depth, etc.) into the scheduler. Register sources via
+//! [`SchedulerBuilder::pressure_source`](crate::SchedulerBuilder::pressure_source).
+//! Multiple sources are combined via [`CompositePressure`] (max wins), and
+//! [`ThrottlePolicy`] maps the aggregate pressure to per-[`Priority`]
+//! throttle decisions. Customize the policy with
+//! [`SchedulerBuilder::throttle_policy`](crate::SchedulerBuilder::throttle_policy).
 
 use crate::priority::Priority;
 
