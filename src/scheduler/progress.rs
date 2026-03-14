@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::store::TaskStore;
 use crate::task::TaskRecord;
 
+use super::dispatch::ActiveTaskMap;
 use super::SchedulerEvent;
 
 // ── Progress Reporter ──────────────────────────────────────────────
@@ -20,6 +21,8 @@ use super::SchedulerEvent;
 ///
 /// Progress reports are emitted as [`SchedulerEvent::Progress`]
 /// events, making them available to the UI via the same broadcast channel.
+/// The reporter also updates the in-memory [`ActiveTaskMap`] directly,
+/// eliminating the need for a per-task broadcast listener.
 ///
 /// # Example
 ///
@@ -41,6 +44,9 @@ pub struct ProgressReporter {
     key: String,
     label: String,
     event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
+    /// Direct handle for updating internal progress tracking without a
+    /// broadcast roundtrip.
+    active: ActiveTaskMap,
 }
 
 impl ProgressReporter {
@@ -50,6 +56,7 @@ impl ProgressReporter {
         key: String,
         label: String,
         event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
+        active: ActiveTaskMap,
     ) -> Self {
         Self {
             task_id,
@@ -57,17 +64,22 @@ impl ProgressReporter {
             key,
             label,
             event_tx,
+            active,
         }
     }
 
     /// Report progress as a percentage (0.0 to 1.0) with an optional message.
     pub fn report(&self, percent: f32, message: Option<String>) {
+        let clamped = percent.clamp(0.0, 1.0);
+        // Update internal progress tracking directly (sync, no broadcast roundtrip).
+        self.active.update_progress(self.task_id, clamped);
+        // Broadcast for external subscribers (UI / Tauri).
         let _ = self.event_tx.send(SchedulerEvent::Progress {
             task_id: self.task_id,
             task_type: self.task_type.clone(),
             key: self.key.clone(),
             label: self.label.clone(),
-            percent: percent.clamp(0.0, 1.0),
+            percent: clamped,
             message,
         });
     }

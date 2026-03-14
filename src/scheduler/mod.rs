@@ -489,7 +489,7 @@ impl Scheduler {
         // Cancel children first (cascade).
         let running_child_ids = self.inner.store.cancel_children(task_id).await?;
         for child_id in &running_child_ids {
-            if let Some(at) = self.inner.active.remove(*child_id).await {
+            if let Some(at) = self.inner.active.remove(*child_id) {
                 at.token.cancel();
                 let _ = self.inner.store.delete(*child_id).await;
                 let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled {
@@ -502,7 +502,7 @@ impl Scheduler {
         }
 
         // Check if it's an active (running) task first.
-        if let Some(at) = self.inner.active.remove(task_id).await {
+        if let Some(at) = self.inner.active.remove(task_id) {
             at.token.cancel();
             self.inner.store.delete(task_id).await?;
             let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled {
@@ -525,7 +525,7 @@ impl Scheduler {
     /// (empty queue, concurrency limit, IO budget exhausted, or throttled).
     pub async fn try_dispatch(&self) -> Result<bool, StoreError> {
         // Check concurrency limit.
-        let active_count = self.inner.active.count().await;
+        let active_count = self.inner.active.count();
         let max = self.inner.max_concurrency.load(AtomicOrdering::Relaxed);
         if active_count >= max {
             return Ok(false);
@@ -605,7 +605,7 @@ impl Scheduler {
     async fn try_dispatch_finalizer(&self) -> Result<bool, StoreError> {
         // Pop the next pending finalizer.
         let parent_id = {
-            let mut finalizers = self.inner.active.pending_finalizers.lock().await;
+            let mut finalizers = self.inner.active.pending_finalizers.lock().unwrap();
             let Some(&id) = finalizers.iter().next() else {
                 return Ok(false);
             };
@@ -705,7 +705,6 @@ impl Scheduler {
                     .inner
                     .active
                     .has_preemptors_for(task.priority, self.inner.preempt_priority)
-                    .await
                 {
                     let _ = self.inner.store.resume(task.id).await;
                 }
@@ -744,7 +743,7 @@ impl Scheduler {
 
         match self.inner.shutdown_mode {
             ShutdownMode::Hard => {
-                self.inner.active.cancel_all().await;
+                self.inner.active.cancel_all();
             }
             ShutdownMode::Graceful(timeout) => {
                 tracing::info!(
@@ -754,7 +753,7 @@ impl Scheduler {
 
                 let deadline = tokio::time::Instant::now() + timeout;
                 loop {
-                    let count = self.inner.active.count().await;
+                    let count = self.inner.active.count();
                     if count == 0 {
                         tracing::info!("all tasks completed during graceful shutdown");
                         break;
@@ -764,7 +763,7 @@ impl Scheduler {
                             remaining = count,
                             "graceful shutdown timeout — cancelling remaining tasks"
                         );
-                        self.inner.active.cancel_all().await;
+                        self.inner.active.cancel_all();
                         break;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -778,7 +777,7 @@ impl Scheduler {
 
     /// Snapshot of currently active (in-memory) tasks.
     pub async fn active_tasks(&self) -> Vec<crate::task::TaskRecord> {
-        self.inner.active.records().await
+        self.inner.active.records()
     }
 
     /// Get estimated progress for all running tasks.
@@ -786,7 +785,7 @@ impl Scheduler {
     /// Combines executor-reported progress with throughput-based extrapolation
     /// using historical average duration for each task type.
     pub async fn estimated_progress(&self) -> Vec<EstimatedProgress> {
-        let snapshots: Vec<_> = self.inner.active.progress_snapshots().await;
+        let snapshots: Vec<_> = self.inner.active.progress_snapshots();
         let mut results = Vec::with_capacity(snapshots.len());
         for (record, reported, reported_at) in snapshots {
             results.push(
@@ -802,7 +801,7 @@ impl Scheduler {
     /// backpressure in one call — exactly what a Tauri command would
     /// return to the frontend.
     pub async fn snapshot(&self) -> Result<SchedulerSnapshot, StoreError> {
-        let running = self.inner.active.records().await;
+        let running = self.inner.active.records();
         let pending_count = self.inner.store.pending_count().await?;
         let paused_count = self.inner.store.paused_count().await?;
         let waiting_count = self.inner.store.waiting_count().await?;
