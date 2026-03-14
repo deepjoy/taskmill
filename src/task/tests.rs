@@ -149,7 +149,11 @@ fn batch_submission_builder_defaults() {
         .default_group("g1")
         .default_priority(Priority::HIGH)
         .task(TaskSubmission::new("test").key("a"))
-        .task(TaskSubmission::new("test").key("b").priority(Priority::REALTIME))
+        .task(
+            TaskSubmission::new("test")
+                .key("b")
+                .priority(Priority::REALTIME),
+        )
         .task(TaskSubmission::new("test").key("c").group("custom-group"))
         .build();
 

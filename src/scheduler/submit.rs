@@ -72,13 +72,10 @@ impl Scheduler {
 
         if any_changed {
             let inserted_ids = outcome.inserted();
-            let _ = self
-                .inner
-                .event_tx
-                .send(SchedulerEvent::BatchSubmitted {
-                    count: submissions.len(),
-                    inserted_ids,
-                });
+            let _ = self.inner.event_tx.send(SchedulerEvent::BatchSubmitted {
+                count: submissions.len(),
+                inserted_ids,
+            });
 
             self.inner.work_notify.notify_one();
         }
@@ -89,10 +86,7 @@ impl Scheduler {
     /// Submit a batch built with [`BatchSubmission`].
     ///
     /// Applies the builder's defaults and delegates to [`submit_batch`](Self::submit_batch).
-    pub async fn submit_built(
-        &self,
-        batch: BatchSubmission,
-    ) -> Result<BatchOutcome, StoreError> {
+    pub async fn submit_built(&self, batch: BatchSubmission) -> Result<BatchOutcome, StoreError> {
         let submissions = batch.build();
         self.submit_batch(&submissions).await
     }

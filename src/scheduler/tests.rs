@@ -4,9 +4,9 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
+use crate::priority::Priority;
 use crate::registry::{TaskContext, TaskExecutor, TaskTypeRegistry};
 use crate::store::TaskStore;
-use crate::priority::Priority;
 use crate::task::{SubmitOutcome, TaskError, TaskSubmission};
 
 use super::{Scheduler, SchedulerConfig, SchedulerEvent, TaskProgress};
