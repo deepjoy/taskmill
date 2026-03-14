@@ -5,7 +5,7 @@
 //! Taskmill provides a generic task scheduling system that:
 //! - Persists tasks to SQLite so the queue survives restarts
 //! - Schedules by priority (0 = highest, 255 = lowest) with [named tiers](Priority)
-//! - Deduplicates tasks by key — submitting an already-queued key is a no-op
+//! - Deduplicates tasks by key with configurable [`DuplicateStrategy`] (skip, supersede, or reject)
 //! - Tracks expected and actual IO bytes (disk and network) per task for budget-based scheduling
 //! - Monitors system CPU, disk, and network throughput to adjust concurrency
 //! - Supports [composable backpressure](PressureSource) from arbitrary external sources
@@ -15,6 +15,8 @@
 //! - Supports [batch submission](Scheduler::submit_batch) with intra-batch dedup and chunking
 //! - Emits [lifecycle events](SchedulerEvent) including progress for UI integration
 //! - Reports [byte-level transfer progress](TaskProgress) with EWMA-smoothed throughput and ETA
+//! - Supports [task cancellation](Scheduler::cancel) with history recording and cleanup hooks
+//! - Supports [task superseding](DuplicateStrategy::Supersede) for atomic cancel-and-replace
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
 //!
 //! # Concepts
@@ -25,8 +27,9 @@
 //!
 //! ```text
 //! submit → pending → running → completed
-//!                  ↘ paused ↗     ↘ failed (retryable → pending)
-//!                                  ↘ failed (permanent → history)
+//!            ↓     ↘ paused ↗     ↘ failed (retryable → pending)
+//!        cancelled                 ↘ failed (permanent → history)
+//!        superseded                ↘ cancelled (via cancel() or supersede)
 //! ```
 //!
 //! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
@@ -43,13 +46,22 @@
 //!    [`SchedulerBuilder::max_retries`]); a non-retryable error moves it to
 //!    history as failed.
 //!
-//! ## Deduplication
+//! ## Deduplication & duplicate strategies
 //!
 //! Every task has a dedup key derived from its type name and either an explicit
-//! key string or the serialized payload (via SHA-256). Submitting a task whose
-//! key already exists returns [`SubmitOutcome::Duplicate`] (or
-//! [`Upgraded`](SubmitOutcome::Upgraded) if the new submission has higher
-//! priority). This makes it safe to call `submit` idempotently.
+//! key string or the serialized payload (via SHA-256). What happens when a
+//! submission's key matches an existing task depends on the
+//! [`DuplicateStrategy`]:
+//!
+//! - **`Skip`** (default) — attempt a priority upgrade or requeue, otherwise
+//!   return [`SubmitOutcome::Duplicate`]. Safe for idempotent `submit` calls.
+//! - **`Supersede`** — cancel the existing task (recording it in history as
+//!   [`HistoryStatus::Superseded`]) and replace it with the new submission.
+//!   For running tasks the cancellation token is fired, the
+//!   [`on_cancel`](TaskExecutor::on_cancel) hook runs, and children are
+//!   cascade-cancelled. Returns [`SubmitOutcome::Superseded`].
+//! - **`Reject`** — return [`SubmitOutcome::Rejected`] without modifying the
+//!   existing task.
 //!
 //! Within a single [`submit_batch`](Scheduler::submit_batch) call, intra-batch
 //! dedup applies a **last-wins** policy: if two tasks share a dedup key, only
@@ -103,6 +115,22 @@
 //! like `CompleteMultipartUpload`. If any child fails and
 //! [`fail_fast`](TaskSubmission::fail_fast) is `true` (the default), siblings
 //! are cancelled and the parent fails immediately.
+//!
+//! ## Cancellation
+//!
+//! Tasks can be cancelled individually via [`Scheduler::cancel`], or in bulk
+//! via [`Scheduler::cancel_group`], [`Scheduler::cancel_type`], or
+//! [`Scheduler::cancel_where`]. Cancelled tasks are recorded in the history
+//! table as [`HistoryStatus::Cancelled`] rather than silently deleted.
+//!
+//! For running tasks, cancellation fires the
+//! [`on_cancel`](TaskExecutor::on_cancel) hook (with a configurable
+//! [`cancel_hook_timeout`](SchedulerBuilder::cancel_hook_timeout)) so
+//! executors can clean up external resources — for example, aborting an S3
+//! multipart upload. Executors can check for cancellation cooperatively via
+//! [`TaskContext::check_cancelled`].
+//!
+//! Cancelling a parent task cascade-cancels all its children.
 //!
 //! ## Byte-level progress
 //!
@@ -357,6 +385,56 @@
 //!         Ok(())
 //!     }
 //! }
+//! ```
+//!
+//! ## Cancellation & cleanup hooks
+//!
+//! Cancel tasks individually or in bulk. Implement
+//! [`on_cancel`](TaskExecutor::on_cancel) to clean up external resources:
+//!
+//! ```ignore
+//! impl TaskExecutor for UploadExecutor {
+//!     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//!         // Cooperatively check for cancellation in long loops.
+//!         for chunk in chunks {
+//!             ctx.check_cancelled()?;
+//!             upload_chunk(chunk).await?;
+//!         }
+//!         Ok(())
+//!     }
+//!
+//!     async fn on_cancel<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//!         // Abort the in-progress multipart upload.
+//!         let upload: Upload = ctx.payload()?;
+//!         abort_multipart(&upload.upload_id).await?;
+//!         Ok(())
+//!     }
+//! }
+//!
+//! // Cancel by ID, group, type, or predicate:
+//! scheduler.cancel(task_id).await?;
+//! scheduler.cancel_group("s3://my-bucket").await?;
+//! scheduler.cancel_type("upload").await?;
+//! scheduler.cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
+//! ```
+//!
+//! ## Task superseding
+//!
+//! Use [`DuplicateStrategy::Supersede`] for "latest-value-wins" scenarios
+//! like continuous file sync, where re-submitting an already-queued task
+//! should atomically cancel the old one and replace it:
+//!
+//! ```ignore
+//! use taskmill::{TaskSubmission, DuplicateStrategy};
+//!
+//! let sub = TaskSubmission::new("sync-file")
+//!     .key("path/to/file.txt")
+//!     .payload_json(&new_content)
+//!     .on_duplicate(DuplicateStrategy::Supersede);
+//!
+//! let outcome = scheduler.submit(&sub).await?;
+//! // outcome is Superseded { new_task_id, replaced_task_id } if a duplicate existed,
+//! // or Inserted(id) if this was the first submission.
 //! ```
 //!
 //! # How the dispatch loop works

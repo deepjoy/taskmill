@@ -1,8 +1,9 @@
 //! SQLite-backed persistence layer for the task queue and history.
 //!
-//! [`TaskStore`] manages the active task queue and completed/failed history
-//! in a single SQLite database. It handles deduplication, priority upgrades,
-//! retries, parent-child hierarchy, and automatic history pruning.
+//! [`TaskStore`] manages the active task queue and completed/failed/cancelled/superseded
+//! history in a single SQLite database. It handles deduplication, priority upgrades,
+//! retries, parent-child hierarchy, cancellation history, superseding, and automatic
+//! history pruning.
 //!
 //! Most users interact with the store through [`Scheduler`](crate::Scheduler)
 //! methods like [`submit`](crate::Scheduler::submit) and

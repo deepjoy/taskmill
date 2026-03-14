@@ -4,8 +4,9 @@
 //! [`TaskSubmission`] for enqueuing work, [`BatchSubmission`] for building
 //! batches with shared defaults, [`BatchOutcome`] for categorized batch
 //! results, [`TaskRecord`] for in-flight tasks, [`TaskHistoryRecord`] for
-//! completed/failed results, and [`TypedTask`] for strongly-typed task
-//! payloads with built-in serialization.
+//! completed/failed/cancelled/superseded results, [`DuplicateStrategy`] for
+//! controlling duplicate-key handling, and [`TypedTask`] for strongly-typed
+//! task payloads with built-in serialization.
 //!
 //! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
 //! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
