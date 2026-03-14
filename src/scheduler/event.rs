@@ -75,6 +75,13 @@ pub enum SchedulerEvent {
     Preempted(TaskEventHeader),
     /// A task was cancelled by the application.
     Cancelled(TaskEventHeader),
+    /// A task was superseded by a new submission with the same dedup key.
+    Superseded {
+        /// Header of the old (replaced) task.
+        old: TaskEventHeader,
+        /// ID of the newly inserted replacement task.
+        new_task_id: i64,
+    },
     /// Progress update from a running task.
     Progress {
         header: TaskEventHeader,
@@ -106,7 +113,9 @@ impl SchedulerEvent {
             Self::Dispatched(h) | Self::Completed(h) | Self::Preempted(h) | Self::Cancelled(h) => {
                 Some(h)
             }
-            Self::Failed { header, .. } | Self::Progress { header, .. } => Some(header),
+            Self::Failed { header, .. }
+            | Self::Progress { header, .. }
+            | Self::Superseded { old: header, .. } => Some(header),
             Self::Waiting { .. } | Self::BatchSubmitted { .. } | Self::Paused | Self::Resumed => {
                 None
             }

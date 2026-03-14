@@ -24,7 +24,29 @@ impl Scheduler {
     pub async fn submit(&self, sub: &TaskSubmission) -> Result<SubmitOutcome, StoreError> {
         let outcome = self.inner.store.submit(sub).await?;
 
-        if !matches!(outcome, SubmitOutcome::Duplicate) {
+        // Handle superseded tasks.
+        if let SubmitOutcome::Superseded {
+            new_task_id,
+            replaced_task_id,
+        } = &outcome
+        {
+            self.handle_superseded_active(*replaced_task_id).await;
+            // Emit superseded event — we need the old record's header.
+            // The old task is already in history, so build header from
+            // submission info.
+            let old_header = super::event::TaskEventHeader {
+                task_id: *replaced_task_id,
+                task_type: sub.task_type.clone(),
+                key: sub.effective_key(),
+                label: sub.label.clone(),
+            };
+            let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
+                old: old_header,
+                new_task_id: *new_task_id,
+            });
+        }
+
+        if !matches!(outcome, SubmitOutcome::Duplicate | SubmitOutcome::Rejected) {
             // Preempt if this is a high-priority task.
             if sub.priority.value() <= self.inner.preempt_priority.value() {
                 self.inner
@@ -52,18 +74,41 @@ impl Scheduler {
     ) -> Result<BatchOutcome, StoreError> {
         let results = self.inner.store.submit_batch(submissions).await?;
 
+        // Handle superseded tasks.
+        for (sub, outcome) in submissions.iter().zip(results.iter()) {
+            if let SubmitOutcome::Superseded {
+                new_task_id,
+                replaced_task_id,
+            } = outcome
+            {
+                self.handle_superseded_active(*replaced_task_id).await;
+                let old_header = super::event::TaskEventHeader {
+                    task_id: *replaced_task_id,
+                    task_type: sub.task_type.clone(),
+                    key: sub.effective_key(),
+                    label: sub.label.clone(),
+                };
+                let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
+                    old: old_header,
+                    new_task_id: *new_task_id,
+                });
+            }
+        }
+
         // Find the highest (lowest numeric value) priority among tasks that
         // were inserted or had their priority upgraded.
         let best_priority = submissions
             .iter()
             .zip(results.iter())
-            .filter(|(_, outcome)| !matches!(outcome, SubmitOutcome::Duplicate))
+            .filter(|(_, outcome)| {
+                !matches!(outcome, SubmitOutcome::Duplicate | SubmitOutcome::Rejected)
+            })
             .map(|(sub, _)| sub.priority)
             .min_by_key(|p| p.value());
 
         let any_changed = results
             .iter()
-            .any(|o| !matches!(o, SubmitOutcome::Duplicate));
+            .any(|o| !matches!(o, SubmitOutcome::Duplicate | SubmitOutcome::Rejected));
 
         if let Some(priority) = best_priority {
             if priority.value() <= self.inner.preempt_priority.value() {
@@ -239,6 +284,41 @@ impl Scheduler {
             }
         }
         Ok(cancelled)
+    }
+
+    /// Handle the scheduler-side effects of a superseded task.
+    ///
+    /// If the replaced task was running (in the active map), cancel its token,
+    /// fire the on_cancel hook, cascade-cancel its children, and emit events.
+    async fn handle_superseded_active(&self, replaced_task_id: i64) {
+        // Cancel children of the replaced task.
+        if let Ok(running_child_ids) = self.inner.store.cancel_children(replaced_task_id).await {
+            for child_id in &running_child_ids {
+                if let Some(at) = self.inner.active.remove(*child_id) {
+                    at.token.cancel();
+                    let _ = self
+                        .inner
+                        .store
+                        .cancel_to_history_with_record(&at.record)
+                        .await;
+                    self.fire_on_cancel(&at.record).await;
+                    let _ = self
+                        .inner
+                        .event_tx
+                        .send(SchedulerEvent::Cancelled(at.record.event_header()));
+                }
+            }
+        }
+
+        // Cancel the replaced task itself if it's running.
+        if let Some(at) = self.inner.active.remove(replaced_task_id) {
+            at.token.cancel();
+            self.fire_on_cancel(&at.record).await;
+            let _ = self
+                .inner
+                .event_tx
+                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+        }
     }
 
     /// Fire the `on_cancel` hook for a task (fire-and-forget).

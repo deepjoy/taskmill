@@ -7,7 +7,7 @@ use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::priority::Priority;
 use crate::registry::{TaskContext, TaskExecutor, TaskTypeRegistry};
 use crate::store::TaskStore;
-use crate::task::{SubmitOutcome, TaskError, TaskSubmission};
+use crate::task::{DuplicateStrategy, HistoryStatus, SubmitOutcome, TaskError, TaskSubmission};
 
 use super::{Scheduler, SchedulerConfig, SchedulerEvent, TaskProgress};
 
@@ -1253,4 +1253,193 @@ async fn on_cancel_hook_timeout_does_not_block() {
 
     // Give the hook time to timeout.
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+// ── Superseding tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn reject_returns_rejected() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    let sub = TaskSubmission::new("test")
+        .key("dup")
+        .on_duplicate(DuplicateStrategy::Reject);
+    let first = sched.submit(&sub).await.unwrap();
+    assert!(first.is_inserted());
+
+    let second = sched.submit(&sub).await.unwrap();
+    assert_eq!(second, SubmitOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn supersede_pending_replaces_in_place() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    // Submit initial task.
+    let sub1 = TaskSubmission::new("test")
+        .key("replace-me")
+        .priority(Priority::NORMAL)
+        .payload_raw(b"old".to_vec());
+    let first = sched.submit(&sub1).await.unwrap();
+    let first_id = first.id().unwrap();
+
+    // Supersede with new payload and higher priority.
+    let sub2 = TaskSubmission::new("test")
+        .key("replace-me")
+        .priority(Priority::HIGH)
+        .payload_raw(b"new".to_vec())
+        .on_duplicate(DuplicateStrategy::Supersede);
+    let outcome = sched.submit(&sub2).await.unwrap();
+
+    // Pending supersede uses in-place update — same row ID.
+    assert!(
+        matches!(outcome, SubmitOutcome::Superseded { new_task_id, replaced_task_id } if new_task_id == first_id && replaced_task_id == first_id)
+    );
+
+    // Old task should be in history as superseded.
+    let key = sub1.effective_key();
+    let history = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, HistoryStatus::Superseded);
+
+    // Active task should have new payload and priority.
+    let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
+    assert_eq!(task.priority, Priority::HIGH);
+    assert_eq!(task.payload.as_deref(), Some(b"new".as_slice()));
+}
+
+#[tokio::test]
+async fn supersede_running_cancels_and_inserts_new() {
+    let cancel_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor = CancelHookExecutor {
+        cancel_called: cancel_called.clone(),
+    };
+    let sched = setup(arc_erased(executor)).await;
+
+    // Submit and dispatch (now running).
+    let sub1 = TaskSubmission::new("test").key("running-sup");
+    sched.submit(&sub1).await.unwrap();
+    sched.try_dispatch().await.unwrap();
+
+    // Give task time to start.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Supersede the running task.
+    let sub2 = TaskSubmission::new("test")
+        .key("running-sup")
+        .payload_raw(b"replacement".to_vec())
+        .on_duplicate(DuplicateStrategy::Supersede);
+    let outcome = sched.submit(&sub2).await.unwrap();
+
+    assert!(
+        matches!(outcome, SubmitOutcome::Superseded { .. }),
+        "expected Superseded, got: {outcome:?}"
+    );
+
+    // on_cancel hook should have been fired.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        cancel_called.load(std::sync::atomic::Ordering::SeqCst),
+        "on_cancel hook should fire on supersede"
+    );
+
+    // Old task should be in history as superseded.
+    let key = sub1.effective_key();
+    let history = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, HistoryStatus::Superseded);
+
+    // New task should be pending in the queue.
+    let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
+    assert_eq!(task.status, crate::task::TaskStatus::Pending);
+    assert_eq!(task.payload.as_deref(), Some(b"replacement".as_slice()));
+}
+
+#[tokio::test]
+async fn supersede_emits_event() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+    let mut rx = sched.subscribe();
+
+    let sub1 = TaskSubmission::new("test").key("evt");
+    sched.submit(&sub1).await.unwrap();
+
+    let sub2 = TaskSubmission::new("test")
+        .key("evt")
+        .on_duplicate(DuplicateStrategy::Supersede);
+    sched.submit(&sub2).await.unwrap();
+
+    // Drain events and look for Superseded.
+    let mut found = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, SchedulerEvent::Superseded { .. }) {
+            found = true;
+        }
+    }
+    assert!(found, "expected Superseded event");
+}
+
+#[tokio::test]
+async fn supersede_in_batch() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    // Pre-submit a task.
+    let sub1 = TaskSubmission::new("test").key("batch-sup");
+    sched.submit(&sub1).await.unwrap();
+
+    // Batch supersede it.
+    let sub2 = TaskSubmission::new("test")
+        .key("batch-sup")
+        .payload_raw(b"batch-new".to_vec())
+        .on_duplicate(DuplicateStrategy::Supersede);
+    let outcome = sched.submit_batch(&[sub2]).await.unwrap();
+
+    assert!(matches!(
+        outcome.outcomes[0],
+        SubmitOutcome::Superseded { .. }
+    ));
+
+    let key = sub1.effective_key();
+    let history = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].status, HistoryStatus::Superseded);
+}
+
+#[tokio::test]
+async fn chain_of_supersedes() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    // A supersedes nothing (fresh insert).
+    let sub_a = TaskSubmission::new("test")
+        .key("chain")
+        .payload_raw(b"A".to_vec());
+    let out_a = sched.submit(&sub_a).await.unwrap();
+    assert!(matches!(out_a, SubmitOutcome::Inserted(_)));
+
+    // B supersedes A.
+    let sub_b = TaskSubmission::new("test")
+        .key("chain")
+        .payload_raw(b"B".to_vec())
+        .on_duplicate(DuplicateStrategy::Supersede);
+    let out_b = sched.submit(&sub_b).await.unwrap();
+    assert!(matches!(out_b, SubmitOutcome::Superseded { .. }));
+
+    // C supersedes B.
+    let sub_c = TaskSubmission::new("test")
+        .key("chain")
+        .payload_raw(b"C".to_vec())
+        .on_duplicate(DuplicateStrategy::Supersede);
+    let out_c = sched.submit(&sub_c).await.unwrap();
+    assert!(matches!(out_c, SubmitOutcome::Superseded { .. }));
+
+    // History should have 2 superseded entries (A and B).
+    let key = sub_a.effective_key();
+    let history = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history
+        .iter()
+        .all(|h| h.status == HistoryStatus::Superseded));
+
+    // Active queue should have the final task with payload C.
+    let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
+    assert_eq!(task.payload.as_deref(), Some(b"C".as_slice()));
 }

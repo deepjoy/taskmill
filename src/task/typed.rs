@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::priority::Priority;
 
+use super::submission::DuplicateStrategy;
 use super::IoBudget;
 
 /// A strongly-typed task that bundles serialization, task type name, and default
@@ -58,5 +59,10 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// Optional group key for per-group concurrency limiting. Default: `None`.
     fn group_key(&self) -> Option<String> {
         None
+    }
+
+    /// Duplicate-handling strategy. Default: [`DuplicateStrategy::Skip`].
+    fn on_duplicate(&self) -> DuplicateStrategy {
+        DuplicateStrategy::default()
     }
 }

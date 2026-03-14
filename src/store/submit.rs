@@ -5,8 +5,9 @@ use std::collections::HashMap;
 
 use sqlx::Row;
 
-use crate::task::{SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
+use crate::task::{DuplicateStrategy, SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
 
+use super::row_mapping::row_to_task_record;
 use super::{StoreError, TaskStore};
 
 /// Maximum number of tasks per transaction chunk. Batches larger than this
@@ -54,14 +55,28 @@ pub(crate) async fn submit_one(
         return Ok(SubmitOutcome::Inserted(result.last_insert_rowid()));
     }
 
-    // Dedup hit — try to upgrade priority on pending/paused tasks.
+    // Dedup hit — branch on the duplicate strategy.
+    match sub.on_duplicate {
+        DuplicateStrategy::Reject => Ok(SubmitOutcome::Rejected),
+        DuplicateStrategy::Supersede => supersede_existing(conn, sub, &key).await,
+        DuplicateStrategy::Skip => skip_existing(conn, &key, priority).await,
+    }
+}
+
+/// Default dedup behaviour: try priority upgrade, then requeue, then no-op.
+async fn skip_existing(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    key: &str,
+    priority: i32,
+) -> Result<SubmitOutcome, StoreError> {
+    // Try to upgrade priority on pending/paused tasks.
     let row = sqlx::query(
         "UPDATE tasks SET priority = ?
          WHERE key = ? AND status IN ('pending', 'paused') AND priority > ?
          RETURNING id",
     )
     .bind(priority)
-    .bind(&key)
+    .bind(key)
     .bind(priority)
     .fetch_optional(&mut **conn)
     .await?;
@@ -78,7 +93,7 @@ pub(crate) async fn submit_one(
          RETURNING id",
     )
     .bind(priority)
-    .bind(&key)
+    .bind(key)
     .bind(priority)
     .fetch_optional(&mut **conn)
     .await?;
@@ -86,6 +101,113 @@ pub(crate) async fn submit_one(
     match row {
         Some(r) => Ok(SubmitOutcome::Requeued(r.get("id"))),
         None => Ok(SubmitOutcome::Duplicate),
+    }
+}
+
+/// Supersede: record old task in history as "superseded", then replace.
+///
+/// - **Pending/Paused**: UPDATE the existing row in-place with new payload,
+///   priority, IO estimates, and reset retry_count. Keeps the same row ID.
+/// - **Running/Waiting**: DELETE the existing row and INSERT a new one
+///   (the scheduler layer handles cancellation of the active execution).
+pub(crate) async fn supersede_existing(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    sub: &TaskSubmission,
+    key: &str,
+) -> Result<SubmitOutcome, StoreError> {
+    // Fetch existing task.
+    let row = sqlx::query("SELECT * FROM tasks WHERE key = ?")
+        .bind(key)
+        .fetch_optional(&mut **conn)
+        .await?;
+
+    let Some(row) = row else {
+        // Raced with deletion — treat as fresh insert.
+        return Ok(SubmitOutcome::Duplicate);
+    };
+
+    let existing = row_to_task_record(&row);
+    let replaced_id = existing.id;
+
+    // Record old task in history as "superseded".
+    super::lifecycle::insert_history(
+        conn,
+        &existing,
+        "superseded",
+        &crate::task::IoBudget::default(),
+        existing
+            .started_at
+            .map(|s| (chrono::Utc::now() - s).num_milliseconds()),
+        None,
+    )
+    .await?;
+
+    let priority = sub.priority.value() as i32;
+    let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
+
+    match existing.status {
+        crate::task::TaskStatus::Pending | crate::task::TaskStatus::Paused => {
+            // In-place update — keeps the row ID and queue position.
+            sqlx::query(
+                "UPDATE tasks SET
+                    label = ?, priority = ?, payload = ?,
+                    expected_read_bytes = ?, expected_write_bytes = ?,
+                    expected_net_rx_bytes = ?, expected_net_tx_bytes = ?,
+                    retry_count = 0, last_error = NULL, status = 'pending',
+                    requeue = 0, requeue_priority = NULL, fail_fast = ?, group_key = ?
+                 WHERE id = ?",
+            )
+            .bind(&sub.label)
+            .bind(priority)
+            .bind(&sub.payload)
+            .bind(sub.expected_io.disk_read)
+            .bind(sub.expected_io.disk_write)
+            .bind(sub.expected_io.net_rx)
+            .bind(sub.expected_io.net_tx)
+            .bind(fail_fast_val)
+            .bind(&sub.group_key)
+            .bind(replaced_id)
+            .execute(&mut **conn)
+            .await?;
+
+            Ok(SubmitOutcome::Superseded {
+                new_task_id: replaced_id,
+                replaced_task_id: replaced_id,
+            })
+        }
+        crate::task::TaskStatus::Running | crate::task::TaskStatus::Waiting => {
+            // Delete existing and insert new.
+            sqlx::query("DELETE FROM tasks WHERE id = ?")
+                .bind(replaced_id)
+                .execute(&mut **conn)
+                .await?;
+
+            let result = sqlx::query(
+                "INSERT INTO tasks (task_type, key, label, priority, payload,
+                    expected_read_bytes, expected_write_bytes, expected_net_rx_bytes,
+                    expected_net_tx_bytes, parent_id, fail_fast, group_key)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&sub.task_type)
+            .bind(key)
+            .bind(&sub.label)
+            .bind(priority)
+            .bind(&sub.payload)
+            .bind(sub.expected_io.disk_read)
+            .bind(sub.expected_io.disk_write)
+            .bind(sub.expected_io.net_rx)
+            .bind(sub.expected_io.net_tx)
+            .bind(sub.parent_id)
+            .bind(fail_fast_val)
+            .bind(&sub.group_key)
+            .execute(&mut **conn)
+            .await?;
+
+            Ok(SubmitOutcome::Superseded {
+                new_task_id: result.last_insert_rowid(),
+                replaced_task_id: replaced_id,
+            })
+        }
     }
 }
 
