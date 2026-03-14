@@ -47,6 +47,26 @@ impl TaskContext {
         &self.token
     }
 
+    /// Check whether this task has been cancelled, returning a
+    /// [`TaskError::cancelled()`] if so.
+    ///
+    /// Call this at safe yield points inside an executor to cooperatively
+    /// respond to cancellation:
+    ///
+    /// ```ignore
+    /// for chunk in chunks {
+    ///     ctx.check_cancelled()?;
+    ///     process(chunk).await;
+    /// }
+    /// ```
+    pub fn check_cancelled(&self) -> Result<(), TaskError> {
+        if self.token.is_cancelled() {
+            Err(TaskError::cancelled())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Progress reporter for this task.
     pub fn progress(&self) -> &ProgressReporter {
         &self.progress

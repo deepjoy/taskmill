@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 pub struct TaskError {
     pub message: String,
     pub retryable: bool,
+    /// Whether this error represents a cancellation (not a real failure).
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 impl TaskError {
@@ -27,6 +30,7 @@ impl TaskError {
         Self {
             message: message.into(),
             retryable: false,
+            cancelled: false,
         }
     }
 
@@ -37,7 +41,27 @@ impl TaskError {
         Self {
             message: message.into(),
             retryable: true,
+            cancelled: false,
         }
+    }
+
+    /// Create a **cancellation** error.
+    ///
+    /// Used by [`TaskContext::check_cancelled`](crate::TaskContext::check_cancelled)
+    /// to signal that the task's cancellation token was triggered. The scheduler
+    /// treats this differently from a real failure — no retry, and the task is
+    /// recorded as `cancelled` in history.
+    pub fn cancelled() -> Self {
+        Self {
+            message: "task cancelled".into(),
+            retryable: false,
+            cancelled: true,
+        }
+    }
+
+    /// Returns `true` if this error represents a cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
     }
 }
 
@@ -51,24 +75,40 @@ impl std::error::Error for TaskError {}
 
 impl From<String> for TaskError {
     fn from(message: String) -> Self {
-        Self::new(message)
+        Self {
+            message,
+            retryable: false,
+            cancelled: false,
+        }
     }
 }
 
 impl From<&str> for TaskError {
     fn from(message: &str) -> Self {
-        Self::new(message)
+        Self {
+            message: message.to_string(),
+            retryable: false,
+            cancelled: false,
+        }
     }
 }
 
 impl From<serde_json::Error> for TaskError {
     fn from(e: serde_json::Error) -> Self {
-        Self::new(e.to_string())
+        Self {
+            message: e.to_string(),
+            retryable: false,
+            cancelled: false,
+        }
     }
 }
 
 impl From<crate::store::StoreError> for TaskError {
     fn from(e: crate::store::StoreError) -> Self {
-        Self::new(e.to_string())
+        Self {
+            message: e.to_string(),
+            retryable: false,
+            cancelled: false,
+        }
     }
 }

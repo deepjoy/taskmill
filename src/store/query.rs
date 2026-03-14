@@ -289,6 +289,32 @@ impl TaskStore {
         .await?;
         Ok(rows.iter().map(row_to_task_record).collect())
     }
+
+    /// All active tasks in a specific group.
+    pub async fn tasks_by_group(&self, group_key: &str) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM tasks WHERE group_key = ? ORDER BY id ASC")
+            .bind(group_key)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
+    }
+
+    /// All active tasks of a specific type.
+    pub async fn tasks_by_type(&self, task_type: &str) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM tasks WHERE task_type = ? ORDER BY id ASC")
+            .bind(task_type)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
+    }
+
+    /// All active tasks (any status).
+    pub async fn all_active_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM tasks ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
+    }
 }
 
 #[cfg(test)]

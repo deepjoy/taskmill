@@ -269,6 +269,8 @@ pub(crate) struct SpawnContext {
     pub app_state: crate::registry::StateSnapshot,
     pub work_notify: Arc<tokio::sync::Notify>,
     pub scheduler: super::WeakScheduler,
+    #[allow(dead_code)]
+    pub cancel_hook_timeout: tokio::time::Duration,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -289,6 +291,7 @@ pub(crate) async fn spawn_task(
         app_state,
         work_notify,
         scheduler,
+        cancel_hook_timeout: _,
     } = ctx;
     let child_token = CancellationToken::new();
 

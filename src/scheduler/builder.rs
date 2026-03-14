@@ -151,6 +151,13 @@ impl SchedulerBuilder {
         self
     }
 
+    /// Set the timeout for [`TaskExecutor::on_cancel`](crate::TaskExecutor::on_cancel) hooks.
+    /// Default: 30 seconds.
+    pub fn cancel_hook_timeout(mut self, timeout: Duration) -> Self {
+        self.config.cancel_hook_timeout = timeout;
+        self
+    }
+
     /// Add a backpressure source (used by the default gate).
     pub fn pressure_source(
         mut self,

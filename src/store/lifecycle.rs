@@ -7,9 +7,9 @@ use super::{StoreError, TaskStore};
 
 /// Insert a task record into the history table.
 ///
-/// Shared by `complete()` and `fail()` to eliminate the duplicated 22-column
-/// INSERT statement.
-async fn insert_history(
+/// Shared by `complete()`, `fail()`, and `cancel_to_history()` to eliminate
+/// the duplicated 22-column INSERT statement.
+pub(crate) async fn insert_history(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     task: &TaskRecord,
     status: &str,
@@ -338,6 +338,69 @@ impl TaskStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// Move a task to history as cancelled and delete it from the active queue.
+    ///
+    /// Returns `true` if the task was found and cancelled, `false` if it
+    /// did not exist.
+    pub async fn cancel_to_history(&self, id: i64) -> Result<bool, StoreError> {
+        let mut conn = self.begin_write().await?;
+
+        let row = sqlx::query("SELECT * FROM tasks WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+        let Some(row) = row else {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            return Ok(false);
+        };
+        let task = row_to_task_record(&row);
+        let duration_ms = compute_duration_ms(&task);
+
+        insert_history(
+            &mut conn,
+            &task,
+            "cancelled",
+            &IoBudget::default(),
+            duration_ms,
+            None,
+        )
+        .await?;
+
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok(true)
+    }
+
+    /// Move a task to history as cancelled using an in-memory record,
+    /// avoiding the redundant `SELECT *` round-trip.
+    pub async fn cancel_to_history_with_record(&self, task: &TaskRecord) -> Result<(), StoreError> {
+        let mut conn = self.begin_write().await?;
+        let duration_ms = compute_duration_ms(task);
+
+        insert_history(
+            &mut conn,
+            task,
+            "cancelled",
+            &IoBudget::default(),
+            duration_ms,
+            None,
+        )
+        .await?;
+
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(task.id)
+            .execute(&mut *conn)
+            .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
         Ok(())
     }
 }
