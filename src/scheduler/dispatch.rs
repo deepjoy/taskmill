@@ -371,6 +371,7 @@ pub(crate) async fn spawn_task(
                     key: task.key.clone(),
                     label: task.label.clone(),
                 });
+                work_notify.notify_one();
 
                 // If this was a child task, check if parent is ready.
                 if let Some(parent_id) = task.parent_id {
@@ -416,6 +417,7 @@ pub(crate) async fn spawn_task(
                     error: te.message.clone(),
                     will_retry,
                 });
+                work_notify.notify_one();
 
                 // If this child failed permanently and parent is fail_fast,
                 // cancel siblings and fail the parent.
