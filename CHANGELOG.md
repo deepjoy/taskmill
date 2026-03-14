@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/deepjoy/taskmill/compare/v0.1.1...v0.1.2) - 2026-03-14
+
+### Added
+
+- initial release (migrated from deepjoy/shoebox) ([#1](https://github.com/deepjoy/taskmill/pull/1))
+
+### Other
+
+- Initial commit
+
 ## [0.1.1](https://github.com/deepjoy/shoebox/compare/taskmill-v0.1.0...taskmill-v0.1.1) - 2026-03-10
 
 ### Added
