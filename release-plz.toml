@@ -1,0 +1,22 @@
+[workspace]
+# Only release when merging the release PR, not on every push
+release_always = false
+
+# Enable changelog generation from conventional commits
+changelog_update = true
+
+# Create GitHub releases with tag
+git_release_enable = true
+git_tag_enable = true
+
+# Auto-detect pre-release versions (e.g. 0.1.0-alpha.1) and mark GitHub releases accordingly
+git_release_type = "auto"
+
+# Check semver compatibility
+semver_check = true
+
+# Label release PRs for easy identification
+pr_labels = ["release"]
+
+# Create release PRs as drafts
+pr_draft = true
