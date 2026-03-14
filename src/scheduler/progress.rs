@@ -1,4 +1,8 @@
-//! Progress reporting and throughput-based extrapolation.
+//! Progress reporting, byte-level transfer tracking, and throughput-based extrapolation.
+//!
+//! This module provides two complementary progress systems:
+//!
+//! ## Percentage progress
 //!
 //! Executors call [`ProgressReporter::report`] (via [`TaskContext::progress`](crate::TaskContext::progress))
 //! to emit percentage updates as [`SchedulerEvent::Progress`]
@@ -6,6 +10,20 @@
 //! produce [`EstimatedProgress`] snapshots, available via
 //! [`Scheduler::estimated_progress`](super::Scheduler::estimated_progress) or
 //! the [`SchedulerSnapshot`](super::SchedulerSnapshot).
+//!
+//! ## Byte-level progress
+//!
+//! For streaming transfers, executors call [`ProgressReporter::set_bytes_total`]
+//! and [`ProgressReporter::add_bytes`] (or the convenience wrappers on
+//! [`TaskContext`](crate::TaskContext)). These update lock-free atomic counters
+//! on the task's [`IoTracker`].
+//!
+//! A background [`run_progress_ticker`] task (opt-in via
+//! [`SchedulerBuilder::progress_interval`](super::SchedulerBuilder::progress_interval))
+//! polls these counters at a fixed interval, feeds them through an
+//! EWMA-smoothed [`ThroughputTracker`], and emits [`TaskProgress`] events on
+//! a dedicated broadcast channel. Each event includes throughput (bytes/sec)
+//! and an estimated time remaining.
 
 use std::collections::HashMap;
 use std::sync::Arc;

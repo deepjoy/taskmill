@@ -15,7 +15,7 @@
 //! - [`dispatch`] — task spawning, active-task tracking, and preemption
 //! - [`gate`] — admission control (IO budget, backpressure, group limits)
 //! - [`event`] — event types and scheduler configuration
-//! - [`progress`] — progress reporting and extrapolation
+//! - [`progress`] — progress reporting, byte-level tracking, and extrapolation
 //!
 //! See the [crate-level docs](crate) for a full walkthrough of the task
 //! lifecycle, common patterns, and how the dispatch loop works.

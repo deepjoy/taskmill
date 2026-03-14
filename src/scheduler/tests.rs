@@ -760,7 +760,9 @@ async fn byte_progress_events_received() {
     let mut events: Vec<TaskProgress> = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(evt)) = tokio::time::timeout(Duration::from_millis(200), progress_rx.recv()).await {
+        if let Ok(Ok(evt)) =
+            tokio::time::timeout(Duration::from_millis(200), progress_rx.recv()).await
+        {
             events.push(evt);
             if events.len() >= 3 {
                 break;
@@ -828,7 +830,9 @@ async fn lifecycle_events_not_polluted_by_byte_progress() {
     let mut lifecycle_events = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(evt)) = tokio::time::timeout(Duration::from_millis(200), lifecycle_rx.recv()).await {
+        if let Ok(Ok(evt)) =
+            tokio::time::timeout(Duration::from_millis(200), lifecycle_rx.recv()).await
+        {
             let is_completed = matches!(evt, SchedulerEvent::Completed(..));
             lifecycle_events.push(evt);
             if is_completed {
