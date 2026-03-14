@@ -1,12 +1,15 @@
 //! Task types, submission parameters, and the [`TypedTask`] trait.
 //!
 //! This module defines the data structures that flow through the scheduler:
-//! [`TaskSubmission`] for enqueuing work, [`TaskRecord`] for in-flight tasks,
-//! [`TaskHistoryRecord`] for completed/failed results, and [`TypedTask`] for
-//! strongly-typed task payloads with built-in serialization.
+//! [`TaskSubmission`] for enqueuing work, [`BatchSubmission`] for building
+//! batches with shared defaults, [`BatchOutcome`] for categorized batch
+//! results, [`TaskRecord`] for in-flight tasks, [`TaskHistoryRecord`] for
+//! completed/failed results, and [`TypedTask`] for strongly-typed task
+//! payloads with built-in serialization.
 //!
-//! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit) or
-//! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed). Executors
+//! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
+//! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
+//! [`Scheduler::submit_batch`](crate::Scheduler::submit_batch). Executors
 //! receive a [`TaskContext`](crate::TaskContext) with the deserialized record
 //! and report results via [`TaskError`].
 
@@ -24,7 +27,7 @@ use crate::priority::Priority;
 
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
-pub use submission::{SubmitOutcome, TaskSubmission};
+pub use submission::{BatchOutcome, BatchSubmission, SubmitOutcome, TaskSubmission};
 pub use typed::TypedTask;
 
 /// Lifecycle state of a task in the active queue.

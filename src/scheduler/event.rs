@@ -86,6 +86,13 @@ pub enum SchedulerEvent {
     /// A parent task entered the waiting state after its executor returned
     /// and it has active children.
     Waiting { task_id: i64, children_count: i64 },
+    /// A batch of tasks was submitted.
+    BatchSubmitted {
+        /// Number of tasks in the batch (total input count).
+        count: usize,
+        /// Task IDs that were inserted (new tasks only, not upgrades/requeues).
+        inserted_ids: Vec<i64>,
+    },
     /// The scheduler was globally paused via [`Scheduler::pause_all`].
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
@@ -100,7 +107,9 @@ impl SchedulerEvent {
                 Some(h)
             }
             Self::Failed { header, .. } | Self::Progress { header, .. } => Some(header),
-            Self::Waiting { .. } | Self::Paused | Self::Resumed => None,
+            Self::Waiting { .. } | Self::BatchSubmitted { .. } | Self::Paused | Self::Resumed => {
+                None
+            }
         }
     }
 }

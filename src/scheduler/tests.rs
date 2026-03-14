@@ -4,6 +4,7 @@ use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
+use crate::priority::Priority;
 use crate::registry::{TaskContext, TaskExecutor, TaskTypeRegistry};
 use crate::store::TaskStore;
 use crate::task::{SubmitOutcome, TaskError, TaskSubmission};
@@ -890,4 +891,72 @@ async fn byte_progress_in_snapshot() {
     );
     assert_eq!(snap.byte_progress[0].bytes_total, Some(1_048_576));
     assert!(snap.byte_progress[0].bytes_completed > 0);
+}
+
+#[tokio::test]
+async fn batch_submitted_event() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+    let mut rx = sched.subscribe();
+
+    let subs: Vec<_> = (0..3)
+        .map(|i| TaskSubmission::new("test").key(format!("ev-{i}")))
+        .collect();
+
+    let outcome = sched.submit_batch(&subs).await.unwrap();
+    assert_eq!(outcome.len(), 3);
+    assert_eq!(outcome.inserted().len(), 3);
+    assert_eq!(outcome.duplicated_count(), 0);
+
+    // The BatchSubmitted event should be receivable.
+    let event = rx.try_recv().unwrap();
+    match event {
+        SchedulerEvent::BatchSubmitted {
+            count,
+            inserted_ids,
+        } => {
+            assert_eq!(count, 3);
+            assert_eq!(inserted_ids.len(), 3);
+        }
+        other => panic!("expected BatchSubmitted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn batch_outcome_convenience_methods() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    // Submit one task first so re-submitting it produces a Duplicate.
+    sched
+        .submit(&TaskSubmission::new("test").key("existing"))
+        .await
+        .unwrap();
+
+    let subs = vec![
+        TaskSubmission::new("test").key("new-1"),
+        TaskSubmission::new("test").key("existing"),
+        TaskSubmission::new("test").key("new-2"),
+    ];
+
+    let outcome = sched.submit_batch(&subs).await.unwrap();
+    assert_eq!(outcome.len(), 3);
+    assert_eq!(outcome.inserted().len(), 2);
+    assert_eq!(outcome.duplicated_count(), 1);
+    assert!(outcome.upgraded().is_empty());
+    assert!(outcome.requeued().is_empty());
+}
+
+#[tokio::test]
+async fn submit_built_applies_defaults() {
+    use crate::task::BatchSubmission;
+
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    let batch = BatchSubmission::new()
+        .default_group("g1")
+        .default_priority(Priority::HIGH)
+        .task(TaskSubmission::new("test").key("built-1"))
+        .task(TaskSubmission::new("test").key("built-2"));
+
+    let outcome = sched.submit_built(batch).await.unwrap();
+    assert_eq!(outcome.inserted().len(), 2);
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::priority::Priority;
 
-use super::{IoBudget, TaskSubmission, TypedTask};
+use super::{BatchSubmission, IoBudget, TaskSubmission, TypedTask};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Thumbnail {
@@ -141,4 +141,44 @@ fn typed_task_key_and_label() {
     let sub = TaskSubmission::from_typed(&task);
     assert_eq!(sub.dedup_key.as_deref(), Some("/a.txt"));
     assert_eq!(sub.label, "Process /a.txt");
+}
+
+#[test]
+fn batch_submission_builder_defaults() {
+    let subs = BatchSubmission::new()
+        .default_group("g1")
+        .default_priority(Priority::HIGH)
+        .task(TaskSubmission::new("test").key("a"))
+        .task(
+            TaskSubmission::new("test")
+                .key("b")
+                .priority(Priority::REALTIME),
+        )
+        .task(TaskSubmission::new("test").key("c").group("custom-group"))
+        .build();
+
+    assert_eq!(subs.len(), 3);
+
+    // Task without explicit group/priority gets defaults.
+    assert_eq!(subs[0].group_key.as_deref(), Some("g1"));
+    assert_eq!(subs[0].priority, Priority::HIGH);
+
+    // Task with explicit priority (non-NORMAL) keeps its own.
+    assert_eq!(subs[1].group_key.as_deref(), Some("g1"));
+    assert_eq!(subs[1].priority, Priority::REALTIME);
+
+    // Task with explicit group keeps its own.
+    assert_eq!(subs[2].group_key.as_deref(), Some("custom-group"));
+    assert_eq!(subs[2].priority, Priority::HIGH);
+}
+
+#[test]
+fn batch_submission_builder_no_defaults() {
+    let subs = BatchSubmission::new()
+        .task(TaskSubmission::new("test").key("a"))
+        .build();
+
+    assert_eq!(subs.len(), 1);
+    assert!(subs[0].group_key.is_none());
+    assert_eq!(subs[0].priority, Priority::NORMAL);
 }

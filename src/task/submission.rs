@@ -1,4 +1,6 @@
-//! [`TaskSubmission`] — parameters for submitting a new task, and [`SubmitOutcome`].
+//! Task submission types: [`TaskSubmission`] for single tasks, [`BatchSubmission`]
+//! for building batches with shared defaults, [`SubmitOutcome`] for per-task
+//! results, and [`BatchOutcome`] for categorized batch summaries.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +35,174 @@ impl SubmitOutcome {
     /// Returns `true` if a new task was inserted.
     pub fn is_inserted(&self) -> bool {
         matches!(self, Self::Inserted(_))
+    }
+}
+
+/// Summary of a batch submission.
+///
+/// Wraps the per-task [`SubmitOutcome`] results in input order (1:1 with
+/// submissions) and provides convenience accessors for categorized views.
+#[derive(Debug, Clone)]
+pub struct BatchOutcome {
+    /// Per-task results, in input order (1:1 with submissions).
+    pub outcomes: Vec<SubmitOutcome>,
+}
+
+impl BatchOutcome {
+    /// Collect task IDs from [`SubmitOutcome::Inserted`] outcomes.
+    pub fn inserted(&self) -> Vec<i64> {
+        self.outcomes
+            .iter()
+            .filter_map(|o| match o {
+                SubmitOutcome::Inserted(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Collect task IDs from [`SubmitOutcome::Upgraded`] outcomes.
+    pub fn upgraded(&self) -> Vec<i64> {
+        self.outcomes
+            .iter()
+            .filter_map(|o| match o {
+                SubmitOutcome::Upgraded(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Collect task IDs from [`SubmitOutcome::Requeued`] outcomes.
+    pub fn requeued(&self) -> Vec<i64> {
+        self.outcomes
+            .iter()
+            .filter_map(|o| match o {
+                SubmitOutcome::Requeued(id) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Count [`SubmitOutcome::Duplicate`] outcomes.
+    pub fn duplicated_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o, SubmitOutcome::Duplicate))
+            .count()
+    }
+
+    /// Number of outcomes.
+    pub fn len(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    /// Returns `true` if there are no outcomes.
+    pub fn is_empty(&self) -> bool {
+        self.outcomes.is_empty()
+    }
+
+    /// Iterate over outcomes.
+    pub fn iter(&self) -> std::slice::Iter<'_, SubmitOutcome> {
+        self.outcomes.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a BatchOutcome {
+    type Item = &'a SubmitOutcome;
+    type IntoIter = std::slice::Iter<'a, SubmitOutcome>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.outcomes.iter()
+    }
+}
+
+impl IntoIterator for BatchOutcome {
+    type Item = SubmitOutcome;
+    type IntoIter = std::vec::IntoIter<SubmitOutcome>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.outcomes.into_iter()
+    }
+}
+
+/// Builder for batch submissions with shared defaults.
+///
+/// Allows setting batch-wide defaults for group and priority that are applied
+/// to tasks that don't have explicit values:
+///
+/// ```ignore
+/// use taskmill::{BatchSubmission, TaskSubmission, Priority};
+///
+/// let submissions = BatchSubmission::new()
+///     .default_group("s3://my-bucket")
+///     .default_priority(Priority::HIGH)
+///     .task(TaskSubmission::new("upload").key("file-1"))
+///     .task(TaskSubmission::new("upload").key("file-2").priority(Priority::REALTIME))
+///     .build();
+/// ```
+pub struct BatchSubmission {
+    default_group: Option<String>,
+    default_priority: Option<Priority>,
+    tasks: Vec<TaskSubmission>,
+}
+
+impl BatchSubmission {
+    /// Create a new empty batch submission builder.
+    pub fn new() -> Self {
+        Self {
+            default_group: None,
+            default_priority: None,
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Set a default group key applied to tasks without an explicit group.
+    pub fn default_group(mut self, group: impl Into<String>) -> Self {
+        self.default_group = Some(group.into());
+        self
+    }
+
+    /// Set a default priority applied to tasks still at [`Priority::NORMAL`].
+    pub fn default_priority(mut self, priority: Priority) -> Self {
+        self.default_priority = Some(priority);
+        self
+    }
+
+    /// Add a single task to the batch.
+    pub fn task(mut self, sub: TaskSubmission) -> Self {
+        self.tasks.push(sub);
+        self
+    }
+
+    /// Add multiple tasks to the batch.
+    pub fn tasks(mut self, iter: impl IntoIterator<Item = TaskSubmission>) -> Self {
+        self.tasks.extend(iter);
+        self
+    }
+
+    /// Apply defaults and return the final submissions.
+    ///
+    /// - If a task has no `group_key` and `default_group` is set, the default is applied.
+    /// - If a task has `Priority::NORMAL` (the default) and `default_priority` is set, it is overridden.
+    pub fn build(mut self) -> Vec<TaskSubmission> {
+        for task in &mut self.tasks {
+            if task.group_key.is_none() {
+                if let Some(ref group) = self.default_group {
+                    task.group_key = Some(group.clone());
+                }
+            }
+            if task.priority == Priority::NORMAL {
+                if let Some(priority) = self.default_priority {
+                    task.priority = priority;
+                }
+            }
+        }
+        self.tasks
+    }
+}
+
+impl Default for BatchSubmission {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
