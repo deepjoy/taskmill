@@ -6,8 +6,8 @@
 //! - Persists tasks to SQLite so the queue survives restarts
 //! - Schedules by priority (0 = highest, 255 = lowest) with [named tiers](Priority)
 //! - Deduplicates tasks by key — submitting an already-queued key is a no-op
-//! - Tracks expected and actual IO bytes per task for budget-based scheduling
-//! - Monitors system CPU and disk throughput to adjust concurrency
+//! - Tracks expected and actual IO bytes (disk and network) per task for budget-based scheduling
+//! - Monitors system CPU, disk, and network throughput to adjust concurrency
 //! - Supports [composable backpressure](PressureSource) from arbitrary external sources
 //! - Preempts lower-priority work when high-priority tasks arrive
 //! - [Retries](TaskError::retryable) failed tasks at the same priority level
@@ -68,6 +68,27 @@
 //! [`TaskContext::record_read_bytes`] / [`record_write_bytes`](TaskContext::record_write_bytes),
 //! which feeds back into historical throughput averages for future scheduling
 //! decisions.
+//!
+//! ### Network IO
+//!
+//! Tasks can also declare expected network IO via
+//! [`TaskSubmission::expected_net_io`] (or [`TypedTask::expected_net_rx_bytes`] /
+//! [`expected_net_tx_bytes`](TypedTask::expected_net_tx_bytes)). Executors report
+//! actual network bytes via [`TaskContext::record_net_rx_bytes`] /
+//! [`record_net_tx_bytes`](TaskContext::record_net_tx_bytes). To throttle tasks
+//! when network bandwidth is saturated, set a bandwidth cap with
+//! [`SchedulerBuilder::bandwidth_limit`] — this registers a built-in
+//! [`NetworkPressure`] source that maps observed throughput to backpressure.
+//!
+//! ## Task groups
+//!
+//! Tasks can be assigned to a named group via [`TaskSubmission::group`] (or
+//! [`TypedTask::group_key`]). The scheduler enforces per-group concurrency
+//! limits — for example, limiting uploads to any single S3 bucket to 4
+//! concurrent tasks. Configure limits at build time with
+//! [`SchedulerBuilder::group_concurrency`] and
+//! [`SchedulerBuilder::default_group_concurrency`], or adjust at runtime via
+//! [`Scheduler::set_group_limit`] and [`Scheduler::set_default_group_concurrency`].
 //!
 //! ## Child tasks & two-phase execution
 //!
@@ -218,6 +239,31 @@
 //! returns a serializable [`SchedulerSnapshot`] with queue depths, running
 //! tasks, progress estimates, and backpressure.
 //!
+//! ## Group concurrency
+//!
+//! Limit concurrent tasks within a named group — for example, cap uploads
+//! per S3 bucket:
+//!
+//! ```ignore
+//! let scheduler = Scheduler::builder()
+//!     .store_path("tasks.db")
+//!     .executor("upload-part", Arc::new(UploadPartExecutor))
+//!     .default_group_concurrency(4)               // default for all groups
+//!     .group_concurrency("s3://hot-bucket", 8)    // override for one group
+//!     .build()
+//!     .await?;
+//!
+//! // Tasks declare their group via the submission:
+//! let sub = TaskSubmission::new("upload-part")
+//!     .group("s3://my-bucket")
+//!     .payload_json(&part)?;
+//! scheduler.submit(&sub).await?;
+//!
+//! // Adjust at runtime:
+//! scheduler.set_group_limit("s3://my-bucket", 2);
+//! scheduler.remove_group_limit("s3://my-bucket"); // fall back to default
+//! ```
+//!
 //! ## Child tasks
 //!
 //! Spawn child tasks from an executor to model fan-out work. The parent
@@ -262,8 +308,8 @@
 //! 3. Pending finalizers (parents whose children all completed) are
 //!    dispatched first.
 //! 4. The highest-priority pending task is peeked (without claiming it).
-//! 5. The dispatch gate checks concurrency limits, IO budget, and
-//!    backpressure. If the gate rejects, no slot is consumed.
+//! 5. The dispatch gate checks concurrency limits, group concurrency,
+//!    IO budget, and backpressure. If the gate rejects, no slot is consumed.
 //! 6. If admitted, the task is atomically claimed (`peek` → `pop_by_id`)
 //!    and spawned as a Tokio task.
 //! 7. Steps 4–6 repeat until the queue is empty or the gate rejects.
@@ -288,10 +334,11 @@ pub mod task;
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
+pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    EstimatedProgress, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
+    EstimatedProgress, GroupLimits, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
     SchedulerEvent, SchedulerSnapshot, ShutdownMode,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};

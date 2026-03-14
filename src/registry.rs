@@ -142,6 +142,8 @@ impl ChildSpawner {
 pub(crate) struct IoTracker {
     pub read_bytes: AtomicI64,
     pub write_bytes: AtomicI64,
+    pub net_rx_bytes: AtomicI64,
+    pub net_tx_bytes: AtomicI64,
 }
 
 impl IoTracker {
@@ -149,6 +151,8 @@ impl IoTracker {
         Self {
             read_bytes: AtomicI64::new(0),
             write_bytes: AtomicI64::new(0),
+            net_rx_bytes: AtomicI64::new(0),
+            net_tx_bytes: AtomicI64::new(0),
         }
     }
 
@@ -156,6 +160,8 @@ impl IoTracker {
         crate::task::TaskMetrics {
             read_bytes: self.read_bytes.load(Ordering::Relaxed),
             write_bytes: self.write_bytes.load(Ordering::Relaxed),
+            net_rx_bytes: self.net_rx_bytes.load(Ordering::Relaxed),
+            net_tx_bytes: self.net_tx_bytes.load(Ordering::Relaxed),
         }
     }
 }
@@ -262,6 +268,22 @@ impl TaskContext {
     /// reads the total after the executor returns.
     pub fn record_write_bytes(&self, bytes: i64) {
         self.io.write_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record actual bytes received over the network during this task's execution.
+    ///
+    /// Can be called multiple times — values are accumulated. The scheduler
+    /// reads the total after the executor returns.
+    pub fn record_net_rx_bytes(&self, bytes: i64) {
+        self.io.net_rx_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record actual bytes transmitted over the network during this task's execution.
+    ///
+    /// Can be called multiple times — values are accumulated. The scheduler
+    /// reads the total after the executor returns.
+    pub fn record_net_tx_bytes(&self, bytes: i64) {
+        self.io.net_tx_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     // ── Task submission (scoped scheduler access) ────────────────────

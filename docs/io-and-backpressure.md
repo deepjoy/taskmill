@@ -25,6 +25,26 @@ ctx.record_write_bytes(9_876);
 
 Actual values are stored in `task_history` for learning.
 
+### Network IO
+
+Tasks that perform network transfers can declare expected bandwidth:
+
+```rust
+let sub = TaskSubmission::new("upload")
+    .payload_json(&upload_payload)?
+    .expected_io(0, 0)                   // no disk IO
+    .expected_net_io(0, 50_000_000);     // 50 MB upload
+```
+
+Executors report actual network bytes during execution:
+
+```rust
+ctx.record_net_rx_bytes(response_size);
+ctx.record_net_tx_bytes(uploaded_bytes);
+```
+
+Network actuals are stored in `task_history` alongside disk IO.
+
 ### IO budget gating
 
 When resource monitoring is enabled, the scheduler checks IO headroom before dispatching:
@@ -54,7 +74,7 @@ let stats = store.history_stats("scan").await?;
 
 ### Built-in platform sampler
 
-Enabled by default via the `sysinfo-monitor` feature flag. Provides CPU and disk IO on Linux, macOS, and Windows.
+Enabled by default via the `sysinfo-monitor` feature flag. Provides CPU, disk IO, and network throughput on Linux, macOS, and Windows.
 
 ```rust
 let scheduler = Scheduler::builder()
@@ -75,9 +95,11 @@ struct CgroupSampler;
 impl ResourceSampler for CgroupSampler {
     fn sample(&mut self) -> ResourceSnapshot {
         ResourceSnapshot {
-            cpu_usage: read_cgroup_cpu(),         // 0.0–1.0
+            cpu_usage: read_cgroup_cpu(),              // 0.0–1.0
             io_read_bytes_per_sec: read_blkio_read(),
             io_write_bytes_per_sec: read_blkio_write(),
+            net_rx_bytes_per_sec: read_net_rx(),
+            net_tx_bytes_per_sec: read_net_tx(),
         }
     }
 }
@@ -146,8 +168,8 @@ Multiple sources are aggregated via `CompositePressure`. The aggregate pressure 
 use taskmill::CompositePressure;
 
 let mut pressure = CompositePressure::new();
-pressure.add_source(Arc::new(MemoryPressure));
-pressure.add_source(Arc::new(QueueDepthPressure));
+pressure.add_source(Box::new(MemoryPressure));
+pressure.add_source(Box::new(QueueDepthPressure));
 // Aggregate = max(memory_pressure, queue_pressure)
 ```
 
@@ -155,8 +177,8 @@ Or via the builder:
 
 ```rust
 let scheduler = Scheduler::builder()
-    .pressure_source(Arc::new(MemoryPressure))
-    .pressure_source(Arc::new(QueueDepthPressure))
+    .pressure_source(Box::new(MemoryPressure))
+    .pressure_source(Box::new(QueueDepthPressure))
     .build()
     .await?;
 ```
@@ -187,6 +209,20 @@ The default `DispatchGate` combines both mechanisms. A task is dispatched only w
 2. **IO budget check** — `has_io_headroom()` confirms the task won't saturate disk throughput.
 
 If either check fails, the task stays in the queue and is retried on the next poll cycle.
+
+### Network bandwidth pressure
+
+Taskmill includes a built-in `NetworkPressure` source that maps observed network throughput against a configurable bandwidth cap. Enable it via the builder:
+
+```rust
+let scheduler = Scheduler::builder()
+    .with_resource_monitoring()
+    .bandwidth_limit(100_000_000.0)  // 100 MB/s combined RX+TX cap
+    .build()
+    .await?;
+```
+
+When observed RX+TX throughput approaches the cap, the pressure rises toward 1.0 and the `ThrottlePolicy` starts throttling lower-priority tasks. This is especially useful for upload/download workloads where you want to avoid saturating a network link.
 
 ### Diagnostics
 

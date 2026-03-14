@@ -7,6 +7,10 @@
 //! [`ThrottlePolicy`] maps the aggregate pressure to per-[`Priority`]
 //! throttle decisions. Customize the policy with
 //! [`SchedulerBuilder::throttle_policy`](crate::SchedulerBuilder::throttle_policy).
+//!
+//! A built-in [`NetworkPressure`](crate::NetworkPressure) source is available for
+//! throttling based on network bandwidth — enable it via
+//! [`SchedulerBuilder::bandwidth_limit`](crate::SchedulerBuilder::bandwidth_limit).
 
 use crate::priority::Priority;
 

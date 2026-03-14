@@ -1,16 +1,20 @@
 //! System resource monitoring for IO-aware scheduling.
 //!
-//! Implement [`ResourceSampler`] to feed CPU and disk IO metrics into the
-//! scheduler, or use the built-in [`sysinfo_monitor`] module (enabled by the
-//! `sysinfo-monitor` feature) for cross-platform monitoring. Enable via
-//! [`SchedulerBuilder::with_resource_monitoring`](crate::SchedulerBuilder::with_resource_monitoring)
+//! Implement [`ResourceSampler`] to feed CPU, disk IO, and network throughput
+//! metrics into the scheduler, or use the built-in [`sysinfo_monitor`] module
+//! (enabled by the `sysinfo-monitor` feature) for cross-platform monitoring.
+//! Enable via [`SchedulerBuilder::with_resource_monitoring`](crate::SchedulerBuilder::with_resource_monitoring)
 //! or provide a custom sampler with
 //! [`SchedulerBuilder::resource_sampler`](crate::SchedulerBuilder::resource_sampler).
 //!
 //! The scheduler reads the latest EWMA-smoothed snapshot via [`ResourceReader`]
-//! when making IO-budget dispatch decisions.
+//! when making IO-budget dispatch decisions. For network-aware throttling, use
+//! [`SchedulerBuilder::bandwidth_limit`](crate::SchedulerBuilder::bandwidth_limit)
+//! to register a built-in [`NetworkPressure`](network_pressure::NetworkPressure) source.
 
 pub mod sampler;
+
+pub mod network_pressure;
 
 #[cfg(feature = "sysinfo-monitor")]
 pub mod sysinfo_monitor;
@@ -26,6 +30,10 @@ pub struct ResourceSnapshot {
     pub io_read_bytes_per_sec: f64,
     /// Disk write throughput in bytes/sec (EWMA-smoothed).
     pub io_write_bytes_per_sec: f64,
+    /// Network receive throughput in bytes/sec (EWMA-smoothed).
+    pub net_rx_bytes_per_sec: f64,
+    /// Network transmit throughput in bytes/sec (EWMA-smoothed).
+    pub net_tx_bytes_per_sec: f64,
 }
 
 impl Default for ResourceSnapshot {
@@ -34,6 +42,8 @@ impl Default for ResourceSnapshot {
             cpu_usage: 0.0,
             io_read_bytes_per_sec: 0.0,
             io_write_bytes_per_sec: 0.0,
+            net_rx_bytes_per_sec: 0.0,
+            net_tx_bytes_per_sec: 0.0,
         }
     }
 }

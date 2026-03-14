@@ -117,6 +117,16 @@ pub(crate) async fn run_sampler(
                     raw.io_write_bytes_per_sec,
                     config.ewma_alpha,
                 );
+                smoothed.net_rx_bytes_per_sec = ewma(
+                    smoothed.net_rx_bytes_per_sec,
+                    raw.net_rx_bytes_per_sec,
+                    config.ewma_alpha,
+                );
+                smoothed.net_tx_bytes_per_sec = ewma(
+                    smoothed.net_tx_bytes_per_sec,
+                    raw.net_tx_bytes_per_sec,
+                    config.ewma_alpha,
+                );
 
                 reader.update(smoothed.clone()).await;
 
@@ -124,6 +134,8 @@ pub(crate) async fn run_sampler(
                     cpu = format!("{:.1}%", smoothed.cpu_usage * 100.0),
                     read_mbps = format!("{:.1}", smoothed.io_read_bytes_per_sec / 1_048_576.0),
                     write_mbps = format!("{:.1}", smoothed.io_write_bytes_per_sec / 1_048_576.0),
+                    net_rx_mbps = format!("{:.1}", smoothed.net_rx_bytes_per_sec / 1_048_576.0),
+                    net_tx_mbps = format!("{:.1}", smoothed.net_tx_bytes_per_sec / 1_048_576.0),
                     "resource sample"
                 );
             }

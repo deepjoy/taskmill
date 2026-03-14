@@ -153,8 +153,9 @@ For full control over components, use `Scheduler::new()` directly:
 use std::sync::Arc;
 use taskmill::{
     CompositePressure, Scheduler, SchedulerConfig,
-    TaskStore, TaskTypeRegistry, ThrottlePolicy,
+    TaskStore, ThrottlePolicy,
 };
+use taskmill::registry::TaskTypeRegistry;
 
 let store = TaskStore::open("tasks.db").await.unwrap();
 
