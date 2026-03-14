@@ -38,6 +38,30 @@ impl TaskExecutor for SlowExecutor {
     }
 }
 
+/// An executor that tracks whether its on_cancel hook was called.
+struct CancelHookExecutor {
+    cancel_called: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TaskExecutor for CancelHookExecutor {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        tokio::select! {
+            _ = ctx.token().cancelled() => {
+                Err(TaskError::new("cancelled"))
+            }
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                Ok(())
+            }
+        }
+    }
+
+    async fn on_cancel<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+        self.cancel_called
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[allow(dead_code)]
 struct FailingExecutor;
 
@@ -959,4 +983,274 @@ async fn submit_built_applies_defaults() {
 
     let outcome = sched.submit_built(batch).await.unwrap();
     assert_eq!(outcome.inserted().len(), 2);
+}
+
+// ── Cancellation with history tests ──────────────────────────────
+
+#[tokio::test]
+async fn cancel_pending_records_history() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    let id = sched
+        .submit(&TaskSubmission::new("test").key("cancel-hist"))
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+
+    let cancelled = sched.cancel(id).await.unwrap();
+    assert!(cancelled);
+
+    // Task should be gone from active queue.
+    let key = crate::task::generate_dedup_key("test", Some(b"cancel-hist"));
+    assert!(sched.store().task_by_key(&key).await.unwrap().is_none());
+
+    // History should have a cancelled entry.
+    let hist = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].status, crate::task::HistoryStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_running_records_history_and_fires_hook() {
+    let cancel_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let executor = CancelHookExecutor {
+        cancel_called: cancel_called.clone(),
+    };
+
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("test", arc_erased(executor));
+
+    let sched = Scheduler::new(
+        store,
+        SchedulerConfig::default(),
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let id = sched
+        .submit(&TaskSubmission::new("test").key("cancel-running-hist"))
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+
+    // Dispatch it so it's running.
+    sched.try_dispatch().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let cancelled = sched.cancel(id).await.unwrap();
+    assert!(cancelled);
+
+    // Give the on_cancel hook time to fire.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        cancel_called.load(std::sync::atomic::Ordering::SeqCst),
+        "on_cancel hook should have been called"
+    );
+
+    // History should have a cancelled entry.
+    let key = crate::task::generate_dedup_key("test", Some(b"cancel-running-hist"));
+    let hist = sched.store().history_by_key(&key).await.unwrap();
+    assert_eq!(hist.len(), 1);
+    assert_eq!(hist[0].status, crate::task::HistoryStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn cancel_parent_cascade_records_history() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
+    registry.register_erased("child", arc_erased(SlowExecutor));
+
+    let sched = Scheduler::new(
+        store,
+        SchedulerConfig::default(),
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let parent_id = sched
+        .submit(&TaskSubmission::new("parent").key("p-cancel-hist"))
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+
+    // Dispatch parent (which spawns children).
+    sched.try_dispatch().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Cancel parent — should cascade to children.
+    sched.cancel(parent_id).await.unwrap();
+
+    // All tasks should be recorded as cancelled in history.
+    let hist = sched.store().history(100, 0).await.unwrap();
+    assert!(
+        hist.len() >= 1,
+        "expected at least parent in history, got {}",
+        hist.len()
+    );
+    for h in &hist {
+        assert_eq!(
+            h.status,
+            crate::task::HistoryStatus::Cancelled,
+            "expected cancelled status for task {}, got {:?}",
+            h.task_type,
+            h.status
+        );
+    }
+}
+
+#[tokio::test]
+async fn check_cancelled_returns_error() {
+    use crate::task::TaskError;
+    let err = TaskError::cancelled();
+    assert!(err.is_cancelled());
+    assert!(!err.retryable);
+}
+
+#[tokio::test]
+async fn cancel_group_cancels_matching_tasks() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    // Submit tasks in different groups.
+    sched
+        .submit(&TaskSubmission::new("test").key("g-a1").group("group-a"))
+        .await
+        .unwrap();
+    sched
+        .submit(&TaskSubmission::new("test").key("g-a2").group("group-a"))
+        .await
+        .unwrap();
+    sched
+        .submit(&TaskSubmission::new("test").key("g-b1").group("group-b"))
+        .await
+        .unwrap();
+
+    let cancelled = sched.cancel_group("group-a").await.unwrap();
+    assert_eq!(cancelled.len(), 2);
+
+    // group-b task should still exist.
+    assert_eq!(sched.store().pending_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn cancel_type_cancels_matching_tasks() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("alpha", arc_erased(InstantExecutor));
+    registry.register_erased("beta", arc_erased(InstantExecutor));
+
+    let sched = Scheduler::new(
+        store,
+        SchedulerConfig::default(),
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    sched
+        .submit(&TaskSubmission::new("alpha").key("a1"))
+        .await
+        .unwrap();
+    sched
+        .submit(&TaskSubmission::new("alpha").key("a2"))
+        .await
+        .unwrap();
+    sched
+        .submit(&TaskSubmission::new("beta").key("b1"))
+        .await
+        .unwrap();
+
+    let cancelled = sched.cancel_type("alpha").await.unwrap();
+    assert_eq!(cancelled.len(), 2);
+
+    // beta task should still exist.
+    assert_eq!(sched.store().pending_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn cancel_where_filters_correctly() {
+    let sched = setup(arc_erased(InstantExecutor)).await;
+
+    for i in 0..5 {
+        sched
+            .submit(&TaskSubmission::new("test").key(format!("cw-{i}")))
+            .await
+            .unwrap();
+    }
+
+    // Cancel only tasks whose key contains "cw-3" or "cw-4".
+    let cancelled = sched
+        .cancel_where(|r| r.label == "cw-3" || r.label == "cw-4")
+        .await
+        .unwrap();
+    assert_eq!(cancelled.len(), 2);
+    assert_eq!(sched.store().pending_count().await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn on_cancel_hook_timeout_does_not_block() {
+    struct SlowCancelExecutor;
+
+    impl TaskExecutor for SlowCancelExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            tokio::select! {
+                _ = ctx.token().cancelled() => Err(TaskError::new("cancelled")),
+                _ = tokio::time::sleep(Duration::from_secs(60)) => Ok(()),
+            }
+        }
+
+        async fn on_cancel<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            // Simulate a very slow cancel hook.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }
+    }
+
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("test", arc_erased(SlowCancelExecutor));
+
+    let config = SchedulerConfig {
+        cancel_hook_timeout: Duration::from_millis(50),
+        ..Default::default()
+    };
+
+    let sched = Scheduler::new(
+        store,
+        config,
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let id = sched
+        .submit(&TaskSubmission::new("test").key("timeout-hook"))
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+
+    sched.try_dispatch().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Cancel should return quickly even though the hook is slow.
+    let start = std::time::Instant::now();
+    sched.cancel(id).await.unwrap();
+    let elapsed = start.elapsed();
+
+    // The cancel itself should be fast (hook is fire-and-forget).
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "cancel took too long: {elapsed:?}"
+    );
+
+    // Give the hook time to timeout.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }

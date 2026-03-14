@@ -23,6 +23,7 @@ impl Scheduler {
             app_state: self.inner.app_state.snapshot().await,
             work_notify: Arc::clone(&self.inner.work_notify),
             scheduler: self.downgrade(),
+            cancel_hook_timeout: self.inner.cancel_hook_timeout,
         }
     }
 

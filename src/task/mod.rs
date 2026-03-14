@@ -74,6 +74,7 @@ impl std::str::FromStr for TaskStatus {
 pub enum HistoryStatus {
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl HistoryStatus {
@@ -81,6 +82,7 @@ impl HistoryStatus {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -92,6 +94,7 @@ impl std::str::FromStr for HistoryStatus {
         match s {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }

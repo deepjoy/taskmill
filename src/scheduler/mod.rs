@@ -89,6 +89,8 @@ pub(crate) struct SchedulerInner {
     pub(crate) work_notify: Arc<Notify>,
     /// Per-group concurrency limits.
     pub(crate) group_limits: GroupLimits,
+    /// Timeout for on_cancel hooks.
+    pub(crate) cancel_hook_timeout: Duration,
 }
 
 /// IO-aware priority scheduler.
@@ -185,6 +187,7 @@ impl Scheduler {
                 paused: AtomicBool::new(false),
                 work_notify: Arc::new(Notify::new()),
                 group_limits: GroupLimits::new(),
+                cancel_hook_timeout: config.cancel_hook_timeout,
             }),
         }
     }

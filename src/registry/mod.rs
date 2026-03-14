@@ -79,6 +79,22 @@ pub trait TaskExecutor: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
         async { Ok(()) }
     }
+
+    /// Called when a running or waiting task is explicitly cancelled.
+    ///
+    /// Use this for cleanup of external resources (e.g. aborting an S3
+    /// multipart upload). The default implementation is a no-op.
+    ///
+    /// The provided [`TaskContext`] has a fresh cancellation token (not the
+    /// one that was cancelled) and no child spawner. The hook runs with a
+    /// timeout configured via
+    /// [`SchedulerBuilder::cancel_hook_timeout`](crate::SchedulerBuilder::cancel_hook_timeout).
+    fn on_cancel<'a>(
+        &'a self,
+        _ctx: &'a TaskContext,
+    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
+        async { Ok(()) }
+    }
 }
 
 /// Registry mapping task type names to their executors.
@@ -104,6 +120,11 @@ pub(crate) trait ErasedExecutor: Send + Sync + 'static {
         &'a self,
         ctx: &'a TaskContext,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>;
+
+    fn on_cancel_erased<'a>(
+        &'a self,
+        ctx: &'a TaskContext,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>;
 }
 
 impl<T: TaskExecutor> ErasedExecutor for T {
@@ -119,6 +140,13 @@ impl<T: TaskExecutor> ErasedExecutor for T {
         ctx: &'a TaskContext,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>> {
         Box::pin(self.finalize(ctx))
+    }
+
+    fn on_cancel_erased<'a>(
+        &'a self,
+        ctx: &'a TaskContext,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>> {
+        Box::pin(self.on_cancel(ctx))
     }
 }
 

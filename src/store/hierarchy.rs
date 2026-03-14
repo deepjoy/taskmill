@@ -74,23 +74,51 @@ impl TaskStore {
         Ok(count.0)
     }
 
-    /// Cancel all active children of a parent task.
+    /// Cancel all active children of a parent task, recording each in history.
     ///
-    /// Deletes pending/paused children from the active queue and returns the
-    /// IDs of running children (whose cancellation tokens the scheduler must
-    /// cancel separately).
+    /// Pending/paused children are moved to history as `cancelled` and deleted
+    /// from the active queue. Returns the IDs of running/waiting children
+    /// (whose cancellation tokens the scheduler must cancel separately).
     pub async fn cancel_children(&self, parent_id: i64) -> Result<Vec<i64>, StoreError> {
-        let running_rows =
-            sqlx::query("SELECT id FROM tasks WHERE parent_id = ? AND status = 'running'")
-                .bind(parent_id)
-                .fetch_all(&self.pool)
-                .await?;
+        // Collect running/waiting children — scheduler handles these.
+        let running_rows = sqlx::query(
+            "SELECT id FROM tasks WHERE parent_id = ? AND status IN ('running', 'waiting')",
+        )
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await?;
         let running_ids: Vec<i64> = running_rows.iter().map(|r| r.get("id")).collect();
 
-        sqlx::query("DELETE FROM tasks WHERE parent_id = ? AND status IN ('pending', 'paused')")
+        // Move pending/paused children to history as cancelled.
+        let pending_rows = sqlx::query(
+            "SELECT * FROM tasks WHERE parent_id = ? AND status IN ('pending', 'paused')",
+        )
+        .bind(parent_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if !pending_rows.is_empty() {
+            let mut conn = self.begin_write().await?;
+            for row in &pending_rows {
+                let task = row_to_task_record(row);
+                super::lifecycle::insert_history(
+                    &mut conn,
+                    &task,
+                    "cancelled",
+                    &crate::task::IoBudget::default(),
+                    None,
+                    None,
+                )
+                .await?;
+            }
+            sqlx::query(
+                "DELETE FROM tasks WHERE parent_id = ? AND status IN ('pending', 'paused')",
+            )
             .bind(parent_id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await?;
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+        }
 
         Ok(running_ids)
     }

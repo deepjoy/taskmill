@@ -1,12 +1,18 @@
 //! Task submission (single, batch, typed), lookup, and cancellation.
 
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+
 use crate::priority::Priority;
+use crate::registry::{IoTracker, TaskContext};
 use crate::store::StoreError;
 use crate::task::{
-    generate_dedup_key, BatchOutcome, BatchSubmission, SubmitOutcome, TaskLookup, TaskSubmission,
-    TypedTask,
+    generate_dedup_key, BatchOutcome, BatchSubmission, SubmitOutcome, TaskLookup, TaskRecord,
+    TaskSubmission, TypedTask,
 };
 
+use super::progress::ProgressReporter;
 use super::{Scheduler, SchedulerEvent};
 
 impl Scheduler {
@@ -150,17 +156,24 @@ impl Scheduler {
 
     /// Cancel a task by id.
     ///
-    /// If the task is currently running, its cancellation token is triggered
-    /// and it is removed from the active map. If it is pending or paused,
-    /// it is deleted from the store. Returns `true` if the task was found
-    /// and cancelled.
+    /// Records the task in history as `cancelled` (instead of silently
+    /// deleting). For running/waiting tasks, triggers the cancellation
+    /// token, fires the [`on_cancel`](crate::TaskExecutor::on_cancel) hook,
+    /// and emits a [`SchedulerEvent::Cancelled`] event. Returns `true` if
+    /// the task was found and cancelled.
     pub async fn cancel(&self, task_id: i64) -> Result<bool, StoreError> {
-        // Cancel children first (cascade).
+        // Cancel children first (cascade). cancel_children now records
+        // pending/paused children in history. Running children are returned
+        // for us to handle.
         let running_child_ids = self.inner.store.cancel_children(task_id).await?;
         for child_id in &running_child_ids {
             if let Some(at) = self.inner.active.remove(*child_id) {
                 at.token.cancel();
-                let _ = self.inner.store.delete(*child_id).await;
+                self.inner
+                    .store
+                    .cancel_to_history_with_record(&at.record)
+                    .await?;
+                self.fire_on_cancel(&at.record).await;
                 let _ = self
                     .inner
                     .event_tx
@@ -168,10 +181,14 @@ impl Scheduler {
             }
         }
 
-        // Check if it's an active (running) task first.
+        // Check if it's an active (running/waiting) task first.
         if let Some(at) = self.inner.active.remove(task_id) {
             at.token.cancel();
-            self.inner.store.delete(task_id).await?;
+            self.inner
+                .store
+                .cancel_to_history_with_record(&at.record)
+                .await?;
+            self.fire_on_cancel(&at.record).await;
             let _ = self
                 .inner
                 .event_tx
@@ -179,8 +196,110 @@ impl Scheduler {
             return Ok(true);
         }
 
-        // Not active — try to delete from the queue (pending/paused/waiting).
-        let deleted = self.inner.store.delete(task_id).await?;
-        Ok(deleted)
+        // Not active in memory — try to cancel from the queue
+        // (pending/paused/waiting in DB only).
+        let found = self.inner.store.cancel_to_history(task_id).await?;
+        Ok(found)
+    }
+
+    /// Cancel all tasks in a group.
+    pub async fn cancel_group(&self, group_key: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self.inner.store.tasks_by_group(group_key).await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    /// Cancel all tasks of a given type.
+    pub async fn cancel_type(&self, task_type: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self.inner.store.tasks_by_type(task_type).await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    /// Cancel all tasks matching a predicate.
+    pub async fn cancel_where(
+        &self,
+        predicate: impl Fn(&TaskRecord) -> bool,
+    ) -> Result<Vec<i64>, StoreError> {
+        let tasks = self.inner.store.all_active_tasks().await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if predicate(task) && self.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    /// Fire the `on_cancel` hook for a task (fire-and-forget).
+    ///
+    /// Takes a snapshot of the app state and spawns a tokio task that runs
+    /// the executor's `on_cancel` method with a timeout. Errors and timeouts
+    /// are logged but not propagated.
+    async fn fire_on_cancel(&self, record: &TaskRecord) {
+        let Some(executor) = self.inner.registry.get(&record.task_type) else {
+            return;
+        };
+        let executor = executor.clone();
+        let record = record.clone();
+        let timeout = self.inner.cancel_hook_timeout;
+        let app_state = self.inner.app_state.snapshot().await;
+        let scheduler = self.downgrade();
+        let event_tx = self.inner.event_tx.clone();
+        let active = self.inner.active.clone();
+
+        tokio::spawn(async move {
+            let fresh_token = CancellationToken::new();
+            let io = Arc::new(IoTracker::new());
+            let ctx = TaskContext {
+                record: record.clone(),
+                token: fresh_token,
+                progress: ProgressReporter::new(
+                    record.event_header(),
+                    event_tx,
+                    active,
+                    io.clone(),
+                ),
+                scheduler,
+                app_state,
+                child_spawner: None,
+                io,
+            };
+
+            match tokio::time::timeout(timeout, executor.on_cancel_erased(&ctx)).await {
+                Ok(Ok(())) => {
+                    tracing::debug!(
+                        task_id = record.id,
+                        task_type = record.task_type,
+                        "on_cancel hook completed"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        task_id = record.id,
+                        task_type = record.task_type,
+                        error = %e,
+                        "on_cancel hook failed"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        task_id = record.id,
+                        task_type = record.task_type,
+                        "on_cancel hook timed out"
+                    );
+                }
+            }
+        });
     }
 }
