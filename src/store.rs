@@ -1091,22 +1091,49 @@ impl TaskStore {
         &self,
         parent_id: i64,
     ) -> Result<Option<ParentResolution>, StoreError> {
+        // Run in a single IMMEDIATE transaction to prevent TOCTOU races
+        // where two children complete simultaneously and both see
+        // active_count == 0.
+        let mut conn = self.begin_write().await?;
+
         // Check the parent exists and is waiting.
-        let parent = self.task_by_id(parent_id).await?;
-        let Some(parent) = parent else {
+        let parent_row = sqlx::query("SELECT status FROM tasks WHERE id = ?")
+            .bind(parent_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+        let Some(parent_row) = parent_row else {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
             return Ok(None);
         };
-        if parent.status != TaskStatus::Waiting {
+
+        let status_str: String = parent_row.get("status");
+        if status_str != "waiting" {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
             return Ok(None);
         }
 
-        let active_count = self.active_children_count(parent_id).await?;
+        let (active_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE parent_id = ?")
+                .bind(parent_id)
+                .fetch_one(&mut *conn)
+                .await?;
+
         if active_count > 0 {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
             return Ok(Some(ParentResolution::StillWaiting));
         }
 
         // All children are terminal — check for failures.
-        let failed_count = self.failed_children_count(parent_id).await?;
+        let (failed_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_history WHERE parent_id = ? AND status = 'failed'",
+        )
+        .bind(parent_id)
+        .fetch_one(&mut *conn)
+        .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+
         if failed_count > 0 {
             return Ok(Some(ParentResolution::Failed(format!(
                 "{failed_count} child task(s) failed"

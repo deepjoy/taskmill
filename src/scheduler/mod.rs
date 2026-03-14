@@ -250,7 +250,33 @@ pub struct Scheduler {
     inner: Arc<SchedulerInner>,
 }
 
+/// Weak handle to a [`Scheduler`] that does not prevent shutdown.
+///
+/// Used inside [`TaskContext`](crate::TaskContext) to avoid keeping the
+/// scheduler alive via a strong `Arc` cycle. Upgrade to a full `Scheduler`
+/// before use — the upgrade fails if the scheduler has already been dropped.
+#[derive(Clone)]
+pub(crate) struct WeakScheduler {
+    inner: std::sync::Weak<SchedulerInner>,
+}
+
+impl WeakScheduler {
+    /// Attempt to upgrade to a full [`Scheduler`].
+    ///
+    /// Returns `None` if the scheduler has been dropped.
+    pub fn upgrade(&self) -> Option<Scheduler> {
+        self.inner.upgrade().map(|inner| Scheduler { inner })
+    }
+}
+
 impl Scheduler {
+    /// Create a weak handle that does not prevent scheduler shutdown.
+    pub(crate) fn downgrade(&self) -> WeakScheduler {
+        WeakScheduler {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
     pub fn new(
         store: TaskStore,
         config: SchedulerConfig,
@@ -580,10 +606,11 @@ impl Scheduler {
         // Pop the next pending finalizer.
         let parent_id = {
             let mut finalizers = self.inner.active.pending_finalizers.lock().await;
-            if finalizers.is_empty() {
+            let Some(&id) = finalizers.iter().next() else {
                 return Ok(false);
-            }
-            finalizers.remove(0)
+            };
+            finalizers.remove(&id);
+            id
         };
 
         // Transition the parent from waiting to running for finalize.

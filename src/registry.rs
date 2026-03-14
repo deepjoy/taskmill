@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::scheduler::{ProgressReporter, Scheduler};
+use crate::scheduler::{ProgressReporter, WeakScheduler};
 use crate::store::{StoreError, TaskStore};
 use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskSubmission, TypedTask};
 
@@ -183,7 +183,7 @@ pub struct TaskContext {
     pub(crate) record: TaskRecord,
     pub(crate) token: CancellationToken,
     pub(crate) progress: ProgressReporter,
-    pub(crate) scheduler: Scheduler,
+    pub(crate) scheduler: WeakScheduler,
     pub(crate) app_state: StateSnapshot,
     pub(crate) child_spawner: Option<ChildSpawner>,
     pub(crate) io: Arc<IoTracker>,
@@ -293,14 +293,22 @@ impl TaskContext {
     /// This is the primary way to enqueue new work from inside an executor
     /// without exposing the full [`Scheduler`](crate::Scheduler) handle.
     pub async fn submit(&self, sub: &TaskSubmission) -> Result<SubmitOutcome, StoreError> {
-        self.scheduler.submit(sub).await
+        let scheduler = self
+            .scheduler
+            .upgrade()
+            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
+        scheduler.submit(sub).await
     }
 
     /// Submit a [`TypedTask`], handling serialization automatically.
     ///
     /// Uses the priority from [`TypedTask::priority()`].
     pub async fn submit_typed<T: TypedTask>(&self, task: &T) -> Result<SubmitOutcome, StoreError> {
-        self.scheduler.submit_typed(task).await
+        let scheduler = self
+            .scheduler
+            .upgrade()
+            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
+        scheduler.submit_typed(task).await
     }
 
     /// Submit a [`TypedTask`] with an explicit priority override.
@@ -309,7 +317,11 @@ impl TaskContext {
         task: &T,
         priority: crate::Priority,
     ) -> Result<SubmitOutcome, StoreError> {
-        self.scheduler.submit_typed_at(task, priority).await
+        let scheduler = self
+            .scheduler
+            .upgrade()
+            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
+        scheduler.submit_typed_at(task, priority).await
     }
 
     // ── Child tasks ──────────────────────────────────────────────────
