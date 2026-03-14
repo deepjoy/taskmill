@@ -7,7 +7,7 @@
 //! integration. Use [`SchedulerBuilder`] for ergonomic construction.
 //!
 //! The `Scheduler` implementation is split across focused submodules:
-//! - [`submit`] — task submission, lookup, and cancellation
+//! - [`submit`] — task submission, lookup, cancellation, and superseding
 //! - [`run_loop`] — the main event loop, dispatch, and shutdown
 //! - [`control`] — pause/resume, concurrency limits, and group limits
 //! - [`queries`] — read-only queries (active tasks, progress, snapshots)

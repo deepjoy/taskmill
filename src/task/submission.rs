@@ -10,6 +10,22 @@ use super::dedup::generate_dedup_key;
 use super::typed::TypedTask;
 use super::IoBudget;
 
+/// Strategy for handling duplicate dedup keys on submission.
+///
+/// Controls what happens when a newly submitted task has the same dedup key as
+/// an existing task in the queue. The default (`Skip`) preserves the current
+/// dedup behaviour unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DuplicateStrategy {
+    /// Current behaviour: attempt priority upgrade or requeue, otherwise no-op.
+    #[default]
+    Skip,
+    /// Cancel the existing task and insert the new one in its place.
+    Supersede,
+    /// Return an error if a duplicate already exists.
+    Reject,
+}
+
 /// Result of a task submission attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
@@ -21,20 +37,30 @@ pub enum SubmitOutcome {
     Requeued(i64),
     /// Duplicate key existed; no changes were made.
     Duplicate,
+    /// Existing task was superseded (cancelled and replaced).
+    Superseded {
+        /// ID of the newly inserted task.
+        new_task_id: i64,
+        /// ID of the task that was replaced.
+        replaced_task_id: i64,
+    },
+    /// Submission rejected because a duplicate exists and strategy is `Reject`.
+    Rejected,
 }
 
 impl SubmitOutcome {
-    /// Returns the task ID if the task was inserted, upgraded, or requeued.
+    /// Returns the task ID if the task was inserted, upgraded, requeued, or superseded.
     pub fn id(&self) -> Option<i64> {
         match self {
             Self::Inserted(id) | Self::Upgraded(id) | Self::Requeued(id) => Some(*id),
-            Self::Duplicate => None,
+            Self::Superseded { new_task_id, .. } => Some(*new_task_id),
+            Self::Duplicate | Self::Rejected => None,
         }
     }
 
-    /// Returns `true` if a new task was inserted.
+    /// Returns `true` if a new task was inserted (including via supersede).
     pub fn is_inserted(&self) -> bool {
-        matches!(self, Self::Inserted(_))
+        matches!(self, Self::Inserted(_) | Self::Superseded { .. })
     }
 }
 
@@ -80,6 +106,25 @@ impl BatchOutcome {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Collect new task IDs from [`SubmitOutcome::Superseded`] outcomes.
+    pub fn superseded(&self) -> Vec<i64> {
+        self.outcomes
+            .iter()
+            .filter_map(|o| match o {
+                SubmitOutcome::Superseded { new_task_id, .. } => Some(*new_task_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Count [`SubmitOutcome::Rejected`] outcomes.
+    pub fn rejected_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o, SubmitOutcome::Rejected))
+            .count()
     }
 
     /// Count [`SubmitOutcome::Duplicate`] outcomes.
@@ -251,6 +296,9 @@ pub struct TaskSubmission {
     /// by [`SchedulerBuilder::group_concurrency`](crate::SchedulerBuilder::group_concurrency).
     /// Use this to prevent hammering a single endpoint (e.g. `"s3://my-bucket"`).
     pub group_key: Option<String>,
+    /// Strategy for handling duplicate dedup keys. Default: [`DuplicateStrategy::Skip`].
+    #[serde(default)]
+    pub on_duplicate: DuplicateStrategy,
     /// Deferred serialization error from [`payload_json`](Self::payload_json).
     /// Surfaced at submit time as [`StoreError::Serialization`](crate::StoreError::Serialization).
     #[serde(skip)]
@@ -285,6 +333,7 @@ impl TaskSubmission {
             parent_id: None,
             fail_fast: true,
             group_key: None,
+            on_duplicate: DuplicateStrategy::default(),
             payload_error: None,
         }
     }
@@ -362,6 +411,15 @@ impl TaskSubmission {
         self
     }
 
+    /// Set the duplicate-handling strategy.
+    ///
+    /// Controls what happens when this submission's dedup key matches an
+    /// existing task. Default: [`DuplicateStrategy::Skip`].
+    pub fn on_duplicate(mut self, strategy: DuplicateStrategy) -> Self {
+        self.on_duplicate = strategy;
+        self
+    }
+
     /// Resolve the effective dedup key. Always incorporates the task type
     /// so different task types never collide, even with the same logical key.
     ///
@@ -381,7 +439,8 @@ impl TaskSubmission {
         let mut sub = Self::new(T::TASK_TYPE)
             .priority(task.priority())
             .payload_json(task)
-            .expected_io(task.expected_io());
+            .expected_io(task.expected_io())
+            .on_duplicate(task.on_duplicate());
         if let Some(k) = task.key() {
             sub = sub.key(k);
         }

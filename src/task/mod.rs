@@ -4,8 +4,9 @@
 //! [`TaskSubmission`] for enqueuing work, [`BatchSubmission`] for building
 //! batches with shared defaults, [`BatchOutcome`] for categorized batch
 //! results, [`TaskRecord`] for in-flight tasks, [`TaskHistoryRecord`] for
-//! completed/failed results, and [`TypedTask`] for strongly-typed task
-//! payloads with built-in serialization.
+//! completed/failed/cancelled/superseded results, [`DuplicateStrategy`] for
+//! controlling duplicate-key handling, and [`TypedTask`] for strongly-typed
+//! task payloads with built-in serialization.
 //!
 //! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
 //! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
@@ -27,7 +28,9 @@ use crate::priority::Priority;
 
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
-pub use submission::{BatchOutcome, BatchSubmission, SubmitOutcome, TaskSubmission};
+pub use submission::{
+    BatchOutcome, BatchSubmission, DuplicateStrategy, SubmitOutcome, TaskSubmission,
+};
 pub use typed::TypedTask;
 
 /// Lifecycle state of a task in the active queue.
@@ -75,6 +78,7 @@ pub enum HistoryStatus {
     Completed,
     Failed,
     Cancelled,
+    Superseded,
 }
 
 impl HistoryStatus {
@@ -83,6 +87,7 @@ impl HistoryStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Superseded => "superseded",
         }
     }
 }
@@ -95,6 +100,7 @@ impl std::str::FromStr for HistoryStatus {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
+            "superseded" => Ok(Self::Superseded),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }
