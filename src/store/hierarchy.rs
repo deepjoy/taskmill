@@ -154,7 +154,7 @@ impl TaskStore {
 #[cfg(test)]
 mod tests {
     use crate::priority::Priority;
-    use crate::task::{ParentResolution, IoBudget, TaskStatus, TaskSubmission};
+    use crate::task::{IoBudget, ParentResolution, TaskStatus, TaskSubmission};
 
     use super::super::TaskStore;
 
@@ -353,10 +353,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
         assert!(!task.fail_fast);
 
-        store
-            .complete(task.id, &IoBudget::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let hist = store.history(10, 0).await.unwrap();
         assert!(!hist[0].fail_fast);

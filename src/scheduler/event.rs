@@ -94,10 +94,9 @@ impl SchedulerEvent {
     /// Returns the [`TaskEventHeader`] if this event is task-specific.
     pub fn header(&self) -> Option<&TaskEventHeader> {
         match self {
-            Self::Dispatched(h)
-            | Self::Completed(h)
-            | Self::Preempted(h)
-            | Self::Cancelled(h) => Some(h),
+            Self::Dispatched(h) | Self::Completed(h) | Self::Preempted(h) | Self::Cancelled(h) => {
+                Some(h)
+            }
             Self::Failed { header, .. } | Self::Progress { header, .. } => Some(header),
             Self::Waiting { .. } | Self::Paused | Self::Resumed => None,
         }

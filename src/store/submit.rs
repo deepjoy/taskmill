@@ -226,10 +226,7 @@ mod tests {
         assert!(running.requeue);
         assert_eq!(running.requeue_priority, Some(Priority::HIGH));
 
-        store
-            .complete(task.id, &IoBudget::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let requeued = store.task_by_key(&key).await.unwrap().unwrap();
         assert_eq!(requeued.status, crate::task::TaskStatus::Pending);

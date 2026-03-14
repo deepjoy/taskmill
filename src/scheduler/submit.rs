@@ -140,7 +140,10 @@ impl Scheduler {
             if let Some(at) = self.inner.active.remove(*child_id) {
                 at.token.cancel();
                 let _ = self.inner.store.delete(*child_id).await;
-                let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled(at.record.event_header()));
+                let _ = self
+                    .inner
+                    .event_tx
+                    .send(SchedulerEvent::Cancelled(at.record.event_header()));
             }
         }
 
@@ -148,7 +151,10 @@ impl Scheduler {
         if let Some(at) = self.inner.active.remove(task_id) {
             at.token.cancel();
             self.inner.store.delete(task_id).await?;
-            let _ = self.inner.event_tx.send(SchedulerEvent::Cancelled(at.record.event_header()));
+            let _ = self
+                .inner
+                .event_tx
+                .send(SchedulerEvent::Cancelled(at.record.event_header()));
             return Ok(true);
         }
 

@@ -396,10 +396,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .complete(
-                task.id,
-                &IoBudget::disk(2000, 1000),
-            )
+            .complete(task.id, &IoBudget::disk(2000, 1000))
             .await
             .unwrap();
 
@@ -445,13 +442,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.retry_count, 1);
         store
-            .fail(
-                task.id,
-                "err2",
-                true,
-                1,
-                &IoBudget::disk(100, 50),
-            )
+            .fail(task.id, "err2", true, 1, &IoBudget::disk(100, 50))
             .await
             .unwrap();
 
@@ -513,10 +504,7 @@ mod tests {
         let sub = make_submission("reuse", Priority::NORMAL);
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
-        store
-            .complete(task.id, &IoBudget::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let outcome = store.submit(&sub).await.unwrap();
         assert!(outcome.is_inserted());

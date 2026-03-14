@@ -331,10 +331,7 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .complete(
-                task.id,
-                &IoBudget::disk(100, 50),
-            )
+            .complete(task.id, &IoBudget::disk(100, 50))
             .await
             .unwrap();
 
@@ -358,10 +355,7 @@ mod tests {
             store.submit(&sub).await.unwrap();
             let task = store.pop_next().await.unwrap().unwrap();
             store
-                .complete(
-                    task.id,
-                    &IoBudget::disk(1000, 500),
-                )
+                .complete(task.id, &IoBudget::disk(1000, 500))
                 .await
                 .unwrap();
         }
@@ -414,10 +408,7 @@ mod tests {
         let key = sub.effective_key();
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
-        store
-            .complete(task.id, &IoBudget::default())
-            .await
-            .unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
 
         let result = store.task_lookup(&key).await.unwrap();
         assert!(
@@ -441,10 +432,7 @@ mod tests {
             let sub = make_submission(&format!("prune-{i}"), Priority::NORMAL);
             store.submit(&sub).await.unwrap();
             let task = store.pop_next().await.unwrap().unwrap();
-            store
-                .complete(task.id, &IoBudget::default())
-                .await
-                .unwrap();
+            store.complete(task.id, &IoBudget::default()).await.unwrap();
         }
 
         let hist = store.history(100, 0).await.unwrap();

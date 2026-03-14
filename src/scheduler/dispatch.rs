@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::priority::Priority;
 use crate::registry::{ChildSpawner, IoTracker, TaskContext};
 use crate::store::TaskStore;
-use crate::task::{ParentResolution, IoBudget, TaskRecord};
+use crate::task::{IoBudget, ParentResolution, TaskRecord};
 
 use super::progress::ProgressReporter;
 use super::SchedulerEvent;
@@ -271,11 +271,7 @@ pub(crate) async fn spawn_task(
     let ctx = TaskContext {
         record: task.clone(),
         token: child_token.clone(),
-        progress: ProgressReporter::new(
-            task.event_header(),
-            event_tx.clone(),
-            active.clone(),
-        ),
+        progress: ProgressReporter::new(task.event_header(), event_tx.clone(), active.clone()),
         scheduler,
         app_state,
         child_spawner: Some(child_spawner),
@@ -415,13 +411,7 @@ pub(crate) async fn spawn_task(
                                 // Fail the parent.
                                 let msg = format!("child task {task_id} failed: {}", te.message);
                                 if let Err(e) = store
-                                    .fail_with_record(
-                                        &parent,
-                                        &msg,
-                                        false,
-                                        0,
-                                        &IoBudget::default(),
-                                    )
+                                    .fail_with_record(&parent, &msg, false, 0, &IoBudget::default())
                                     .await
                                 {
                                     tracing::error!(
