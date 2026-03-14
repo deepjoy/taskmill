@@ -1,4 +1,6 @@
-//! [`TaskSubmission`] — parameters for submitting a new task, and [`SubmitOutcome`].
+//! Task submission types: [`TaskSubmission`] for single tasks, [`BatchSubmission`]
+//! for building batches with shared defaults, [`SubmitOutcome`] for per-task
+//! results, and [`BatchOutcome`] for categorized batch summaries.
 
 use serde::{Deserialize, Serialize};
 

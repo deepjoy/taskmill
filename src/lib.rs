@@ -12,6 +12,7 @@
 //! - Preempts lower-priority work when high-priority tasks arrive
 //! - [Retries](TaskError::retryable) failed tasks at the same priority level
 //! - Records completed/failed [task history](TaskHistoryRecord) for queries and IO learning
+//! - Supports [batch submission](Scheduler::submit_batch) with intra-batch dedup and chunking
 //! - Emits [lifecycle events](SchedulerEvent) including progress for UI integration
 //! - Reports [byte-level transfer progress](TaskProgress) with EWMA-smoothed throughput and ETA
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
@@ -28,7 +29,9 @@
 //!                                  ↘ failed (permanent → history)
 //! ```
 //!
-//! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed))
+//! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
+//!    [`submit_batch`](Scheduler::submit_batch),
+//!    [`submit_built`](Scheduler::submit_built))
 //!    enqueues a [`TaskSubmission`] into the SQLite store.
 //! 2. **Pending** — the task waits in a priority queue. The scheduler's run loop
 //!    pops the highest-priority pending task on each tick.
@@ -47,6 +50,10 @@
 //! key already exists returns [`SubmitOutcome::Duplicate`] (or
 //! [`Upgraded`](SubmitOutcome::Upgraded) if the new submission has higher
 //! priority). This makes it safe to call `submit` idempotently.
+//!
+//! Within a single [`submit_batch`](Scheduler::submit_batch) call, intra-batch
+//! dedup applies a **last-wins** policy: if two tasks share a dedup key, only
+//! the last occurrence is submitted and earlier ones receive `Duplicate`.
 //!
 //! ## Priority & preemption
 //!
@@ -292,6 +299,34 @@
 //! scheduler.set_group_limit("s3://my-bucket", 2);
 //! scheduler.remove_group_limit("s3://my-bucket"); // fall back to default
 //! ```
+//!
+//! ## Batch submission
+//!
+//! Submit many tasks at once with [`Scheduler::submit_batch`] for better
+//! throughput (single SQLite transaction instead of N). Use
+//! [`BatchSubmission`] to set batch-wide defaults and [`BatchOutcome`] to
+//! inspect results:
+//!
+//! ```ignore
+//! use taskmill::{BatchSubmission, TaskSubmission, Priority};
+//!
+//! let batch = BatchSubmission::new()
+//!     .default_group("s3://my-bucket")
+//!     .default_priority(Priority::HIGH)
+//!     .task(TaskSubmission::new("upload").key("file-1").payload_json(&p1))
+//!     .task(TaskSubmission::new("upload").key("file-2").payload_json(&p2));
+//!
+//! let outcome = scheduler.submit_built(batch).await?;
+//! println!("inserted: {:?}, dupes: {}", outcome.inserted(), outcome.duplicated_count());
+//! ```
+//!
+//! Batches with duplicate dedup keys use a **last-wins** policy — only the
+//! final occurrence is submitted. Batches larger than 10,000 tasks are
+//! automatically chunked into sub-transactions to avoid holding the SQLite
+//! write lock for too long.
+//!
+//! A [`SchedulerEvent::BatchSubmitted`] event is emitted for observability
+//! whenever at least one task in the batch was inserted.
 //!
 //! ## Child tasks
 //!

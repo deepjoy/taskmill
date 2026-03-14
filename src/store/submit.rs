@@ -1,4 +1,5 @@
-//! Task submission: deduplication, priority upgrade, and requeue logic.
+//! Task submission: deduplication, priority upgrade, requeue logic,
+//! intra-batch last-wins dedup, and transaction chunking for large batches.
 
 use std::collections::HashMap;
 

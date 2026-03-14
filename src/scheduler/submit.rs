@@ -1,4 +1,4 @@
-//! Task submission, lookup, and cancellation.
+//! Task submission (single, batch, typed), lookup, and cancellation.
 
 use crate::priority::Priority;
 use crate::store::StoreError;
