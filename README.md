@@ -1,12 +1,10 @@
 # Taskmill
 
-Adaptive priority work scheduler with IO-aware concurrency and SQLite persistence.
+A persistent, priority-aware task scheduler for Rust with IO-aware concurrency.
 
-Taskmill is an async task queue for Rust applications that persists work to SQLite,
-schedules by priority with IO-budget awareness, and supports preemption, retries, and
-composable backpressure. Designed for desktop apps (Tauri, etc.) and background services
-where tasks have measurable IO costs and the system needs to avoid saturating disk
-throughput.
+Taskmill is a task queue for desktop apps and background services where work needs to survive crashes, respect system resources, and stay visible to users. It persists tasks to SQLite, schedules by priority with preemption, and automatically defers work when disk or network throughput is saturated.
+
+Read more about the [motivation and use cases](docs/why-taskmill.md).
 
 ## Quick example
 
@@ -52,70 +50,38 @@ async fn main() {
 }
 ```
 
-## Shared scheduler (library embedding)
+## Key capabilities
 
-A single `Scheduler` can be shared across an application and any libraries it embeds.
-Multiple state types can coexist — each is keyed by its concrete `TypeId`, and new state
-can be injected after the scheduler is built via `register_state`.
+- **Survive crashes** — tasks are persisted to SQLite and automatically recovered on restart
+- **Stay responsive** — IO-aware scheduling defers work when disk or network throughput is saturated
+- **Prioritize what matters** — 256-level priority queue with preemption lets urgent work interrupt background tasks
+- **Show progress** — executor-reported and throughput-extrapolated progress for real-time UI updates
+- **Avoid duplicate work** — key-based deduplication prevents the same task from being queued twice
+- **React to system load** — composable backpressure from any signal (disk, network, memory, battery, API limits)
+- **Control concurrency** — per-group limits (e.g., per S3 bucket), global limits, runtime-adjustable
+- **Build for Tauri** — `Clone`, `Serialize` on all types; events bridge directly to frontends
 
-```rust
-use std::sync::Arc;
-use taskmill::Scheduler;
+## Where to start
 
-// The host app builds the scheduler and registers its own executors.
-let scheduler = Scheduler::builder()
-    .store_path("app.db")
-    .executor("thumbnail", Arc::new(ThumbnailGenerator))
-    .app_state(MyAppServices { /* ... */ })
-    .max_concurrency(4)
-    .build()
-    .await
-    .unwrap();
-
-// A library can inject its own state after build.
-scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
-
-// Both the host and the library submit tasks to the same queue.
-// The host manages the run loop.
-let token = CancellationToken::new();
-scheduler.run(token).await;
-```
-
-## Features
-
-- **SQLite persistence** — tasks survive restarts; crash recovery requeues interrupted work
-- **256-level priority queue** — with preemption of lower-priority tasks
-- **IO-aware scheduling** — defers work when disk or network throughput is saturated
-- **Key-based deduplication** — SHA-256 keys prevent duplicate submissions
-- **Composable backpressure** — plug in external pressure signals with custom throttle policies
-- **Cross-platform resource monitoring** — CPU, disk IO, and network throughput via `sysinfo` (Linux, macOS, Windows)
-- **Network bandwidth pressure** — built-in `NetworkPressure` source throttles tasks when bandwidth is saturated
-- **Retries** — automatic requeue of retryable failures with configurable limits
-- **Progress reporting** — executor-reported and throughput-extrapolated progress
-- **Lifecycle events** — broadcast events for UI integration (Tauri, etc.)
-- **Typed payloads** — serialize/deserialize structured task data
-- **Batch submission** — bulk enqueue in a single SQLite transaction
-- **Graceful shutdown** — configurable drain timeout before force-cancellation
-- **Task group concurrency** — limit concurrent tasks per named group (e.g., per S3 bucket)
-- **Global pause/resume** — pause all work when the app is backgrounded
-- **Type-keyed application state** — register multiple state types, inject pre- or post-build
-- **Clone-friendly** — `Scheduler` is `Clone` via `Arc` for easy sharing
-- **Serde on all public types** — ready for Tauri IPC
-
-For a detailed breakdown of every feature, see [docs/features.md](docs/features.md).
+| If you want to... | Read |
+|---|---|
+| Understand what taskmill solves | [Why Taskmill](docs/why-taskmill.md) |
+| Get running in 5 minutes | [Quick Start](docs/quick-start.md) |
+| See it in a real Tauri app | [Guide: Tauri Upload Queue](docs/guides/tauri-upload-queue.md) |
+| Look up a term | [Glossary](docs/glossary.md) |
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [Quick Start](docs/quick-start.md) | Installation, first executor, builder setup, and running the scheduler |
-| [Features](docs/features.md) | Complete feature list with descriptions |
-| [Priorities & Preemption](docs/priorities-and-preemption.md) | Priority levels, preemption mechanics, and throttle behavior |
-| [IO Tracking & Backpressure](docs/io-and-backpressure.md) | IO budgets, resource monitoring, pressure sources, and throttle policies |
-| [Persistence & Recovery](docs/persistence-and-recovery.md) | SQLite schema, crash recovery, deduplication, and history retention |
-| [Progress Reporting](docs/progress-reporting.md) | Executor progress, extrapolation, dashboard snapshots, and lifecycle events |
-| [Configuration](docs/configuration.md) | All configuration options for scheduler, store, sampler, and feature flags |
-| [Query APIs](docs/query-apis.md) | Full `TaskStore` query reference for dashboards and debugging |
+| Guide | What it covers |
+|-------|----------------|
+| [Quick Start](docs/quick-start.md) | Installation, first executor, builder setup, Tauri integration |
+| [Priorities & Preemption](docs/priorities-and-preemption.md) | Priority levels, task groups, preemption, and throttle behavior |
+| [IO & Backpressure](docs/io-and-backpressure.md) | IO budgets, resource monitoring, pressure sources, and tuning |
+| [Progress & Events](docs/progress-and-events.md) | Progress reporting, lifecycle events, dashboard snapshots |
+| [Persistence & Recovery](docs/persistence-and-recovery.md) | Crash recovery, deduplication, history retention |
+| [Configuration](docs/configuration.md) | All options, recommended defaults, workload-specific tuning |
+| [Query APIs](docs/query-apis.md) | TaskStore queries for dashboards, debugging, and analytics |
+| [Design](docs/design.md) | Architecture decisions, extension points, thread safety |
 
 ## License
 

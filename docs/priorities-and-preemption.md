@@ -1,18 +1,24 @@
 # Priorities & Preemption
 
+## When you need this
+
+Not all work is equally important. A user clicking "upload this file" should not wait behind 500 background thumbnail jobs. A re-index of the entire library should yield to normal operations if the system gets busy.
+
+Taskmill's priority system lets you express these relationships, and preemption enforces them at runtime — pausing lower-priority work so urgent tasks can run immediately.
+
 ## Priority levels
 
-Taskmill uses a 256-level priority scale where lower values mean higher priority. Five named constants are provided:
+Taskmill uses a 256-level priority scale where lower values mean higher priority. Five named constants cover the most common scenarios:
 
-| Constant     | Value | Behavior |
-|--------------|-------|----------|
-| `REALTIME`   | 0     | Never throttled. Triggers preemption of lower-priority work. |
-| `HIGH`       | 64    | Throttled only under extreme pressure (>75%). |
-| `NORMAL`     | 128   | Standard operations. Throttled at >75% pressure. |
-| `BACKGROUND` | 192   | Deferred under moderate load. Throttled at >50% pressure. |
-| `IDLE`       | 255   | Runs only when the system is otherwise idle. Throttled at >50% pressure. |
+| Constant | Value | When to use |
+|----------|-------|-------------|
+| `REALTIME` | 0 | User-blocking operations that can't wait. Rare — most apps never need this. |
+| `HIGH` | 64 | User-initiated actions: uploading a file they clicked, exporting a document. |
+| `NORMAL` | 128 | App-initiated work: generating thumbnails, syncing metadata. |
+| `BACKGROUND` | 192 | Maintenance tasks: re-indexing, cleanup, cache warming. |
+| `IDLE` | 255 | Truly optional work: analytics, prefetching, speculative processing. |
 
-Custom values between tiers are supported:
+Custom values between tiers are supported for fine-grained control:
 
 ```rust
 use taskmill::Priority;
@@ -20,24 +26,40 @@ use taskmill::Priority;
 let custom = Priority::new(100); // between HIGH and NORMAL
 ```
 
+### Choosing priorities for your tasks
+
+A good rule of thumb: **if the user is waiting for it, use `HIGH`. If the app initiated it, use `NORMAL`. If it can wait until later, use `BACKGROUND`.**
+
+Most applications only need `HIGH`, `NORMAL`, and `BACKGROUND`. Reserve `REALTIME` for operations where any delay is unacceptable — it triggers [preemption](#preemption) by default, which pauses all other work.
+
 ## Queue ordering
 
-Tasks are popped from the queue in strict priority order (`ORDER BY priority ASC, id ASC`). Within the same priority tier, tasks are dispatched in insertion order (FIFO).
-
-A partial index on `(status, priority, id) WHERE status = 'pending'` keeps pop operations fast regardless of history size.
+Tasks are dispatched in strict priority order. Within the same priority tier, tasks are dispatched in insertion order (FIFO) — the task submitted first runs first.
 
 ## Preemption
 
-When a task with priority at or above `preempt_priority` (default: `REALTIME`) is submitted, the scheduler preempts lower-priority running work:
+When a task at or above `preempt_priority` (default: `REALTIME`) is submitted, the scheduler pauses all lower-priority running work to make room:
 
-1. **Cancel tokens** — the `CancellationToken` of every active task with lower priority (higher numeric value) is triggered.
-2. **Pause in store** — preempted tasks are moved to `paused` status with `started_at` cleared.
+1. **Cancel tokens** — the `CancellationToken` of every active task with lower priority is triggered.
+2. **Pause in store** — preempted tasks are moved to `paused` status.
 3. **Emit events** — a `SchedulerEvent::Preempted` is emitted for each affected task.
 4. **Resume later** — paused tasks are only re-dispatched when no active preemptors remain, preventing thrashing between competing priority tiers.
 
+### When to use preemption
+
+Preemption is powerful but rarely needed. The default threshold (`REALTIME`) means only the highest-priority tasks trigger it. **Most apps should leave the default.** If you find yourself frequently preempting, consider whether your task priorities are spread too wide.
+
+Use preemption when:
+- A "cancel everything and do this NOW" escape hatch is needed (e.g., emergency sync)
+- User-initiated work must always run immediately, even if the system is fully loaded
+
+Don't use preemption when:
+- You just want important tasks to run first — priority ordering handles that without preemption
+- Tasks are short enough that waiting for a slot is acceptable
+
 ### Handling preemption in executors
 
-Executors should check for cancellation at natural yield points:
+Executors should check for cancellation at natural yield points — between chunks of work, between loop iterations, etc. This lets the executor clean up gracefully.
 
 ```rust
 impl TaskExecutor for MyExecutor {
@@ -60,9 +82,9 @@ impl TaskExecutor for MyExecutor {
 }
 ```
 
-Returning a retryable error on preemption is optional — the scheduler handles pausing regardless. But it gives the executor a chance to clean up.
+Returning a retryable error on preemption is optional — the scheduler handles pausing regardless. But it gives the executor a chance to clean up partial work.
 
-### Configuring preemption threshold
+### Configuring the preemption threshold
 
 ```rust
 let scheduler = Scheduler::builder()
@@ -71,21 +93,53 @@ let scheduler = Scheduler::builder()
     .await?;
 ```
 
+## Task groups
+
+When multiple tasks share a limited resource (e.g., an API with rate limits, or a specific S3 bucket), you can limit how many run concurrently using task groups.
+
+Assign tasks to a group via `.group()` on `TaskSubmission` or `TypedTask::group_key()`:
+
+```rust
+let sub = TaskSubmission::new("upload")
+    .payload_json(&data)
+    .group("bucket-prod");  // at most N uploads to this bucket at once
+```
+
+Configure limits at build time or adjust at runtime:
+
+```rust
+let scheduler = Scheduler::builder()
+    .group_concurrency("bucket-prod", 3)       // max 3 concurrent for this group
+    .default_group_concurrency(5)              // default for any group not explicitly configured
+    .build()
+    .await?;
+
+// Adjust at runtime
+scheduler.set_group_limit("bucket-prod", 5).await;
+scheduler.remove_group_limit("bucket-prod").await;
+```
+
+Group limits are checked *in addition to* `max_concurrency` — a task must pass both the global and group gate to be dispatched.
+
 ## Throttle behavior
 
-Throttling is independent of preemption. It controls whether a pending task is *dispatched*, not whether a running task is *interrupted*.
+Throttling is independent of preemption. While preemption *interrupts* running tasks, throttling controls whether pending tasks are *dispatched in the first place* based on current system [pressure](glossary.md#backpressure).
 
 The default three-tier `ThrottlePolicy`:
 
 | Priority tier | Throttled when pressure exceeds |
 |---------------|-------------------------------|
-| `BACKGROUND` (192+) | 50% |
+| `BACKGROUND` / `IDLE` (192+) | 50% |
 | `NORMAL` (128+) | 75% |
 | `HIGH` / `REALTIME` | Never |
 
-Pressure is an aggregate `0.0..=1.0` value from all registered `PressureSource` implementations (see [IO & Backpressure](io-and-backpressure.md)).
+This means: when the system is moderately busy (>50% pressure), background tasks wait. When it's heavily loaded (>75%), even normal tasks wait. High-priority and realtime tasks always run.
+
+Pressure is an aggregate `0.0..=1.0` value from all registered [pressure sources](io-and-backpressure.md#pressure-sources).
 
 ### Custom throttle policies
+
+If the defaults don't fit your workload, define your own thresholds:
 
 ```rust
 use taskmill::{ThrottlePolicy, Priority};
@@ -98,4 +152,21 @@ let policy = ThrottlePolicy::new(vec![
 ]);
 ```
 
-Thresholds are evaluated from lowest priority (highest numeric value) first. A task is throttled if its priority is at or below the threshold tier and pressure exceeds the limit.
+Thresholds are evaluated from lowest priority first. A task is throttled if its priority is at or below the threshold tier and pressure exceeds the limit.
+
+## Retries
+
+When an executor returns a retryable error, the task is automatically requeued at the same priority:
+
+```rust
+// In your executor:
+return Err(TaskError::retryable("network timeout, will retry"));
+
+// Non-retryable (permanent) failure:
+return Err(TaskError::permanent("invalid payload, giving up"));
+```
+
+- **Retry limit** — `max_retries` (default 3) controls how many times a task can be retried before it permanently fails.
+- **Priority preserved** — retried tasks keep their original priority; they aren't demoted.
+- **Dedup key preserved** — the key stays occupied during retries, preventing duplicate submissions while the task is still being worked on.
+- **Crash doesn't count** — if the process crashes while a task is running, the crash recovery doesn't increment `retry_count`.
