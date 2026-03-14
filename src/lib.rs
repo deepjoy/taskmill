@@ -13,6 +13,7 @@
 //! - [Retries](TaskError::retryable) failed tasks at the same priority level
 //! - Records completed/failed [task history](TaskHistoryRecord) for queries and IO learning
 //! - Emits [lifecycle events](SchedulerEvent) including progress for UI integration
+//! - Reports [byte-level transfer progress](TaskProgress) with EWMA-smoothed throughput and ETA
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
 //!
 //! # Concepts
@@ -95,6 +96,23 @@
 //! like `CompleteMultipartUpload`. If any child fails and
 //! [`fail_fast`](TaskSubmission::fail_fast) is `true` (the default), siblings
 //! are cancelled and the parent fails immediately.
+//!
+//! ## Byte-level progress
+//!
+//! For long-running transfers (file copies, uploads, downloads), executors can
+//! report byte-level progress via [`TaskContext::set_bytes_total`] and
+//! [`TaskContext::add_bytes`]. The scheduler maintains per-task atomic counters
+//! on the [`IoTracker`](registry::IoTracker) — updates are lock-free and
+//! impose no overhead on the executor hot path.
+//!
+//! When [`SchedulerBuilder::progress_interval`] is set, a background ticker
+//! task polls these counters and emits [`TaskProgress`] events on a dedicated
+//! broadcast channel (via [`Scheduler::subscribe_progress`]). Each event
+//! includes EWMA-smoothed throughput and an estimated time remaining (ETA).
+//! The ticker is opt-in — when not configured, there is zero runtime cost.
+//!
+//! For a one-shot query without the ticker, [`Scheduler::byte_progress`]
+//! returns instantaneous snapshots (throughput = 0, no ETA).
 //!
 //! # Quick start
 //!
@@ -230,9 +248,25 @@
 //! });
 //! ```
 //!
+//! For byte-level transfer progress with smoothed throughput and ETA,
+//! subscribe to the dedicated progress channel:
+//!
+//! ```ignore
+//! let mut progress_rx = scheduler.subscribe_progress();
+//! tokio::spawn(async move {
+//!     while let Ok(tp) = progress_rx.recv().await {
+//!         println!(
+//!             "{}: {}/{} bytes ({:.0} B/s, ETA {:?})",
+//!             tp.key, tp.bytes_completed, tp.bytes_total.unwrap_or(0),
+//!             tp.throughput_bps, tp.eta,
+//!         );
+//!     }
+//! });
+//! ```
+//!
 //! For a single-call dashboard snapshot, use [`Scheduler::snapshot`] which
 //! returns a serializable [`SchedulerSnapshot`] with queue depths, running
-//! tasks, progress estimates, and backpressure.
+//! tasks, progress estimates, byte-level progress, and backpressure.
 //!
 //! ## Group concurrency
 //!
@@ -334,7 +368,7 @@ pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
     EstimatedProgress, GroupLimits, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
-    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
+    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader, TaskProgress,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{

@@ -131,6 +131,27 @@ impl TaskContext {
         self.io.net_tx_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    // ── Byte-level progress ────────────────────────────────────────────
+
+    /// Set the total number of bytes expected for byte-level progress.
+    ///
+    /// Call once when the total is known (e.g. from a `Content-Length` header).
+    pub fn set_bytes_total(&self, total: u64) {
+        self.progress.set_bytes_total(total);
+    }
+
+    /// Increment completed bytes by `delta` for byte-level progress.
+    ///
+    /// Call per chunk in a streaming transfer.
+    pub fn add_bytes(&self, delta: u64) {
+        self.progress.add_bytes(delta);
+    }
+
+    /// Set both completed and total bytes to absolute values.
+    pub fn report_bytes(&self, completed: u64, total: u64) {
+        self.progress.report_bytes(completed, total);
+    }
+
     // ── Task submission (scoped scheduler access) ────────────────────
 
     /// Submit a continuation or follow-up task.

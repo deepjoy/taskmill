@@ -25,7 +25,23 @@ pub(crate) struct ActiveTask {
     pub reported_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Handle to the spawned tokio task, set after spawn.
     pub handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shared IO tracker for byte-level progress reporting.
+    pub io: Arc<IoTracker>,
+    /// When this task started executing.
+    pub started_at: std::time::Instant,
 }
+
+/// Snapshot of byte-level progress for a single active task.
+pub(crate) type ByteProgressSnapshot = (
+    i64,
+    String,
+    String,
+    String,
+    u64,
+    Option<u64>,
+    Option<i64>,
+    std::time::Instant,
+);
 
 // ── Active Task Map ────────────────────────────────────────────────
 
@@ -92,6 +108,29 @@ impl ActiveTaskMap {
             .unwrap()
             .values()
             .map(|at| (at.record.clone(), at.reported_progress, at.reported_at))
+            .collect()
+    }
+
+    /// Snapshot of byte-level progress for all active tasks.
+    ///
+    /// Returns `(task_id, task_type, key, label, bytes_completed, bytes_total, parent_id, started_at)`.
+    /// Single lock acquisition — reads atomic counters and copies scalar fields only.
+    pub fn byte_progress_snapshots(&self) -> Vec<ByteProgressSnapshot> {
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .map(|at| {
+                let (completed, total) = at.io.progress_snapshot();
+                (
+                    at.record.id,
+                    at.record.task_type.clone(),
+                    at.record.key.clone(),
+                    at.record.label.clone(),
+                    completed,
+                    total,
+                    at.record.parent_id,
+                    at.started_at,
+                )
+            })
             .collect()
     }
 
@@ -253,6 +292,10 @@ pub(crate) async fn spawn_task(
     } = ctx;
     let child_token = CancellationToken::new();
 
+    // Build execution context.
+    let child_spawner = ChildSpawner::new(store.clone(), task.id, work_notify.clone());
+    let io = Arc::new(IoTracker::new());
+
     // Insert into active map before spawning to avoid races.
     active.insert(
         task.id,
@@ -262,16 +305,20 @@ pub(crate) async fn spawn_task(
             reported_progress: None,
             reported_at: None,
             handle: None,
+            io: io.clone(),
+            started_at: std::time::Instant::now(),
         },
     );
 
-    // Build execution context.
-    let child_spawner = ChildSpawner::new(store.clone(), task.id, work_notify.clone());
-    let io = Arc::new(IoTracker::new());
     let ctx = TaskContext {
         record: task.clone(),
         token: child_token.clone(),
-        progress: ProgressReporter::new(task.event_header(), event_tx.clone(), active.clone()),
+        progress: ProgressReporter::new(
+            task.event_header(),
+            event_tx.clone(),
+            active.clone(),
+            io.clone(),
+        ),
         scheduler,
         app_state,
         child_spawner: Some(child_spawner),

@@ -15,7 +15,7 @@
 //! - [`dispatch`] — task spawning, active-task tracking, and preemption
 //! - [`gate`] — admission control (IO budget, backpressure, group limits)
 //! - [`event`] — event types and scheduler configuration
-//! - [`progress`] — progress reporting and extrapolation
+//! - [`progress`] — progress reporting, byte-level tracking, and extrapolation
 //!
 //! See the [crate-level docs](crate) for a full walkthrough of the task
 //! lifecycle, common patterns, and how the dispatch loop works.
@@ -52,7 +52,7 @@ pub use event::{
     SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
 };
 pub use gate::GroupLimits;
-pub use progress::{EstimatedProgress, ProgressReporter};
+pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
 
 // ── Scheduler ───────────────────────────────────────────────────────
 
@@ -75,6 +75,12 @@ pub(crate) struct SchedulerInner {
     pub(crate) event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
     /// Token to cancel the background resource sampler (if started).
     pub(crate) sampler_token: CancellationToken,
+    /// Token to cancel the background progress ticker (if started).
+    pub(crate) progress_ticker_token: CancellationToken,
+    /// Configured interval for byte-level progress polling.
+    pub(crate) progress_interval: Option<Duration>,
+    /// Broadcast channel for byte-level progress events.
+    pub(crate) progress_tx: tokio::sync::broadcast::Sender<TaskProgress>,
     /// Type-keyed application state passed to every executor via [`TaskContext::state`].
     pub(crate) app_state: Arc<crate::registry::StateMap>,
     /// Global pause flag — when `true`, the run loop skips dispatching.
@@ -156,6 +162,7 @@ impl Scheduler {
         app_state: Arc<crate::registry::StateMap>,
     ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        let (progress_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             inner: Arc::new(SchedulerInner {
                 store,
@@ -165,12 +172,15 @@ impl Scheduler {
                 poll_interval: config.poll_interval,
                 throughput_sample_size: config.throughput_sample_size,
                 shutdown_mode: config.shutdown_mode,
+                progress_interval: config.progress_interval,
                 registry,
                 gate,
                 resource_reader: Mutex::new(None),
                 active: ActiveTaskMap::new(),
                 event_tx,
+                progress_tx,
                 sampler_token: CancellationToken::new(),
+                progress_ticker_token: CancellationToken::new(),
                 app_state,
                 paused: AtomicBool::new(false),
                 work_notify: Arc::new(Notify::new()),
@@ -191,6 +201,18 @@ impl Scheduler {
     /// bridging to a Tauri frontend or updating UI state.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SchedulerEvent> {
         self.inner.event_tx.subscribe()
+    }
+
+    /// Subscribe to byte-level progress events.
+    ///
+    /// Returns a broadcast receiver for [`TaskProgress`] events emitted at
+    /// the configured `progress_interval`. These are separate from lifecycle
+    /// events to avoid flooding the main event stream.
+    ///
+    /// Requires `progress_interval` to be set via the builder; otherwise the
+    /// ticker is not spawned and no events will be emitted.
+    pub fn subscribe_progress(&self) -> tokio::sync::broadcast::Receiver<TaskProgress> {
+        self.inner.progress_tx.subscribe()
     }
 
     /// Set the resource reader for IO-aware scheduling.

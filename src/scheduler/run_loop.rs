@@ -166,6 +166,17 @@ impl Scheduler {
             "taskmill scheduler started"
         );
 
+        // Spawn the progress ticker if configured.
+        if let Some(interval) = self.inner.progress_interval {
+            let ticker_token = self.inner.progress_ticker_token.clone();
+            tokio::spawn(super::progress::run_progress_ticker(
+                self.inner.active.clone(),
+                self.inner.progress_tx.clone(),
+                interval,
+                ticker_token,
+            ));
+        }
+
         loop {
             tokio::select! {
                 _ = token.cancelled() => {
@@ -229,8 +240,9 @@ impl Scheduler {
 
     /// Perform shutdown according to the configured `ShutdownMode`.
     async fn shutdown(&self) {
-        // Stop the resource sampler.
+        // Stop the resource sampler and progress ticker.
         self.inner.sampler_token.cancel();
+        self.inner.progress_ticker_token.cancel();
 
         match self.inner.shutdown_mode {
             ShutdownMode::Hard => {
