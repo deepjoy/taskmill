@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
-use crate::registry::{ChildSpawner, TaskContext};
+use crate::registry::{ChildSpawner, IoTracker, TaskContext};
 use crate::store::TaskStore;
-use crate::task::{ParentResolution, TaskRecord};
+use crate::task::{ParentResolution, TaskMetrics, TaskRecord};
 
 use super::progress::ProgressReporter;
 use super::SchedulerEvent;
@@ -195,6 +195,7 @@ pub(crate) struct SpawnContext {
     pub max_retries: i32,
     pub app_state: crate::registry::StateSnapshot,
     pub work_notify: Arc<tokio::sync::Notify>,
+    pub scheduler: super::Scheduler,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -214,6 +215,7 @@ pub(crate) async fn spawn_task(
         max_retries,
         app_state,
         work_notify,
+        scheduler,
     } = ctx;
     let child_token = CancellationToken::new();
 
@@ -232,6 +234,7 @@ pub(crate) async fn spawn_task(
 
     // Build execution context.
     let child_spawner = ChildSpawner::new(store.clone(), task.id, work_notify.clone());
+    let io = Arc::new(IoTracker::new());
     let ctx = TaskContext {
         record: task.clone(),
         token: child_token.clone(),
@@ -241,8 +244,10 @@ pub(crate) async fn spawn_task(
             task.key.clone(),
             event_tx.clone(),
         ),
+        scheduler,
         app_state,
         child_spawner: Some(child_spawner),
+        io: io.clone(),
     };
 
     // Emit dispatched event.
@@ -281,11 +286,14 @@ pub(crate) async fn spawn_task(
             ExecutionPhase::Finalize => executor.finalize_erased(&ctx).await,
         };
 
+        // Read IO bytes from the context tracker.
+        let metrics = io.snapshot();
+
         // Drop the context (and its progress reporter) — executor is done.
         drop(ctx);
 
         match result {
-            Ok(tr) => {
+            Ok(()) => {
                 // For the execute phase, check if the task spawned children.
                 // If so, transition to waiting instead of completing.
                 if phase == ExecutionPhase::Execute {
@@ -324,7 +332,10 @@ pub(crate) async fn spawn_task(
                     }
                 }
 
-                if let Err(e) = store.complete(task_id, &tr).await {
+                if let Err(e) = store
+                    .complete(task_id, &metrics)
+                    .await
+                {
                     tracing::error!(task_id, error = %e, "failed to record task completion");
                 }
                 // Remove from active tracking AFTER the store write completes.
@@ -369,8 +380,7 @@ pub(crate) async fn spawn_task(
                         &te.message,
                         te.retryable,
                         max_retries,
-                        te.actual_read_bytes,
-                        te.actual_write_bytes,
+                        &metrics,
                     )
                     .await
                 {
@@ -409,7 +419,7 @@ pub(crate) async fn spawn_task(
                                 }
                                 // Fail the parent.
                                 let msg = format!("child task {task_id} failed: {}", te.message);
-                                if let Err(e) = store.fail(parent_id, &msg, false, 0, 0, 0).await {
+                                if let Err(e) = store.fail(parent_id, &msg, false, 0, &TaskMetrics::default()).await {
                                     tracing::error!(
                                         parent_id,
                                         error = %e,
@@ -463,7 +473,7 @@ async fn handle_parent_resolution(
         Ok(Some(ParentResolution::Failed(reason))) => {
             // All children done but some failed — fail the parent.
             if let Ok(Some(parent)) = store.task_by_id(parent_id).await {
-                if let Err(e) = store.fail(parent_id, &reason, false, 0, 0, 0).await {
+                if let Err(e) = store.fail(parent_id, &reason, false, 0, &TaskMetrics::default()).await {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
                 }
                 let _ = event_tx.send(SchedulerEvent::Failed {

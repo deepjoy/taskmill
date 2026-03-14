@@ -23,7 +23,7 @@ use crate::registry::{TaskExecutor, TaskTypeRegistry};
 use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
-use crate::task::{generate_dedup_key, SubmitOutcome, TaskLookup, TaskSubmission, TypedTask};
+use crate::task::{generate_dedup_key, SubmitOutcome, TaskLookup, TaskMetrics, TaskSubmission, TypedTask};
 
 use dispatch::ActiveTaskMap;
 use gate::{DefaultDispatchGate, GateContext};
@@ -499,8 +499,7 @@ impl Scheduler {
                     &format!("no executor registered for type '{}'", task.task_type),
                     false,
                     0,
-                    0,
-                    0,
+                    &TaskMetrics::default(),
                 )
                 .await?;
             return Ok(true);
@@ -519,6 +518,7 @@ impl Scheduler {
                 max_retries: self.inner.max_retries,
                 app_state: self.inner.app_state.snapshot().await,
                 work_notify: Arc::clone(&self.inner.work_notify),
+                scheduler: self.clone(),
             },
             dispatch::ExecutionPhase::Execute,
         )
@@ -556,7 +556,7 @@ impl Scheduler {
             );
             self.inner
                 .store
-                .fail(parent_id, "no executor for finalize", false, 0, 0, 0)
+                .fail(parent_id, "no executor for finalize", false, 0, &TaskMetrics::default())
                 .await?;
             return Ok(true);
         };
@@ -572,6 +572,7 @@ impl Scheduler {
                 max_retries: self.inner.max_retries,
                 app_state: self.inner.app_state.snapshot().await,
                 work_notify: Arc::clone(&self.inner.work_notify),
+                scheduler: self.clone(),
             },
             dispatch::ExecutionPhase::Finalize,
         )
@@ -1081,37 +1082,30 @@ impl Default for SchedulerBuilder {
 mod tests {
     use super::*;
     use crate::registry::{TaskContext, TaskExecutor};
-    use crate::task::{TaskError, TaskResult};
+    use crate::task::TaskError;
 
     struct InstantExecutor;
 
     impl TaskExecutor for InstantExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
-            Ok(TaskResult {
-                actual_read_bytes: 100,
-                actual_write_bytes: 50,
-            })
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            ctx.record_read_bytes(100);
+            ctx.record_write_bytes(50);
+            Ok(())
         }
     }
 
     struct SlowExecutor;
 
     impl TaskExecutor for SlowExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             tokio::select! {
                 _ = ctx.token.cancelled() => {
-                    Err(TaskError {
-                        message: "cancelled".into(),
-                        retryable: false,
-                        actual_read_bytes: 0,
-                        actual_write_bytes: 0,
-                    })
+                    Err(TaskError::new("cancelled"))
                 }
                 _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                    Ok(TaskResult {
-                        actual_read_bytes: 100,
-                        actual_write_bytes: 50,
-                    })
+                    ctx.record_read_bytes(100);
+                    ctx.record_write_bytes(50);
+                    Ok(())
                 }
             }
         }
@@ -1121,13 +1115,8 @@ mod tests {
     struct FailingExecutor;
 
     impl TaskExecutor for FailingExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
-            Err(TaskError {
-                message: "boom".into(),
-                retryable: true,
-                actual_read_bytes: 0,
-                actual_write_bytes: 0,
-            })
+        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            Err(TaskError::retryable("boom"))
         }
     }
 
@@ -1156,7 +1145,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("k1".into()),
+                dedup_key: Some("k1".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1203,7 +1192,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "unknown".into(),
-                key: Some("k".into()),
+                dedup_key: Some("k".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1227,7 +1216,7 @@ mod tests {
 
         let sub = TaskSubmission {
             task_type: "test".into(),
-            key: Some("dup".into()),
+            dedup_key: Some("dup".into()),
             priority: Priority::NORMAL,
             payload: None,
             expected_read_bytes: 0,
@@ -1257,7 +1246,7 @@ mod tests {
         let id = sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("cancel-me".into()),
+                dedup_key: Some("cancel-me".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1290,7 +1279,7 @@ mod tests {
         let id = sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("cancel-running".into()),
+                dedup_key: Some("cancel-running".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1319,7 +1308,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("evt".into()),
+                dedup_key: Some("evt".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1352,7 +1341,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("shared".into()),
+                dedup_key: Some("shared".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1423,7 +1412,7 @@ mod tests {
             sched
                 .submit(&TaskSubmission {
                     task_type: "test".into(),
-                    key: Some(key.to_string()),
+                    dedup_key: Some(key.to_string()),
                     priority: Priority::NORMAL,
                     payload: None,
                     expected_read_bytes: 0,
@@ -1459,7 +1448,7 @@ mod tests {
             sched
                 .submit(&TaskSubmission {
                     task_type: "test".into(),
-                    key: Some(key.to_string()),
+                    dedup_key: Some(key.to_string()),
                     priority: Priority::NORMAL,
                     payload: None,
                     expected_read_bytes: 0,
@@ -1519,13 +1508,10 @@ mod tests {
         struct StateCheckExecutor;
 
         impl TaskExecutor for StateCheckExecutor {
-            async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+            async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
                 let state = ctx.state::<MyState>().expect("state should be set");
                 state.flag.store(true, Ordering::SeqCst);
-                Ok(TaskResult {
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                })
+                Ok(())
             }
         }
 
@@ -1542,7 +1528,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("state-test".into()),
+                dedup_key: Some("state-test".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1566,7 +1552,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("lookup-1".into()),
+                dedup_key: Some("lookup-1".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1591,7 +1577,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("lookup-done".into()),
+                dedup_key: Some("lookup-done".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1654,11 +1640,11 @@ mod tests {
     }
 
     impl TaskExecutor for SpawningExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             for i in 0..self.num_children {
                 let sub = TaskSubmission {
                     task_type: "child".into(),
-                    key: Some(format!("child-{i}")),
+                    dedup_key: Some(format!("child-{i}")),
                     priority: ctx.record.priority,
                     payload: None,
                     expected_read_bytes: 0,
@@ -1666,14 +1652,9 @@ mod tests {
                     parent_id: None, // spawn_child sets this
                     fail_fast: true,
                 };
-                ctx.spawn_child(sub).await.map_err(|e| TaskError {
-                    message: e.to_string(),
-                    retryable: false,
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                })?;
+                ctx.spawn_child(sub).await?;
             }
-            Ok(TaskResult::zero())
+            Ok(())
         }
     }
 
@@ -1684,11 +1665,11 @@ mod tests {
     }
 
     impl TaskExecutor for FinalizeTrackingExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
             for i in 0..self.children {
                 let sub = TaskSubmission {
                     task_type: "child".into(),
-                    key: Some(format!("ft-child-{i}")),
+                    dedup_key: Some(format!("ft-child-{i}")),
                     priority: ctx.record.priority,
                     payload: None,
                     expected_read_bytes: 0,
@@ -1696,20 +1677,15 @@ mod tests {
                     parent_id: None,
                     fail_fast: true,
                 };
-                ctx.spawn_child(sub).await.map_err(|e| TaskError {
-                    message: e.to_string(),
-                    retryable: false,
-                    actual_read_bytes: 0,
-                    actual_write_bytes: 0,
-                })?;
+                ctx.spawn_child(sub).await?;
             }
-            Ok(TaskResult::zero())
+            Ok(())
         }
 
-        async fn finalize<'a>(&'a self, _ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+        async fn finalize<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
             self.finalized
                 .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(TaskResult::zero())
+            Ok(())
         }
     }
 
@@ -1733,7 +1709,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "parent".into(),
-                key: Some("p1".into()),
+                dedup_key: Some("p1".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1793,7 +1769,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "parent".into(),
-                key: Some("p-complete".into()),
+                dedup_key: Some("p-complete".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1866,7 +1842,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "parent".into(),
-                key: Some("p-finalize".into()),
+                dedup_key: Some("p-finalize".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1922,7 +1898,7 @@ mod tests {
         let parent_id = sched
             .submit(&TaskSubmission {
                 task_type: "parent".into(),
-                key: Some("p-cancel".into()),
+                dedup_key: Some("p-cancel".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,
@@ -1956,7 +1932,7 @@ mod tests {
         sched
             .submit(&TaskSubmission {
                 task_type: "test".into(),
-                key: Some("no-kids".into()),
+                dedup_key: Some("no-kids".into()),
                 priority: Priority::NORMAL,
                 payload: None,
                 expected_read_bytes: 0,

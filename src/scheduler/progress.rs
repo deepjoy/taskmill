@@ -22,13 +22,13 @@ use super::SchedulerEvent;
 ///
 /// ```ignore
 /// // Inside a TaskExecutor::execute implementation:
-/// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
+/// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
 ///     let items = vec![/* ... */];
 ///     for (i, item) in items.iter().enumerate() {
 ///         // process item...
 ///         ctx.progress.report_fraction(i as u64 + 1, items.len() as u64, None);
 ///     }
-///     Ok(TaskResult { actual_read_bytes: 0, actual_write_bytes: 0 })
+///     Ok(())
 /// }
 /// ```
 #[derive(Clone)]

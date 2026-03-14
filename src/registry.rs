@@ -9,14 +9,15 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::scheduler::ProgressReporter;
+use crate::scheduler::{ProgressReporter, Scheduler};
 use crate::store::{StoreError, TaskStore};
-use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskResult, TaskSubmission, TypedTask};
+use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskSubmission, TypedTask};
 
 // ── State Map ────────────────────────────────────────────────────────
 
@@ -128,6 +129,34 @@ impl ChildSpawner {
     }
 }
 
+// ── IO Tracker ────────────────────────────────────────────────────
+
+/// Accumulated IO metrics reported by the executor during execution.
+///
+/// Accessible via [`TaskContext::record_read_bytes`],
+/// [`TaskContext::record_write_bytes`], etc. The scheduler reads the
+/// final snapshot after the executor returns.
+pub(crate) struct IoTracker {
+    pub read_bytes: AtomicI64,
+    pub write_bytes: AtomicI64,
+}
+
+impl IoTracker {
+    pub fn new() -> Self {
+        Self {
+            read_bytes: AtomicI64::new(0),
+            write_bytes: AtomicI64::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> crate::task::TaskMetrics {
+        crate::task::TaskMetrics {
+            read_bytes: self.read_bytes.load(Ordering::Relaxed),
+            write_bytes: self.write_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
 // ── Task Context ─────────────────────────────────────────────────────
 
 /// Execution context passed to a [`TaskExecutor`].
@@ -143,17 +172,45 @@ pub struct TaskContext {
     pub token: CancellationToken,
     /// Report progress back to the scheduler (0.0–1.0).
     pub progress: ProgressReporter,
+    /// Handle to the scheduler that dispatched this task. Allows executors to
+    /// submit continuation tasks, look up other tasks, etc. without needing
+    /// a separate `OnceLock` or `Arc<Scheduler>` in application state.
+    pub scheduler: Scheduler,
     /// Shared application state set via [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
     pub(crate) app_state: StateSnapshot,
     /// Spawner for creating child tasks. `None` for non-hierarchical contexts.
     pub(crate) child_spawner: Option<ChildSpawner>,
+    /// IO bytes accumulator — read by the scheduler after execution.
+    pub(crate) io: Arc<IoTracker>,
 }
 
 impl TaskContext {
     /// Deserialize the payload as a [`TypedTask`].
     ///
+    /// Returns an error if the payload is missing or deserialization fails.
+    /// This is the primary way to extract a typed task inside an executor.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// async fn execute(&self, ctx: &TaskContext) -> Result<(), TaskError> {
+    ///     let task: MyTask = ctx.payload()?;
+    ///     // ... do work ...
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn payload<T: TypedTask>(&self) -> Result<T, TaskError> {
+        self.record
+            .deserialize_payload()
+            .map_err(TaskError::from)?
+            .ok_or_else(|| TaskError::new("missing payload"))
+    }
+
+    /// Deserialize the payload as a [`TypedTask`].
+    ///
     /// Convenience wrapper around [`TaskRecord::deserialize_payload`] that
     /// mirrors the typed submission API.
+    #[deprecated(since = "2.0.0", note = "use `ctx.payload::<T>()` instead")]
     pub fn deserialize_typed<T: TypedTask>(&self) -> Result<Option<T>, serde_json::Error> {
         self.record.deserialize_payload()
     }
@@ -176,6 +233,22 @@ impl TaskContext {
     /// ```
     pub fn state<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.app_state.get::<T>()
+    }
+
+    /// Record actual bytes read during this task's execution.
+    ///
+    /// Can be called multiple times — values are accumulated. The scheduler
+    /// reads the total after the executor returns.
+    pub fn record_read_bytes(&self, bytes: i64) {
+        self.io.read_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record actual bytes written during this task's execution.
+    ///
+    /// Can be called multiple times — values are accumulated. The scheduler
+    /// reads the total after the executor returns.
+    pub fn record_write_bytes(&self, bytes: i64) {
+        self.io.write_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     /// Spawn a child task that will be tracked under this task as parent.
@@ -217,7 +290,7 @@ impl TaskContext {
 /// # Example
 ///
 /// ```ignore
-/// use taskmill::{TaskExecutor, TaskContext, TaskResult, TaskError};
+/// use taskmill::{TaskExecutor, TaskContext, TaskError};
 ///
 /// struct MyExecutor;
 ///
@@ -225,9 +298,9 @@ impl TaskContext {
 ///     async fn execute<'a>(
 ///         &'a self,
 ///         ctx: &'a TaskContext,
-///     ) -> Result<TaskResult, TaskError> {
+///     ) -> Result<(), TaskError> {
 ///         ctx.progress.report(0.5, Some("halfway".into()));
-///         Ok(TaskResult { actual_read_bytes: 0, actual_write_bytes: 0 })
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -237,26 +310,26 @@ pub trait TaskExecutor: Send + Sync + 'static {
     /// - `ctx`: Execution context with the task record, cancellation token,
     ///   and progress reporter.
     ///
-    /// On success, return actual IO bytes consumed. On failure, return a
-    /// `TaskError` indicating whether retry is appropriate.
+    /// On success, return `Ok(())`. Use [`TaskContext::record_read_bytes`]
+    /// and [`TaskContext::record_write_bytes`] to report IO during execution.
+    /// On failure, return a [`TaskError`] indicating whether retry is appropriate.
     fn execute<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> impl Future<Output = Result<TaskResult, TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
 
     /// Called after all children of a parent task have completed.
     ///
     /// Only invoked for tasks that spawned children via
-    /// [`TaskContext::spawn_child`]. The default implementation is a no-op
-    /// that returns zero IO bytes.
+    /// [`TaskContext::spawn_child`]. The default implementation is a no-op.
     ///
     /// Use this for cleanup or assembly work (e.g. calling
     /// `CompleteMultipartUpload` after all parts have been uploaded).
     fn finalize<'a>(
         &'a self,
         _ctx: &'a TaskContext,
-    ) -> impl Future<Output = Result<TaskResult, TaskError>> + Send + 'a {
-        async { Ok(TaskResult::zero()) }
+    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
+        async { Ok(()) }
     }
 }
 
@@ -277,26 +350,26 @@ pub(crate) trait ErasedExecutor: Send + Sync + 'static {
     fn execute_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>>;
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>;
 
     fn finalize_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>>;
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>;
 }
 
 impl<T: TaskExecutor> ErasedExecutor for T {
     fn execute_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>> {
         Box::pin(self.execute(ctx))
     }
 
     fn finalize_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskError>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>> {
         Box::pin(self.finalize(ctx))
     }
 }
@@ -364,11 +437,8 @@ mod tests {
     struct NoopExecutor;
 
     impl TaskExecutor for NoopExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<TaskResult, TaskError> {
-            Ok(TaskResult {
-                actual_read_bytes: 0,
-                actual_write_bytes: 0,
-            })
+        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            Ok(())
         }
     }
 

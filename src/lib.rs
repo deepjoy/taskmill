@@ -20,7 +20,7 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use taskmill::{
-//!     Scheduler, TaskExecutor, TaskContext, TaskResult, TaskError,
+//!     Scheduler, TaskExecutor, TaskContext, TaskError,
 //!     TypedTask, Priority,
 //! };
 //! use serde::{Serialize, Deserialize};
@@ -42,11 +42,13 @@
 //! impl TaskExecutor for ThumbnailExecutor {
 //!     async fn execute<'a>(
 //!         &'a self, ctx: &'a TaskContext,
-//!     ) -> Result<TaskResult, TaskError> {
-//!         let thumb: Thumbnail = ctx.deserialize_typed().unwrap().unwrap();
+//!     ) -> Result<(), TaskError> {
+//!         let thumb: Thumbnail = ctx.payload()?;
 //!         ctx.progress.report(0.5, Some("resizing".into()));
 //!         // ... do work, check ctx.token.is_cancelled() ...
-//!         Ok(TaskResult { actual_read_bytes: 4_096, actual_write_bytes: 1_024 })
+//!         ctx.record_read_bytes(4_096);
+//!         ctx.record_write_bytes(1_024);
+//!         Ok(())
 //!     }
 //! }
 //!
@@ -98,7 +100,7 @@ pub use scheduler::{
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, HistoryStatus, ParentResolution, SubmitOutcome, TaskError,
-    TaskHistoryRecord, TaskLookup, TaskRecord, TaskResult, TaskStatus, TaskSubmission, TypeStats,
+    TaskHistoryRecord, TaskLookup, TaskMetrics, TaskRecord, TaskStatus, TaskSubmission, TypeStats,
     TypedTask,
 };
 
