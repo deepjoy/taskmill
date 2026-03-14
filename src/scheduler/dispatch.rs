@@ -1,9 +1,8 @@
 //! Task spawning, active-task tracking, preemption, and parent-child resolution.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
@@ -24,6 +23,8 @@ pub(crate) struct ActiveTask {
     pub reported_progress: Option<f32>,
     /// When the last progress report was received.
     pub reported_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Handle to the spawned tokio task, set after spawn.
+    pub handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 // ── Active Task Map ────────────────────────────────────────────────
@@ -33,6 +34,11 @@ pub(crate) struct ActiveTask {
 /// Wraps the active-task bookkeeping that was previously inlined in
 /// `Scheduler`, making preemption and progress queries independently
 /// testable.
+///
+/// Uses `std::sync::Mutex` rather than `tokio::Mutex` because most
+/// operations do trivial `HashMap` work under the lock with no `.await`.
+/// Methods that need async I/O (`preempt_below`, `pause_all`) collect
+/// data under the lock and release it before awaiting.
 #[derive(Clone)]
 pub(crate) struct ActiveTaskMap {
     inner: Arc<Mutex<HashMap<i64, ActiveTask>>>,
@@ -51,30 +57,30 @@ impl ActiveTaskMap {
         }
     }
 
-    pub async fn count(&self) -> usize {
-        self.inner.lock().await.len()
+    pub fn count(&self) -> usize {
+        self.inner.lock().unwrap().len()
     }
 
-    pub async fn insert(&self, id: i64, task: ActiveTask) {
-        self.inner.lock().await.insert(id, task);
+    pub fn insert(&self, id: i64, task: ActiveTask) {
+        self.inner.lock().unwrap().insert(id, task);
     }
 
-    pub async fn remove(&self, id: i64) -> Option<ActiveTask> {
-        self.inner.lock().await.remove(&id)
+    pub fn remove(&self, id: i64) -> Option<ActiveTask> {
+        self.inner.lock().unwrap().remove(&id)
     }
 
     /// Snapshot of all active task records.
-    pub async fn records(&self) -> Vec<TaskRecord> {
+    pub fn records(&self) -> Vec<TaskRecord> {
         self.inner
             .lock()
-            .await
+            .unwrap()
             .values()
             .map(|at| at.record.clone())
             .collect()
     }
 
     /// Snapshot of progress data for all active tasks.
-    pub async fn progress_snapshots(
+    pub fn progress_snapshots(
         &self,
     ) -> Vec<(
         TaskRecord,
@@ -83,15 +89,15 @@ impl ActiveTaskMap {
     )> {
         self.inner
             .lock()
-            .await
+            .unwrap()
             .values()
             .map(|at| (at.record.clone(), at.reported_progress, at.reported_at))
             .collect()
     }
 
     /// Update reported progress for a specific task.
-    pub async fn update_progress(&self, task_id: i64, percent: f32) {
-        let mut map = self.inner.lock().await;
+    pub fn update_progress(&self, task_id: i64, percent: f32) {
+        let mut map = self.inner.lock().unwrap();
         if let Some(at) = map.get_mut(&task_id) {
             at.reported_progress = Some(percent);
             at.reported_at = Some(chrono::Utc::now());
@@ -102,73 +108,107 @@ impl ActiveTaskMap {
     ///
     /// Cancels their tokens, pauses them in the store, and emits
     /// `SchedulerEvent::Preempted`. Returns the IDs of preempted tasks.
+    ///
+    /// Collects tasks to preempt under the sync lock, then releases the
+    /// lock before performing async store writes.
     pub async fn preempt_below(
         &self,
         incoming_priority: Priority,
         store: &TaskStore,
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> Vec<i64> {
-        let mut active = self.inner.lock().await;
-        let to_preempt: Vec<i64> = active
-            .iter()
-            .filter(|(_, at)| at.record.priority.value() > incoming_priority.value())
-            .map(|(id, _)| *id)
-            .collect();
+        // Phase 1: collect + remove under sync lock.
+        let to_preempt: Vec<(i64, ActiveTask)> = {
+            let mut active = self.inner.lock().unwrap();
+            let ids: Vec<i64> = active
+                .iter()
+                .filter(|(_, at)| at.record.priority.value() > incoming_priority.value())
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| active.remove(&id).map(|at| (id, at)))
+                .collect()
+        };
 
+        // Phase 2: async work without the lock held.
         let mut preempted = Vec::new();
-        for id in to_preempt {
-            if let Some(at) = active.remove(&id) {
-                tracing::info!(
-                    task_id = id,
-                    task_type = at.record.task_type,
-                    "preempting task for higher-priority work"
-                );
-                at.token.cancel();
-                let _ = store.pause(id).await;
-                let _ = event_tx.send(SchedulerEvent::Preempted {
-                    task_id: id,
-                    task_type: at.record.task_type.clone(),
-                    key: at.record.key.clone(),
-                    label: at.record.label.clone(),
-                });
-                preempted.push(id);
-            }
+        for (id, at) in to_preempt {
+            tracing::info!(
+                task_id = id,
+                task_type = at.record.task_type,
+                "preempting task for higher-priority work"
+            );
+            at.token.cancel();
+            let _ = store.pause(id).await;
+            let _ = event_tx.send(SchedulerEvent::Preempted {
+                task_id: id,
+                task_type: at.record.task_type.clone(),
+                key: at.record.key.clone(),
+                label: at.record.label.clone(),
+            });
+            preempted.push(id);
         }
 
         preempted
     }
 
     /// Check whether any active task would preempt work at the given priority.
-    pub async fn has_preemptors_for(
-        &self,
-        priority: Priority,
-        preempt_threshold: Priority,
-    ) -> bool {
-        let active = self.inner.lock().await;
+    pub fn has_preemptors_for(&self, priority: Priority, preempt_threshold: Priority) -> bool {
+        let active = self.inner.lock().unwrap();
         active.values().any(|at| {
             at.record.priority.value() <= preempt_threshold.value()
                 && at.record.priority.value() < priority.value()
         })
     }
 
-    /// Cancel all active tasks (for shutdown).
-    pub async fn cancel_all(&self) {
-        let mut active = self.inner.lock().await;
+    /// Store the `JoinHandle` for a task that was just spawned.
+    pub fn set_handle(&self, id: i64, handle: tokio::task::JoinHandle<()>) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(at) = map.get_mut(&id) {
+            at.handle = Some(handle);
+        }
+    }
+
+    /// Cancel all active tasks and abort their handles (hard shutdown).
+    pub fn cancel_all(&self) {
+        let mut active = self.inner.lock().unwrap();
         for (_, at) in active.drain() {
             at.token.cancel();
+            if let Some(h) = at.handle {
+                h.abort();
+            }
         }
+    }
+
+    /// Cancel all tokens, drain the map, and return the join handles
+    /// for graceful shutdown (caller can join with a timeout).
+    pub fn cancel_and_drain_handles(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut active = self.inner.lock().unwrap();
+        let mut handles = Vec::with_capacity(active.len());
+        for (_, at) in active.drain() {
+            at.token.cancel();
+            if let Some(h) = at.handle {
+                handles.push(h);
+            }
+        }
+        handles
     }
 
     /// Pause all active tasks: cancel their tokens and move them to paused
     /// state in the store. Returns the number of tasks paused.
+    ///
+    /// Drains the map under the sync lock, then releases the lock before
+    /// performing async store writes.
     pub async fn pause_all(
         &self,
         store: &TaskStore,
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> usize {
-        let mut active = self.inner.lock().await;
-        let count = active.len();
-        for (id, at) in active.drain() {
+        // Drain under sync lock.
+        let drained: Vec<(i64, ActiveTask)> = { self.inner.lock().unwrap().drain().collect() };
+        let count = drained.len();
+        // Async work without the lock held.
+        for (id, at) in drained {
             at.token.cancel();
             let _ = store.pause(id).await;
             let _ = event_tx.send(SchedulerEvent::Preempted {
@@ -199,7 +239,7 @@ pub(crate) struct SpawnContext {
     pub max_retries: i32,
     pub app_state: crate::registry::StateSnapshot,
     pub work_notify: Arc<tokio::sync::Notify>,
-    pub scheduler: super::Scheduler,
+    pub scheduler: super::WeakScheduler,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -224,17 +264,16 @@ pub(crate) async fn spawn_task(
     let child_token = CancellationToken::new();
 
     // Insert into active map before spawning to avoid races.
-    active
-        .insert(
-            task.id,
-            ActiveTask {
-                record: task.clone(),
-                token: child_token.clone(),
-                reported_progress: None,
-                reported_at: None,
-            },
-        )
-        .await;
+    active.insert(
+        task.id,
+        ActiveTask {
+            record: task.clone(),
+            token: child_token.clone(),
+            reported_progress: None,
+            reported_at: None,
+            handle: None,
+        },
+    );
 
     // Build execution context.
     let child_spawner = ChildSpawner::new(store.clone(), task.id, work_notify.clone());
@@ -248,8 +287,9 @@ pub(crate) async fn spawn_task(
             task.key.clone(),
             task.label.clone(),
             event_tx.clone(),
+            active.clone(),
         ),
-        scheduler: scheduler.downgrade(),
+        scheduler,
         app_state,
         child_spawner: Some(child_spawner),
         io: io.clone(),
@@ -263,29 +303,11 @@ pub(crate) async fn spawn_task(
         label: task.label.clone(),
     });
 
-    // Spawn progress listener — bridges broadcast events into the active map.
-    let active_for_progress = active.clone();
-    let mut progress_rx = event_tx.subscribe();
-    let progress_task_id = task.id;
-    tokio::spawn(async move {
-        while let Ok(evt) = progress_rx.recv().await {
-            if let SchedulerEvent::Progress {
-                task_id, percent, ..
-            } = evt
-            {
-                if task_id == progress_task_id {
-                    active_for_progress.update_progress(task_id, percent).await;
-                    if percent >= 1.0 {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
     // Spawn executor.
+    let task_id_for_handle = task.id;
+    let active_for_handle = active.clone();
     let token_for_spawn = child_token.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let task_id = task.id;
         let result = match phase {
             ExecutionPhase::Execute => executor.execute_erased(&ctx).await,
@@ -308,7 +330,7 @@ pub(crate) async fn spawn_task(
                             if let Err(e) = store.set_waiting(task_id).await {
                                 tracing::error!(task_id, error = %e, "failed to set task to waiting");
                             }
-                            active.remove(task_id).await;
+                            active.remove(task_id);
                             let _ = event_tx.send(SchedulerEvent::Waiting {
                                 task_id,
                                 children_count: count,
@@ -342,13 +364,14 @@ pub(crate) async fn spawn_task(
                     tracing::error!(task_id, error = %e, "failed to record task completion");
                 }
                 // Remove from active tracking AFTER the store write completes.
-                active.remove(task_id).await;
+                active.remove(task_id);
                 let _ = event_tx.send(SchedulerEvent::Completed {
                     task_id,
                     task_type: task.task_type.clone(),
                     key: task.key.clone(),
                     label: task.label.clone(),
                 });
+                work_notify.notify_one();
 
                 // If this was a child task, check if parent is ready.
                 if let Some(parent_id) = task.parent_id {
@@ -366,7 +389,7 @@ pub(crate) async fn spawn_task(
             Err(te) => {
                 // If cancelled (preempted), the scheduler already paused it.
                 if token_for_spawn.is_cancelled() {
-                    active.remove(task_id).await;
+                    active.remove(task_id);
                     return;
                 }
                 let will_retry = te.retryable && task.retry_count < max_retries;
@@ -385,7 +408,7 @@ pub(crate) async fn spawn_task(
                     tracing::error!(task_id, error = %e, "failed to record task failure");
                 }
                 // Remove from active tracking AFTER the store write completes.
-                active.remove(task_id).await;
+                active.remove(task_id);
                 let _ = event_tx.send(SchedulerEvent::Failed {
                     task_id,
                     task_type: task.task_type.clone(),
@@ -394,6 +417,7 @@ pub(crate) async fn spawn_task(
                     error: te.message.clone(),
                     will_retry,
                 });
+                work_notify.notify_one();
 
                 // If this child failed permanently and parent is fail_fast,
                 // cancel siblings and fail the parent.
@@ -405,7 +429,7 @@ pub(crate) async fn spawn_task(
                                 // Cancel remaining siblings.
                                 if let Ok(running_ids) = store.cancel_children(parent_id).await {
                                     for rid in &running_ids {
-                                        if let Some(at) = active.remove(*rid).await {
+                                        if let Some(at) = active.remove(*rid) {
                                             at.token.cancel();
                                             let _ = store.delete(*rid).await;
                                             let _ = event_tx.send(SchedulerEvent::Cancelled {
@@ -455,6 +479,9 @@ pub(crate) async fn spawn_task(
             }
         }
     });
+
+    // Store the handle so shutdown can join it.
+    active_for_handle.set_handle(task_id_for_handle, handle);
 }
 
 /// Check if a waiting parent is ready for finalization or has failed,
@@ -470,7 +497,7 @@ async fn handle_parent_resolution(
     match store.try_resolve_parent(parent_id).await {
         Ok(Some(ParentResolution::ReadyToFinalize)) => {
             // Enqueue parent for finalize dispatch.
-            active.pending_finalizers.lock().await.insert(parent_id);
+            active.pending_finalizers.lock().unwrap().insert(parent_id);
             // Wake the scheduler to dispatch the finalize phase.
             work_notify.notify_one();
         }
