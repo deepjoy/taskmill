@@ -1,3 +1,5 @@
+//! Task spawning, active-task tracking, preemption, and parent-child resolution.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -178,10 +180,6 @@ impl ActiveTaskMap {
 
 // ── Spawn ──────────────────────────────────────────────────────────
 
-/// Spawn a task executor and wire up completion/failure handling.
-///
-/// Inserts the task into the active map, starts a progress listener,
-/// and spawns the executor.
 /// Whether to call `execute` or `finalize` on the executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecutionPhase {
@@ -199,6 +197,10 @@ pub(crate) struct SpawnContext {
     pub work_notify: Arc<tokio::sync::Notify>,
 }
 
+/// Spawn a task executor and wire up completion/failure handling.
+///
+/// Inserts the task into the active map, starts a progress listener,
+/// and spawns the executor on a new tokio task.
 pub(crate) async fn spawn_task(
     task: TaskRecord,
     executor: Arc<dyn crate::registry::ErasedExecutor>,

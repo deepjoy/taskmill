@@ -1,3 +1,10 @@
+//! Task types, submission parameters, and the [`TypedTask`] trait.
+//!
+//! This module defines the data structures that flow through the scheduler:
+//! [`TaskSubmission`] for enqueuing work, [`TaskRecord`] for in-flight tasks,
+//! [`TaskHistoryRecord`] for completed/failed results, and [`TypedTask`] for
+//! strongly-typed task payloads with built-in serialization.
+
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -218,7 +225,7 @@ pub struct TaskSubmission {
     pub expected_read_bytes: i64,
     pub expected_write_bytes: i64,
     /// Parent task ID for hierarchical tasks. Set automatically by
-    /// [`TaskContext::spawn_child`].
+    /// [`TaskContext::spawn_child`](crate::TaskContext::spawn_child).
     pub parent_id: Option<i64>,
     /// When `true` (default), the first child failure cancels siblings and
     /// fails the parent immediately. When `false`, the parent waits for all
@@ -269,8 +276,9 @@ impl TaskSubmission {
 /// IO estimates.
 ///
 /// Implementing this trait collapses the 6 fields of [`TaskSubmission`] into a
-/// derive-friendly pattern. Use [`Scheduler::submit_typed`] to submit and
-/// [`TaskContext::deserialize_typed`] on the executor side.
+/// derive-friendly pattern. Use [`Scheduler::submit_typed`](crate::Scheduler::submit_typed)
+/// to submit and [`TaskContext::deserialize_typed`](crate::TaskContext::deserialize_typed)
+/// on the executor side.
 ///
 /// # Example
 ///
@@ -327,7 +335,8 @@ impl TaskSubmission {
 
 /// Unified lookup result for querying a task by its dedup inputs.
 ///
-/// Returned by [`TaskStore::task_lookup`] and [`Scheduler::task_lookup`].
+/// Returned by [`TaskStore::task_lookup`](crate::TaskStore::task_lookup) and
+/// [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
 /// Tells the caller whether a task is currently active (pending, running,
 /// or paused) or has finished (completed or failed), without requiring
 /// them to manually compute the dedup key or query two tables.
@@ -355,7 +364,7 @@ pub struct TypeStats {
 
 /// Resolution of a parent task after a child completes or fails.
 ///
-/// Returned by [`TaskStore::try_resolve_parent`] to tell the scheduler
+/// Returned by [`TaskStore::try_resolve_parent`](crate::TaskStore::try_resolve_parent) to tell the scheduler
 /// what action to take on the parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParentResolution {

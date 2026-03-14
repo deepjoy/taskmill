@@ -1,3 +1,9 @@
+//! Background sampling loop and EWMA smoothing for resource metrics.
+//!
+//! [`SamplerConfig`] controls the polling interval and smoothing factor.
+//! The sampler loop periodically calls [`ResourceSampler::sample`](super::ResourceSampler),
+//! applies EWMA smoothing, and publishes the result for the scheduler to read.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,7 +44,7 @@ fn ewma(old: f64, raw: f64, alpha: f64) -> f64 {
 /// The sampler loop writes to this; the scheduler reads from it.
 /// Uses `RwLock` so readers never block each other.
 #[derive(Clone)]
-pub struct SmoothedReader {
+pub(crate) struct SmoothedReader {
     inner: Arc<RwLock<ResourceSnapshot>>,
 }
 
@@ -77,7 +83,7 @@ impl ResourceReader for SmoothedReader {
 /// Periodically calls `sampler.sample()`, applies EWMA smoothing, and
 /// stores the result in the `reader`. The scheduler reads
 /// `reader.latest()` when making IO budget decisions.
-pub async fn run_sampler(
+pub(crate) async fn run_sampler(
     sampler: Arc<tokio::sync::Mutex<Box<dyn ResourceSampler>>>,
     reader: SmoothedReader,
     config: SamplerConfig,

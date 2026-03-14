@@ -1,3 +1,11 @@
+//! System resource monitoring for IO-aware scheduling.
+//!
+//! Implement [`ResourceSampler`] to feed CPU and disk IO metrics into the
+//! scheduler. The built-in [`sysinfo_monitor`] module provides a cross-platform
+//! sampler using the `sysinfo` crate (enabled by the `sysinfo-monitor` feature).
+//! The scheduler reads the latest smoothed snapshot via [`ResourceReader`] when
+//! making IO-budget dispatch decisions.
+
 pub mod sampler;
 
 #[cfg(feature = "sysinfo-monitor")]
@@ -32,7 +40,27 @@ impl Default for ResourceSnapshot {
 /// The sampler loop handles EWMA smoothing separately.
 ///
 /// To override the built-in monitor (e.g. for container cgroup-aware monitoring),
-/// implement this trait and pass it to the scheduler.
+/// implement this trait and pass it via
+/// [`SchedulerBuilder::resource_sampler`](crate::SchedulerBuilder::resource_sampler).
+///
+/// # Example
+///
+/// ```ignore
+/// use taskmill::{ResourceSampler, ResourceSnapshot};
+///
+/// struct CgroupSampler { /* ... */ }
+///
+/// impl ResourceSampler for CgroupSampler {
+///     fn sample(&mut self) -> ResourceSnapshot {
+///         // Read from /sys/fs/cgroup/...
+///         ResourceSnapshot {
+///             cpu_usage: 0.42,
+///             io_read_bytes_per_sec: 50_000_000.0,
+///             io_write_bytes_per_sec: 20_000_000.0,
+///         }
+///     }
+/// }
+/// ```
 pub trait ResourceSampler: Send + Sync + 'static {
     /// Take a raw sample. Called periodically by the sampler loop.
     /// Returns a snapshot with absolute values (not smoothed — the sampler

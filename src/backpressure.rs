@@ -1,9 +1,36 @@
+//! Composable backpressure for throttling task dispatch.
+//!
+//! Implement [`PressureSource`] to feed external signals (API load, memory
+//! pressure, queue depth, etc.) into the scheduler. Multiple sources are
+//! combined via [`CompositePressure`], and [`ThrottlePolicy`] maps the
+//! aggregate pressure to per-priority throttle decisions.
+
 use crate::priority::Priority;
 
 /// A source of pressure that signals the scheduler to slow down.
 ///
 /// Consumers implement this trait to feed external signals (API load, memory
 /// pressure, queue depth, etc.) into the scheduler's throttle decisions.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use taskmill::PressureSource;
+///
+/// struct ApiLoadPressure {
+///     active_requests: AtomicU32,
+///     max_requests: u32,
+/// }
+///
+/// impl PressureSource for ApiLoadPressure {
+///     fn pressure(&self) -> f32 {
+///         let current = self.active_requests.load(Ordering::Relaxed);
+///         (current as f32 / self.max_requests as f32).min(1.0)
+///     }
+///     fn name(&self) -> &str { "api-load" }
+/// }
+/// ```
 pub trait PressureSource: Send + Sync + 'static {
     /// Current pressure level between 0.0 (idle) and 1.0 (saturated).
     fn pressure(&self) -> f32;
@@ -68,6 +95,7 @@ pub struct CompositePressure {
 }
 
 impl CompositePressure {
+    /// Create an empty composite with no pressure sources.
     pub fn new() -> Self {
         Self {
             sources: Vec::new(),

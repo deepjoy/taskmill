@@ -1,3 +1,11 @@
+//! Executor registration, shared state, and the [`TaskContext`] passed to each task.
+//!
+//! Register one [`TaskExecutor`] per task type with the scheduler. At dispatch
+//! time the scheduler looks up the executor by name and calls
+//! [`execute`](TaskExecutor::execute) with a [`TaskContext`] containing the
+//! persisted record, a cancellation token, a progress reporter, and any
+//! shared application state.
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::future::Future;
@@ -22,7 +30,7 @@ use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskResult, TaskSubmissi
 /// so that library consumers (e.g. shoebox inside a Tauri app) can inject
 /// state after the scheduler has been constructed by the parent.
 #[derive(Default)]
-pub struct StateMap {
+pub(crate) struct StateMap {
     inner: RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
@@ -79,7 +87,7 @@ impl StateMap {
 /// Holds a `Notify` reference to wake the scheduler run loop after
 /// spawning, so children are dispatched promptly.
 #[derive(Clone)]
-pub struct ChildSpawner {
+pub(crate) struct ChildSpawner {
     store: TaskStore,
     parent_id: i64,
     work_notify: Arc<tokio::sync::Notify>,
@@ -135,7 +143,7 @@ pub struct TaskContext {
     pub token: CancellationToken,
     /// Report progress back to the scheduler (0.0–1.0).
     pub progress: ProgressReporter,
-    /// Shared application state set via [`SchedulerBuilder::app_state`].
+    /// Shared application state set via [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
     pub(crate) app_state: StateSnapshot,
     /// Spawner for creating child tasks. `None` for non-hierarchical contexts.
     pub(crate) child_spawner: Option<ChildSpawner>,
@@ -151,7 +159,8 @@ impl TaskContext {
     }
 
     /// Retrieve shared application state registered via
-    /// [`SchedulerBuilder::app_state`] or [`Scheduler::register_state`].
+    /// [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state) or
+    /// [`Scheduler::register_state`](crate::Scheduler::register_state).
     ///
     /// Returns `None` if the type was never registered. Multiple types can
     /// coexist — each is keyed by its concrete `TypeId`.
@@ -293,6 +302,7 @@ impl<T: TaskExecutor> ErasedExecutor for T {
 }
 
 impl TaskTypeRegistry {
+    /// Create an empty registry.
     pub fn new() -> Self {
         Self {
             types: HashMap::new(),
@@ -326,6 +336,7 @@ impl TaskTypeRegistry {
         self.types.len()
     }
 
+    /// Returns `true` if no executors have been registered.
     pub fn is_empty(&self) -> bool {
         self.types.is_empty()
     }

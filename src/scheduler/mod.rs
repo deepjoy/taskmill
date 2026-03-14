@@ -1,3 +1,10 @@
+//! The scheduler: configuration, event stream, and the main run loop.
+//!
+//! [`Scheduler`] coordinates task execution — popping from the store,
+//! applying backpressure and IO-budget checks, preempting lower-priority
+//! work, and emitting [`SchedulerEvent`]s for UI integration. Use
+//! [`SchedulerBuilder`] for ergonomic construction.
+
 pub(crate) mod dispatch;
 pub(crate) mod gate;
 pub mod progress;
@@ -827,6 +834,7 @@ pub struct SchedulerBuilder {
 }
 
 impl SchedulerBuilder {
+    /// Create a new builder with default configuration.
     pub fn new() -> Self {
         Self {
             store_path: None,
@@ -843,7 +851,7 @@ impl SchedulerBuilder {
         }
     }
 
-    /// Set the SQLite database path. Either this or [`store`] must be called.
+    /// Set the SQLite database path. Either this or [`store`](Self::store) must be called.
     pub fn store_path(mut self, path: &str) -> Self {
         self.store_path = Some(path.to_string());
         self
@@ -946,7 +954,7 @@ impl SchedulerBuilder {
     }
 
     /// Register shared application state accessible from every executor via
-    /// [`TaskContext::state`].
+    /// [`TaskContext::state`](crate::TaskContext::state).
     ///
     /// Multiple types can be registered — each is keyed by its concrete
     /// `TypeId`. Calling this twice with the same `T` overwrites the
@@ -977,7 +985,7 @@ impl SchedulerBuilder {
     /// have an `Arc<T>` and need to retain a handle for use outside the
     /// scheduler (e.g. to populate `OnceLock` fields after build). Avoids
     /// double-wrapping (`Arc<Arc<T>>`), which would cause
-    /// [`TaskContext::state`] downcasts to fail.
+    /// [`TaskContext::state`](crate::TaskContext::state) downcasts to fail.
     ///
     /// Multiple types can be registered — each is keyed by its concrete
     /// `TypeId`.

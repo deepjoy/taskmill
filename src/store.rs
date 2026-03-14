@@ -1,3 +1,9 @@
+//! SQLite-backed persistence layer for the task queue and history.
+//!
+//! [`TaskStore`] manages the active task queue and completed/failed history
+//! in a single SQLite database. It handles deduplication, priority upgrades,
+//! retries, parent-child hierarchy, and automatic history pruning.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -845,7 +851,7 @@ impl TaskStore {
     /// Look up a task by its dedup key, checking the active queue first
     /// and falling back to history.
     ///
-    /// This is the low-level building block for [`Scheduler::task_lookup`].
+    /// This is the low-level building block for [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
     /// The `key` parameter is the pre-computed SHA-256 dedup key (as
     /// returned by [`generate_dedup_key`](crate::task::generate_dedup_key)
     /// or [`TaskSubmission::effective_key`]).
