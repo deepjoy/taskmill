@@ -425,6 +425,11 @@ pub struct TaskSubmission {
     /// [`MAX_TAG_VALUE_LEN`], and [`MAX_TAGS_PER_TASK`] at submit time.
     #[serde(default)]
     pub tags: HashMap<String, String>,
+    /// Per-task retry limit, resolved at submit time from the per-type retry
+    /// policy or the global `SchedulerConfig::max_retries`. `None` means the
+    /// global default will be used at retry time (backward compatibility).
+    #[serde(default)]
+    pub max_retries: Option<i32>,
 }
 
 impl TaskSubmission {
@@ -464,6 +469,7 @@ impl TaskSubmission {
             dependencies: Vec::new(),
             on_dependency_failure: DependencyFailurePolicy::default(),
             tags: HashMap::new(),
+            max_retries: None,
         }
     }
 
@@ -630,6 +636,13 @@ impl TaskSubmission {
     /// Set all metadata tags at once, replacing any previously set tags.
     pub fn tags(mut self, tags: HashMap<String, String>) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Set the per-task retry limit. When set, this value is persisted and
+    /// used instead of the global `SchedulerConfig::max_retries`.
+    pub fn max_retries(mut self, max_retries: i32) -> Self {
+        self.max_retries = Some(max_retries);
         self
     }
 

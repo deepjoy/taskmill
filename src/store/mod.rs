@@ -249,6 +249,11 @@ impl TaskStore {
         .await?;
         Self::run_alter_migration(&self.pool, include_str!("../../migrations/007_tags.sql"))
             .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../../migrations/008_retry_backoff.sql"),
+        )
+        .await?;
         Ok(())
     }
 

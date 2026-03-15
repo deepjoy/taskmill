@@ -29,8 +29,8 @@ pub(crate) async fn insert_history(
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
             retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key,
-            ttl_seconds, ttl_from, expires_at, run_after)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ttl_seconds, ttl_from, expires_at, run_after, max_retries)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.task_type)
     .bind(&task.key)
@@ -67,6 +67,7 @@ pub(crate) async fn insert_history(
         task.run_after
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
     )
+    .bind(task.max_retries)
     .execute(&mut **conn)
     .await?;
 
@@ -353,8 +354,8 @@ impl TaskStore {
                                 ttl_seconds, ttl_from, expires_at,
                                 run_after, recurring_interval_secs,
                                 recurring_max_executions, recurring_execution_count,
-                                recurring_paused)
-                             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                                recurring_paused, max_retries)
+                             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
                         )
                         .bind(&task.task_type)
                         .bind(&task.key)
@@ -375,6 +376,7 @@ impl TaskStore {
                         .bind(task.recurring_interval_secs)
                         .bind(task.recurring_max_executions)
                         .bind(execution_count)
+                        .bind(task.max_retries)
                         .execute(&mut **conn)
                         .await?;
 
@@ -1289,5 +1291,87 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.tags.get("color").unwrap(), "blue");
+    }
+
+    // ── max_retries persistence (Phase 3) ────────────────────────────
+
+    #[tokio::test]
+    async fn max_retries_round_trips_through_insert_and_select() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("mr-roundtrip")
+            .max_retries(5);
+
+        let id = store.submit(&sub).await.unwrap().id().unwrap();
+        let task = store.task_by_id(id).await.unwrap().unwrap();
+        assert_eq!(task.max_retries, Some(5));
+    }
+
+    #[tokio::test]
+    async fn max_retries_none_when_not_set() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test").key("mr-none");
+
+        let id = store.submit(&sub).await.unwrap().id().unwrap();
+        let task = store.task_by_id(id).await.unwrap().unwrap();
+        assert_eq!(task.max_retries, None);
+    }
+
+    #[tokio::test]
+    async fn max_retries_preserved_in_history_on_complete() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("mr-hist-complete")
+            .max_retries(7);
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.max_retries, Some(7));
+
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+
+        let key = sub.effective_key();
+        let history = store.history_by_key(&key).await.unwrap();
+        assert!(!history.is_empty());
+        assert_eq!(history[0].max_retries, Some(7));
+    }
+
+    #[tokio::test]
+    async fn max_retries_preserved_in_history_on_fail() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("mr-hist-fail")
+            .max_retries(3);
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        // Permanent failure (non-retryable).
+        store
+            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .await
+            .unwrap();
+
+        let key = sub.effective_key();
+        let history = store.history_by_key(&key).await.unwrap();
+        assert!(!history.is_empty());
+        assert_eq!(history[0].max_retries, Some(3));
+        assert_eq!(history[0].status, HistoryStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn max_retries_null_reads_back_as_none() {
+        let store = test_store().await;
+        // Submit without max_retries (NULL in DB).
+        let sub = TaskSubmission::new("test").key("mr-null");
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.max_retries, None);
+
+        // Complete it and verify history also has None.
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+        let key = sub.effective_key();
+        let history = store.history_by_key(&key).await.unwrap();
+        assert_eq!(history[0].max_retries, None);
     }
 }

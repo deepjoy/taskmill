@@ -226,6 +226,10 @@ pub struct TaskRecord {
     pub on_dependency_failure: DependencyFailurePolicy,
     /// Key-value metadata tags for filtering, grouping, and display.
     pub tags: HashMap<String, String>,
+    /// Per-task retry limit. `None` means use global default (backward compat
+    /// with pre-migration tasks). Resolved at submit time from: per-type
+    /// retry policy → global `SchedulerConfig::max_retries`.
+    pub max_retries: Option<i32>,
 }
 
 impl TaskRecord {
@@ -290,6 +294,8 @@ pub struct TaskHistoryRecord {
     pub run_after: Option<DateTime<Utc>>,
     /// Key-value metadata tags for filtering, grouping, and display.
     pub tags: HashMap<String, String>,
+    /// Per-task retry limit. `None` means use global default.
+    pub max_retries: Option<i32>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.

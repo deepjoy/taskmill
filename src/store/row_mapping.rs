@@ -71,6 +71,7 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
             .unwrap_or(DependencyFailurePolicy::Cancel),
         // Tags are populated separately from the task_tags table.
         tags: std::collections::HashMap::new(),
+        max_retries: row.get("max_retries"),
     }
 }
 
@@ -129,5 +130,6 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         run_after: run_after_str.map(|s| parse_datetime(&s)),
         // Tags are populated separately from the task_history_tags table.
         tags: std::collections::HashMap::new(),
+        max_retries: row.get("max_retries"),
     }
 }
