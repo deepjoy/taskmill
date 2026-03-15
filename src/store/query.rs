@@ -363,6 +363,46 @@ impl TaskStore {
             .collect())
     }
 
+    // ── Dependencies ───────────────────────────────────────────────
+
+    /// Return the dependency edges for a given task (what it depends on).
+    pub async fn task_dependencies(&self, task_id: i64) -> Result<Vec<i64>, StoreError> {
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT depends_on_id FROM task_deps WHERE task_id = ?")
+                .bind(task_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Return tasks that are blocked waiting on a given task.
+    pub async fn task_dependents(&self, task_id: i64) -> Result<Vec<i64>, StoreError> {
+        let rows: Vec<(i64,)> =
+            sqlx::query_as("SELECT task_id FROM task_deps WHERE depends_on_id = ?")
+                .bind(task_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Return blocked tasks (for snapshot/debugging).
+    pub async fn blocked_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM tasks WHERE status = 'blocked' ORDER BY priority ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_task_record).collect())
+    }
+
+    /// Count of blocked tasks.
+    pub async fn blocked_count(&self) -> Result<i64, StoreError> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status = 'blocked'")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
     // ── Recurring control ──────────────────────────────────────────
 
     /// Pause a recurring schedule. The current instance (if running) is

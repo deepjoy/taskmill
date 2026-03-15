@@ -8,6 +8,20 @@
 //! controlling duplicate-key handling, and [`TypedTask`] for strongly-typed
 //! task payloads with built-in serialization.
 //!
+//! # Task lifecycle states
+//!
+//! Active tasks have a [`TaskStatus`]:
+//!
+//! - `Pending` / `Running` / `Paused` / `Waiting` — standard lifecycle states
+//! - [`Blocked`](TaskStatus::Blocked) — task is waiting for dependencies to
+//!   complete before becoming eligible for dispatch
+//!
+//! Terminal tasks have a [`HistoryStatus`]:
+//!
+//! - `Completed` / `Failed` / `Cancelled` / `Superseded` / `Expired` — standard outcomes
+//! - [`DependencyFailed`](HistoryStatus::DependencyFailed) — task was cancelled
+//!   because a dependency failed, per its [`DependencyFailurePolicy`]
+//!
 //! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
 //! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
 //! [`Scheduler::submit_batch`](crate::Scheduler::submit_batch). Executors
@@ -29,8 +43,8 @@ use crate::priority::Priority;
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
 pub use submission::{
-    BatchOutcome, BatchSubmission, DuplicateStrategy, RecurringSchedule, SubmitOutcome,
-    TaskSubmission,
+    BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy, RecurringSchedule,
+    SubmitOutcome, TaskSubmission,
 };
 pub use typed::TypedTask;
 
@@ -78,6 +92,10 @@ pub enum TaskStatus {
     /// active. Transitions to `Running` (for finalize) or terminal once all
     /// children complete.
     Waiting,
+    /// Task is waiting for dependencies to complete before becoming eligible
+    /// for dispatch. Transitions to `Pending` when all dependencies are
+    /// satisfied, or to history as `DependencyFailed` if a dependency fails.
+    Blocked,
 }
 
 impl TaskStatus {
@@ -87,6 +105,7 @@ impl TaskStatus {
             Self::Running => "running",
             Self::Paused => "paused",
             Self::Waiting => "waiting",
+            Self::Blocked => "blocked",
         }
     }
 }
@@ -100,6 +119,7 @@ impl std::str::FromStr for TaskStatus {
             "running" => Ok(Self::Running),
             "paused" => Ok(Self::Paused),
             "waiting" => Ok(Self::Waiting),
+            "blocked" => Ok(Self::Blocked),
             other => Err(format!("unknown TaskStatus: {other}")),
         }
     }
@@ -114,6 +134,9 @@ pub enum HistoryStatus {
     Cancelled,
     Superseded,
     Expired,
+    /// A dependency failed and this task was auto-cancelled per its
+    /// [`DependencyFailurePolicy`](crate::DependencyFailurePolicy).
+    DependencyFailed,
 }
 
 impl HistoryStatus {
@@ -124,6 +147,7 @@ impl HistoryStatus {
             Self::Cancelled => "cancelled",
             Self::Superseded => "superseded",
             Self::Expired => "expired",
+            Self::DependencyFailed => "dependency_failed",
         }
     }
 }
@@ -138,6 +162,7 @@ impl std::str::FromStr for HistoryStatus {
             "cancelled" => Ok(Self::Cancelled),
             "superseded" => Ok(Self::Superseded),
             "expired" => Ok(Self::Expired),
+            "dependency_failed" => Ok(Self::DependencyFailed),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }
@@ -190,6 +215,11 @@ pub struct TaskRecord {
     pub recurring_execution_count: i64,
     /// Whether the recurring schedule is paused (no new instances created).
     pub recurring_paused: bool,
+    /// IDs of tasks this task depends on (populated from `task_deps` table).
+    /// Empty for tasks with no dependencies.
+    pub dependencies: Vec<i64>,
+    /// What happens when a dependency fails.
+    pub on_dependency_failure: DependencyFailurePolicy,
 }
 
 impl TaskRecord {

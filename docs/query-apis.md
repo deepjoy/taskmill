@@ -25,6 +25,15 @@ Use these queries to build dashboards, debug stuck tasks, and gather analytics a
 | `task_by_key(key)` | `Option<TaskRecord>` | Look up an active task by dedup key. |
 | `running_io_totals()` | `(i64, i64)` | Sum of expected disk read and write bytes across running tasks. Useful for comparing against system capacity. |
 
+## Dependency queries
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `task_dependencies(id)` | `Vec<i64>` | IDs of tasks that this task depends on (its prerequisites). |
+| `task_dependents(id)` | `Vec<i64>` | IDs of tasks that depend on this task (will be unblocked when it completes). |
+| `blocked_tasks()` | `Vec<TaskRecord>` | All tasks currently in `blocked` status, waiting for dependencies. |
+| `blocked_count()` | `i64` | Count of blocked tasks. Also available in `SchedulerSnapshot::blocked_count`. |
+
 ## History queries
 
 | Method | Returns | Description |

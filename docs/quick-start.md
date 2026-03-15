@@ -285,6 +285,63 @@ scheduler.resume_recurring(task_id).await?;
 scheduler.cancel_recurring(task_id).await?;
 ```
 
+## Task dependencies
+
+Tasks can declare dependencies on other tasks. A dependent task stays in `blocked` status and won't be dispatched until all its dependencies have completed successfully.
+
+### Simple chain
+
+```rust
+let upload = scheduler.submit(
+    &TaskSubmission::new("upload-file")
+        .payload_json(&upload_plan)
+).await?;
+
+// Only runs after upload succeeds
+scheduler.submit(
+    &TaskSubmission::new("delete-old-version")
+        .depends_on(upload.id().unwrap())
+        .payload_json(&delete_plan)
+).await?;
+```
+
+### Fan-in (multiple dependencies)
+
+Use `.depends_on_all()` when a task needs several prerequisites to complete first:
+
+```rust
+let a = scheduler.submit(&TaskSubmission::new("fetch-a").payload_json(&a_data)).await?;
+let b = scheduler.submit(&TaskSubmission::new("fetch-b").payload_json(&b_data)).await?;
+
+// Only runs after both A and B complete
+scheduler.submit(
+    &TaskSubmission::new("merge")
+        .depends_on_all([a.id().unwrap(), b.id().unwrap()])
+        .payload_json(&merge_plan)
+).await?;
+```
+
+### Failure handling
+
+By default, if a dependency fails permanently, the dependent task is cancelled and recorded as `DependencyFailed` in history. This is the `Cancel` policy. You can change this per-submission:
+
+```rust
+use taskmill::DependencyFailurePolicy;
+
+scheduler.submit(
+    &TaskSubmission::new("cleanup")
+        .depends_on(upload_id)
+        .on_dependency_failure(DependencyFailurePolicy::Ignore) // run anyway
+        .payload_json(&cleanup_plan)
+).await?;
+```
+
+| Policy | Behavior |
+|--------|----------|
+| `Cancel` (default) | Dependent is moved to history as `DependencyFailed`. |
+| `Fail` | Same as `Cancel`, but doesn't cascade to other dependents in the chain. |
+| `Ignore` | Dependent is unblocked and runs anyway — your executor must handle missing upstream results. |
+
 ## Tauri integration
 
 Taskmill is designed for Tauri. The `Scheduler` drops directly into Tauri state, and all events are serializable for IPC.

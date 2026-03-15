@@ -1,4 +1,12 @@
 //! Scheduler types: events, snapshots, and configuration.
+//!
+//! [`SchedulerEvent`] variants cover the full task lifecycle. Dependency-related
+//! events:
+//!
+//! - [`TaskUnblocked { task_id }`](SchedulerEvent::TaskUnblocked) — a blocked
+//!   task became pending after all its dependencies completed successfully
+//! - [`DependencyFailed { task_id, failed_dependency }`](SchedulerEvent::DependencyFailed)
+//!   — a blocked task was cancelled because a dependency failed
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
@@ -37,6 +45,8 @@ pub struct SchedulerSnapshot {
     pub is_paused: bool,
     /// Active recurring schedules with their next run times.
     pub recurring_schedules: Vec<crate::task::RecurringScheduleInfo>,
+    /// Tasks currently blocked waiting for dependencies.
+    pub blocked_count: i64,
 }
 
 // ── Task Event Header ────────────────────────────────────────────────
@@ -122,6 +132,13 @@ pub enum SchedulerEvent {
         /// `None` if `max_executions` reached or schedule paused.
         next_run: Option<chrono::DateTime<chrono::Utc>>,
     },
+    /// A blocked task became pending after all its dependencies completed.
+    TaskUnblocked { task_id: i64 },
+    /// A blocked task was cancelled because a dependency failed.
+    DependencyFailed {
+        task_id: i64,
+        failed_dependency: i64,
+    },
     /// The scheduler was globally paused via [`Scheduler::pause_all`].
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
@@ -141,9 +158,12 @@ impl SchedulerEvent {
             | Self::TaskExpired { header, .. }
             | Self::RecurringSkipped { header, .. }
             | Self::RecurringCompleted { header, .. } => Some(header),
-            Self::Waiting { .. } | Self::BatchSubmitted { .. } | Self::Paused | Self::Resumed => {
-                None
-            }
+            Self::Waiting { .. }
+            | Self::BatchSubmitted { .. }
+            | Self::TaskUnblocked { .. }
+            | Self::DependencyFailed { .. }
+            | Self::Paused
+            | Self::Resumed => None,
         }
     }
 }
