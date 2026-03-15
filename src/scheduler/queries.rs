@@ -63,6 +63,35 @@ impl Scheduler {
             .collect()
     }
 
+    /// Find active tasks matching all specified tag filters (AND semantics).
+    ///
+    /// Delegates to [`TaskStore::tasks_by_tags`].
+    pub async fn tasks_by_tags(
+        &self,
+        filters: &[(&str, &str)],
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<crate::task::TaskRecord>, StoreError> {
+        self.inner.store.tasks_by_tags(filters, status).await
+    }
+
+    /// Count active tasks grouped by a tag key's values.
+    ///
+    /// Delegates to [`TaskStore::count_by_tag`].
+    pub async fn count_by_tag(
+        &self,
+        key: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        self.inner.store.count_by_tag(key, status).await
+    }
+
+    /// List distinct values for a tag key across active tasks, with counts.
+    ///
+    /// Delegates to [`TaskStore::tag_values`].
+    pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        self.inner.store.tag_values(key).await
+    }
+
     /// Capture a single status snapshot for dashboard UIs.
     ///
     /// Gathers running tasks, queue depths, progress estimates, and
