@@ -14,6 +14,7 @@
 //! A task with dependencies enters [`Blocked`](crate::TaskStatus::Blocked) status
 //! and transitions to `Pending` only after all dependencies complete successfully.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -24,6 +25,13 @@ use crate::priority::Priority;
 use super::dedup::generate_dedup_key;
 use super::typed::TypedTask;
 use super::{IoBudget, TtlFrom};
+
+/// Maximum length of a tag key in bytes.
+pub const MAX_TAG_KEY_LEN: usize = 64;
+/// Maximum length of a tag value in bytes.
+pub const MAX_TAG_VALUE_LEN: usize = 256;
+/// Maximum number of tags per task.
+pub const MAX_TAGS_PER_TASK: usize = 32;
 
 /// Configuration for recurring task schedules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,6 +260,7 @@ pub struct BatchSubmission {
     default_group: Option<String>,
     default_priority: Option<Priority>,
     default_ttl: Option<Duration>,
+    default_tags: HashMap<String, String>,
     tasks: Vec<TaskSubmission>,
 }
 
@@ -262,6 +271,7 @@ impl BatchSubmission {
             default_group: None,
             default_priority: None,
             default_ttl: None,
+            default_tags: HashMap::new(),
             tasks: Vec::new(),
         }
     }
@@ -281,6 +291,12 @@ impl BatchSubmission {
     /// Set a default priority applied to tasks still at [`Priority::NORMAL`].
     pub fn default_priority(mut self, priority: Priority) -> Self {
         self.default_priority = Some(priority);
+        self
+    }
+
+    /// Set a default tag applied to tasks that don't already have this key.
+    pub fn default_tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.default_tags.insert(key.into(), value.into());
         self
     }
 
@@ -316,6 +332,9 @@ impl BatchSubmission {
                 if let Some(ttl) = self.default_ttl {
                     task.ttl = Some(ttl);
                 }
+            }
+            for (k, v) in &self.default_tags {
+                task.tags.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
         self.tasks
@@ -399,6 +418,11 @@ pub struct TaskSubmission {
     /// What happens when a dependency fails. Default: [`DependencyFailurePolicy::Cancel`].
     #[serde(default)]
     pub on_dependency_failure: DependencyFailurePolicy,
+    /// Key-value metadata tags for filtering, grouping, and display.
+    /// Immutable after submission. Validated against [`MAX_TAG_KEY_LEN`],
+    /// [`MAX_TAG_VALUE_LEN`], and [`MAX_TAGS_PER_TASK`] at submit time.
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
 }
 
 impl TaskSubmission {
@@ -437,6 +461,7 @@ impl TaskSubmission {
             recurring: None,
             dependencies: Vec::new(),
             on_dependency_failure: DependencyFailurePolicy::default(),
+            tags: HashMap::new(),
         }
     }
 
@@ -590,6 +615,22 @@ impl TaskSubmission {
         self
     }
 
+    /// Add a single metadata tag (key-value pair).
+    ///
+    /// Tags are schema-free metadata for filtering and grouping. They are
+    /// validated at submit time against [`MAX_TAG_KEY_LEN`],
+    /// [`MAX_TAG_VALUE_LEN`], and [`MAX_TAGS_PER_TASK`].
+    pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.tags.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set all metadata tags at once, replacing any previously set tags.
+    pub fn tags(mut self, tags: HashMap<String, String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Make this a recurring task with full schedule control.
     pub fn recurring_schedule(mut self, schedule: RecurringSchedule) -> Self {
         if let Some(delay) = schedule.initial_delay {
@@ -640,6 +681,10 @@ impl TaskSubmission {
         }
         if let Some(sched) = task.recurring() {
             sub = sub.recurring_schedule(sched);
+        }
+        let task_tags = task.tags();
+        if !task_tags.is_empty() {
+            sub = sub.tags(task_tags);
         }
         sub
     }

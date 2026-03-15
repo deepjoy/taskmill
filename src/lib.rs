@@ -774,7 +774,8 @@ pub use task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy,
     HistoryStatus, IoBudget, ParentResolution, RecurringSchedule, RecurringScheduleInfo,
     SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus,
-    TaskSubmission, TtlFrom, TypeStats, TypedTask,
+    TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN,
+    MAX_TAG_VALUE_LEN,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

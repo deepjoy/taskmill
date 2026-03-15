@@ -1,5 +1,6 @@
 //! The [`TypedTask`] trait for strongly-typed task payloads.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -86,5 +87,10 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// Optional recurring schedule. Default: `None` (one-shot).
     fn recurring(&self) -> Option<RecurringSchedule> {
         None
+    }
+
+    /// Metadata tags for filtering and grouping. Default: empty.
+    fn tags(&self) -> HashMap<String, String> {
+        HashMap::new()
     }
 }

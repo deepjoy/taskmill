@@ -54,6 +54,8 @@ pub enum StoreError {
     DependencyFailed(i64),
     #[error("circular dependency detected")]
     CyclicDependency,
+    #[error("invalid tag: {0}")]
+    InvalidTag(String),
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -243,6 +245,11 @@ impl TaskStore {
         Self::run_alter_migration(
             &self.pool,
             include_str!("../../migrations/006_dependencies.sql"),
+        )
+        .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../../migrations/007_tags.sql"),
         )
         .await?;
         Ok(())
