@@ -7,7 +7,7 @@ use sqlx::Row;
 
 use crate::task::{
     DependencyFailurePolicy, DuplicateStrategy, SubmitOutcome, TaskSubmission, TtlFrom,
-    MAX_PAYLOAD_BYTES,
+    MAX_PAYLOAD_BYTES, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 
 use super::row_mapping::row_to_task_record;
@@ -17,6 +17,31 @@ use super::{StoreError, TaskStore};
 /// are split into multiple transactions to avoid holding the SQLite write
 /// lock for too long.
 const BATCH_CHUNK_SIZE: usize = 10_000;
+
+/// Validate tag constraints: key length, value length, max count.
+fn validate_tags(tags: &HashMap<String, String>) -> Result<(), StoreError> {
+    if tags.len() > MAX_TAGS_PER_TASK {
+        return Err(StoreError::InvalidTag(format!(
+            "too many tags: {} > {MAX_TAGS_PER_TASK}",
+            tags.len()
+        )));
+    }
+    for (k, v) in tags {
+        if k.len() > MAX_TAG_KEY_LEN {
+            return Err(StoreError::InvalidTag(format!(
+                "tag key too long: {} > {MAX_TAG_KEY_LEN}",
+                k.len()
+            )));
+        }
+        if v.len() > MAX_TAG_VALUE_LEN {
+            return Err(StoreError::InvalidTag(format!(
+                "tag value too long: {} > {MAX_TAG_VALUE_LEN}",
+                v.len()
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Core dedup logic for a single task submission within an existing connection.
 ///
@@ -30,6 +55,8 @@ pub(crate) async fn submit_one(
     if let Some(ref err) = sub.payload_error {
         return Err(StoreError::Serialization(err.clone()));
     }
+
+    validate_tags(&sub.tags)?;
 
     let key = sub.effective_key();
     let priority = sub.priority.value() as i32;
@@ -94,6 +121,9 @@ pub(crate) async fn submit_one(
 
     if result.rows_affected() > 0 {
         let task_id = result.last_insert_rowid();
+
+        // Insert tags.
+        super::insert_tags(conn, task_id, &sub.tags).await?;
 
         // Handle dependencies if any.
         if !sub.dependencies.is_empty() {
@@ -256,6 +286,10 @@ pub(crate) async fn supersede_existing(
             .execute(&mut **conn)
             .await?;
 
+            // Replace tags: delete old, insert new.
+            super::delete_task_tags(conn, replaced_id).await?;
+            super::insert_tags(conn, replaced_id, &sub.tags).await?;
+
             Ok(SubmitOutcome::Superseded {
                 new_task_id: replaced_id,
                 replaced_task_id: replaced_id,
@@ -263,6 +297,7 @@ pub(crate) async fn supersede_existing(
         }
         crate::task::TaskStatus::Running | crate::task::TaskStatus::Waiting => {
             // Delete existing and insert new.
+            super::delete_task_tags(conn, replaced_id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(replaced_id)
                 .execute(&mut **conn)
@@ -293,8 +328,11 @@ pub(crate) async fn supersede_existing(
             .execute(&mut **conn)
             .await?;
 
+            let new_task_id = result.last_insert_rowid();
+            super::insert_tags(conn, new_task_id, &sub.tags).await?;
+
             Ok(SubmitOutcome::Superseded {
-                new_task_id: result.last_insert_rowid(),
+                new_task_id,
                 replaced_task_id: replaced_id,
             })
         }
@@ -421,6 +459,7 @@ impl TaskStore {
                 return Err(StoreError::PayloadTooLarge);
             }
         }
+        validate_tags(&sub.tags)?;
 
         let mut conn = self.begin_write().await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
@@ -449,7 +488,7 @@ impl TaskStore {
         &self,
         submissions: &[TaskSubmission],
     ) -> Result<Vec<SubmitOutcome>, StoreError> {
-        // Pre-validate all payloads before starting the transaction
+        // Pre-validate all payloads and tags before starting the transaction
         // to avoid partial inserts on validation errors.
         for sub in submissions {
             if let Some(ref p) = sub.payload {
@@ -457,6 +496,7 @@ impl TaskStore {
                     return Err(StoreError::PayloadTooLarge);
                 }
             }
+            validate_tags(&sub.tags)?;
         }
 
         // Intra-batch dedup: last-wins. Map each effective key to its last

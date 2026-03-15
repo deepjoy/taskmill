@@ -247,11 +247,8 @@ impl TaskStore {
             include_str!("../../migrations/006_dependencies.sql"),
         )
         .await?;
-        Self::run_alter_migration(
-            &self.pool,
-            include_str!("../../migrations/007_tags.sql"),
-        )
-        .await?;
+        Self::run_alter_migration(&self.pool, include_str!("../../migrations/007_tags.sql"))
+            .await?;
         Ok(())
     }
 
@@ -426,10 +423,42 @@ impl TaskStore {
 
     /// Delete a task from the active queue by id. Returns true if a row was deleted.
     pub async fn delete(&self, id: i64) -> Result<bool, StoreError> {
+        let mut conn = self.begin_write().await?;
+        delete_task_tags(&mut conn, id).await?;
         let result = sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
         Ok(result.rows_affected() > 0)
     }
+}
+
+/// Delete tags for a task. Called before or after deleting the task row itself.
+pub(crate) async fn delete_task_tags(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    task_id: i64,
+) -> Result<(), StoreError> {
+    sqlx::query("DELETE FROM task_tags WHERE task_id = ?")
+        .bind(task_id)
+        .execute(&mut **conn)
+        .await?;
+    Ok(())
+}
+
+/// Insert tags for a task into the task_tags table.
+pub(crate) async fn insert_tags(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    task_id: i64,
+    tags: &std::collections::HashMap<String, String>,
+) -> Result<(), StoreError> {
+    for (key, value) in tags {
+        sqlx::query("INSERT INTO task_tags (task_id, key, value) VALUES (?, ?, ?)")
+            .bind(task_id)
+            .bind(key)
+            .bind(value)
+            .execute(&mut **conn)
+            .await?;
+    }
+    Ok(())
 }

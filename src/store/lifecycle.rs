@@ -69,6 +69,20 @@ pub(crate) async fn insert_history(
     )
     .execute(&mut **conn)
     .await?;
+
+    // Copy tags from task_tags to task_history_tags.
+    let history_rowid = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+        .fetch_one(&mut **conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO task_history_tags (history_rowid, key, value)
+         SELECT ?, key, value FROM task_tags WHERE task_id = ?",
+    )
+    .bind(history_rowid)
+    .bind(task.id)
+    .execute(&mut **conn)
+    .await?;
+
     Ok(())
 }
 
@@ -249,6 +263,16 @@ impl TaskStore {
         )
         .await?;
 
+        // Read tags into memory before potential deletion (needed for recurring re-creation).
+        let saved_tags: Vec<(String, String)> = if task.recurring_interval_secs.is_some() {
+            sqlx::query_as("SELECT key, value FROM task_tags WHERE task_id = ?")
+                .bind(task.id)
+                .fetch_all(&mut **conn)
+                .await?
+        } else {
+            Vec::new()
+        };
+
         // Try to delete (normal completion, requeue = 0).
         let del = sqlx::query("DELETE FROM tasks WHERE id = ? AND requeue = 0")
             .bind(task.id)
@@ -271,6 +295,9 @@ impl TaskStore {
             // Don't create recurring next instance if requeued.
             return Ok(None);
         }
+
+        // Task was deleted — clean up orphaned tags.
+        super::delete_task_tags(conn, task.id).await?;
 
         // Handle recurring tasks: create the next instance after deleting
         // the completed one (to avoid UNIQUE constraint on key).
@@ -306,7 +333,7 @@ impl TaskStore {
                             _ => None,
                         };
 
-                        sqlx::query(
+                        let recurring_result = sqlx::query(
                             "INSERT INTO tasks (task_type, key, label, priority, status, payload,
                                 expected_read_bytes, expected_write_bytes,
                                 expected_net_rx_bytes, expected_net_tx_bytes,
@@ -338,6 +365,19 @@ impl TaskStore {
                         .bind(execution_count)
                         .execute(&mut **conn)
                         .await?;
+
+                        // Copy tags to the new recurring instance.
+                        let next_id = recurring_result.last_insert_rowid();
+                        for (key, value) in &saved_tags {
+                            sqlx::query(
+                                "INSERT INTO task_tags (task_id, key, value) VALUES (?, ?, ?)",
+                            )
+                            .bind(next_id)
+                            .bind(key)
+                            .bind(value)
+                            .execute(&mut **conn)
+                            .await?;
+                        }
 
                         recurring_info = Some((next_run, execution_count));
                     }
@@ -433,6 +473,7 @@ impl TaskStore {
 
             insert_history(conn, task, "failed", metrics, duration_ms, Some(error)).await?;
 
+            super::delete_task_tags(conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(task.id)
                 .execute(&mut **conn)
@@ -576,6 +617,7 @@ impl TaskStore {
                                 .execute(&mut **conn)
                                 .await?;
 
+                            super::delete_task_tags(conn, dep_id).await?;
                             sqlx::query("DELETE FROM tasks WHERE id = ?")
                                 .bind(dep_id)
                                 .execute(&mut **conn)
@@ -672,6 +714,7 @@ impl TaskStore {
             .execute(&mut *conn)
             .await?;
 
+        super::delete_task_tags(&mut conn, id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(id)
             .execute(&mut *conn)
@@ -709,6 +752,7 @@ impl TaskStore {
             .execute(&mut *conn)
             .await?;
 
+        super::delete_task_tags(&mut conn, task.id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(task.id)
             .execute(&mut *conn)
@@ -781,6 +825,7 @@ impl TaskStore {
                     None,
                 )
                 .await?;
+                super::delete_task_tags(&mut conn, child.id).await?;
                 sqlx::query("DELETE FROM tasks WHERE id = ?")
                     .bind(child.id)
                     .execute(&mut *conn)
@@ -796,6 +841,7 @@ impl TaskStore {
                 .await?;
 
             // Delete the expired task itself.
+            super::delete_task_tags(&mut conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(task.id)
                 .execute(&mut *conn)
@@ -850,6 +896,7 @@ impl TaskStore {
         )
         .await?;
 
+        super::delete_task_tags(&mut conn, task.id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(task.id)
             .execute(&mut *conn)
