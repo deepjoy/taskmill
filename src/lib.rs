@@ -17,6 +17,7 @@
 //! - Reports [byte-level transfer progress](TaskProgress) with EWMA-smoothed throughput and ETA
 //! - Supports [task cancellation](Scheduler::cancel) with history recording and cleanup hooks
 //! - Supports [task superseding](DuplicateStrategy::Supersede) for atomic cancel-and-replace
+//! - Supports [task TTL](TtlFrom) with automatic expiry, per-type defaults, and child inheritance
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
 //!
 //! # Concepts
@@ -30,6 +31,7 @@
 //!            ↓     ↘ paused ↗     ↘ failed (retryable → pending)
 //!        cancelled                 ↘ failed (permanent → history)
 //!        superseded                ↘ cancelled (via cancel() or supersede)
+//!        expired (TTL)             ↘ expired (TTL, cascade to children)
 //! ```
 //!
 //! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
@@ -115,6 +117,31 @@
 //! like `CompleteMultipartUpload`. If any child fails and
 //! [`fail_fast`](TaskSubmission::fail_fast) is `true` (the default), siblings
 //! are cancelled and the parent fails immediately.
+//!
+//! ## Task TTL & automatic expiry
+//!
+//! Tasks can be given a time-to-live (TTL) so they expire automatically if they
+//! haven't started running within the allowed window. TTL is resolved with a
+//! priority chain: **per-task** > **per-type** > **global default** > none.
+//!
+//! The TTL clock can start at submission time ([`TtlFrom::Submission`], the
+//! default) or when the task is first dispatched ([`TtlFrom::FirstAttempt`]).
+//! Expired tasks are moved to history with [`HistoryStatus::Expired`] and a
+//! [`SchedulerEvent::TaskExpired`] event is emitted.
+//!
+//! The scheduler catches expired tasks in two places:
+//! - **Dispatch time** — when a task is about to be dispatched, its `expires_at`
+//!   is checked first.
+//! - **Periodic sweep** — a background sweep (default every 30s, configurable
+//!   via [`SchedulerBuilder::expiry_sweep_interval`]) batch-expires pending and
+//!   paused tasks whose deadline has passed.
+//!
+//! When a parent task expires, its pending and paused children are
+//! cascade-expired.
+//!
+//! Child tasks without an explicit TTL inherit the **remaining** parent TTL
+//! (with `TtlFrom::Submission`), so a child can never outlive its parent's
+//! deadline.
 //!
 //! ## Cancellation
 //!
@@ -418,6 +445,47 @@
 //! scheduler.cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
 //! ```
 //!
+//! ## Task TTL
+//!
+//! Set a TTL on individual submissions, on a task type, or as a global default:
+//!
+//! ```ignore
+//! use std::time::Duration;
+//! use taskmill::{Scheduler, TaskSubmission, TtlFrom};
+//!
+//! // Per-task TTL — expire if not started within 5 minutes.
+//! let sub = TaskSubmission::new("sync")
+//!     .payload_json(&data)
+//!     .ttl(Duration::from_secs(300))
+//!     .ttl_from(TtlFrom::Submission);
+//! scheduler.submit(&sub).await?;
+//!
+//! // Per-type default — every "thumbnail" task gets a 10-minute TTL
+//! // unless overridden per-task.
+//! let scheduler = Scheduler::builder()
+//!     .store_path("tasks.db")
+//!     .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600))
+//!     .build()
+//!     .await?;
+//!
+//! // Global default — catch-all for any task without a per-task or per-type TTL.
+//! let scheduler = Scheduler::builder()
+//!     .store_path("tasks.db")
+//!     .default_ttl(Duration::from_secs(3600)) // 1 hour
+//!     .build()
+//!     .await?;
+//! ```
+//!
+//! For typed tasks, implement [`TypedTask::ttl`] and [`TypedTask::ttl_from`]:
+//!
+//! ```ignore
+//! impl TypedTask for SyncTask {
+//!     const TASK_TYPE: &'static str = "sync";
+//!     fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(300)) }
+//!     fn ttl_from(&self) -> TtlFrom { TtlFrom::FirstAttempt }
+//! }
+//! ```
+//!
 //! ## Task superseding
 //!
 //! Use [`DuplicateStrategy::Supersede`] for "latest-value-wins" scenarios
@@ -445,16 +513,19 @@
 //!    [`Notify`](tokio::sync::Notify)), the
 //!    [`poll_interval`](SchedulerBuilder::poll_interval) elapsed (default
 //!    500ms), or the cancellation token fired.
-//! 2. Paused tasks are resumed if no active preemptors exist at their
+//! 2. Expired tasks are swept (if the sweep interval has elapsed).
+//! 3. Paused tasks are resumed if no active preemptors exist at their
 //!    priority level.
-//! 3. Pending finalizers (parents whose children all completed) are
+//! 4. Pending finalizers (parents whose children all completed) are
 //!    dispatched first.
-//! 4. The highest-priority pending task is peeked (without claiming it).
-//! 5. The dispatch gate checks concurrency limits, group concurrency,
+//! 5. The highest-priority pending task is peeked (without claiming it).
+//!    If it has expired, it is moved to history and the next candidate is
+//!    tried.
+//! 6. The dispatch gate checks concurrency limits, group concurrency,
 //!    IO budget, and backpressure. If the gate rejects, no slot is consumed.
-//! 6. If admitted, the task is atomically claimed (`peek` → `pop_by_id`)
+//! 7. If admitted, the task is atomically claimed (`peek` → `pop_by_id`)
 //!    and spawned as a Tokio task.
-//! 7. Steps 4–6 repeat until the queue is empty or the gate rejects.
+//! 8. Steps 5–7 repeat until the queue is empty or the gate rejects.
 //!
 //! # Feature flags
 //!
@@ -487,7 +558,7 @@ pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, DuplicateStrategy, HistoryStatus, IoBudget,
     ParentResolution, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord,
-    TaskStatus, TaskSubmission, TypeStats, TypedTask,
+    TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

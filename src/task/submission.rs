@@ -2,13 +2,15 @@
 //! for building batches with shared defaults, [`SubmitOutcome`] for per-task
 //! results, and [`BatchOutcome`] for categorized batch summaries.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::priority::Priority;
 
 use super::dedup::generate_dedup_key;
 use super::typed::TypedTask;
-use super::IoBudget;
+use super::{IoBudget, TtlFrom};
 
 /// Strategy for handling duplicate dedup keys on submission.
 ///
@@ -187,6 +189,7 @@ impl IntoIterator for BatchOutcome {
 pub struct BatchSubmission {
     default_group: Option<String>,
     default_priority: Option<Priority>,
+    default_ttl: Option<Duration>,
     tasks: Vec<TaskSubmission>,
 }
 
@@ -196,6 +199,7 @@ impl BatchSubmission {
         Self {
             default_group: None,
             default_priority: None,
+            default_ttl: None,
             tasks: Vec::new(),
         }
     }
@@ -203,6 +207,12 @@ impl BatchSubmission {
     /// Set a default group key applied to tasks without an explicit group.
     pub fn default_group(mut self, group: impl Into<String>) -> Self {
         self.default_group = Some(group.into());
+        self
+    }
+
+    /// Set a default TTL applied to tasks that don't specify one.
+    pub fn default_ttl(mut self, ttl: Duration) -> Self {
+        self.default_ttl = Some(ttl);
         self
     }
 
@@ -238,6 +248,11 @@ impl BatchSubmission {
             if task.priority == Priority::NORMAL {
                 if let Some(priority) = self.default_priority {
                     task.priority = priority;
+                }
+            }
+            if task.ttl.is_none() {
+                if let Some(ttl) = self.default_ttl {
+                    task.ttl = Some(ttl);
                 }
             }
         }
@@ -299,6 +314,13 @@ pub struct TaskSubmission {
     /// Strategy for handling duplicate dedup keys. Default: [`DuplicateStrategy::Skip`].
     #[serde(default)]
     pub on_duplicate: DuplicateStrategy,
+    /// Time-to-live for the task. If set, the task will be automatically expired
+    /// if it hasn't started executing within this duration (clock starts
+    /// based on [`ttl_from`](Self::ttl_from)).
+    pub ttl: Option<Duration>,
+    /// When the TTL clock starts. Default: [`TtlFrom::Submission`].
+    #[serde(default)]
+    pub ttl_from: TtlFrom,
     /// Deferred serialization error from [`payload_json`](Self::payload_json).
     /// Surfaced at submit time as [`StoreError::Serialization`](crate::StoreError::Serialization).
     #[serde(skip)]
@@ -334,6 +356,8 @@ impl TaskSubmission {
             fail_fast: true,
             group_key: None,
             on_duplicate: DuplicateStrategy::default(),
+            ttl: None,
+            ttl_from: TtlFrom::default(),
             payload_error: None,
         }
     }
@@ -420,6 +444,22 @@ impl TaskSubmission {
         self
     }
 
+    /// Set the time-to-live for the task.
+    ///
+    /// If the task hasn't started executing within this duration (from
+    /// submission or first attempt, depending on [`ttl_from`](Self::ttl_from)),
+    /// it is automatically expired.
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
+    /// Set when the TTL clock starts. Default: [`TtlFrom::Submission`].
+    pub fn ttl_from(mut self, ttl_from: TtlFrom) -> Self {
+        self.ttl_from = ttl_from;
+        self
+    }
+
     /// Resolve the effective dedup key. Always incorporates the task type
     /// so different task types never collide, even with the same logical key.
     ///
@@ -440,7 +480,11 @@ impl TaskSubmission {
             .priority(task.priority())
             .payload_json(task)
             .expected_io(task.expected_io())
-            .on_duplicate(task.on_duplicate());
+            .on_duplicate(task.on_duplicate())
+            .ttl_from(task.ttl_from());
+        if let Some(t) = task.ttl() {
+            sub = sub.ttl(t);
+        }
         if let Some(k) = task.key() {
             sub = sub.key(k);
         }

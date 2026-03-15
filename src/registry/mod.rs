@@ -103,6 +103,7 @@ pub trait TaskExecutor: Send + Sync + 'static {
 /// After construction, the registry is immutable (shared via `Arc`).
 pub struct TaskTypeRegistry {
     types: HashMap<String, Arc<dyn ErasedExecutor>>,
+    type_ttls: HashMap<String, std::time::Duration>,
 }
 
 /// Object-safe wrapper around [`TaskExecutor`] for dynamic dispatch in the registry.
@@ -155,6 +156,7 @@ impl TaskTypeRegistry {
     pub fn new() -> Self {
         Self {
             types: HashMap::new(),
+            type_ttls: HashMap::new(),
         }
     }
 
@@ -168,6 +170,22 @@ impl TaskTypeRegistry {
         }
         self.types
             .insert(name.to_string(), executor as Arc<dyn ErasedExecutor>);
+    }
+
+    /// Register an executor with a per-type default TTL.
+    pub fn register_with_ttl<E: TaskExecutor>(
+        &mut self,
+        name: &str,
+        executor: Arc<E>,
+        ttl: std::time::Duration,
+    ) {
+        self.register(name, executor);
+        self.type_ttls.insert(name.to_string(), ttl);
+    }
+
+    /// Look up the per-type default TTL for a task type.
+    pub fn type_ttl(&self, name: &str) -> Option<&std::time::Duration> {
+        self.type_ttls.get(name)
     }
 
     /// Look up the executor for a task type.
@@ -197,6 +215,17 @@ impl TaskTypeRegistry {
             panic!("task type '{name}' already registered");
         }
         self.types.insert(name.to_string(), executor);
+    }
+
+    /// Register a pre-erased executor with a per-type TTL.
+    pub(crate) fn register_erased_with_ttl(
+        &mut self,
+        name: &str,
+        executor: Arc<dyn ErasedExecutor>,
+        ttl: std::time::Duration,
+    ) {
+        self.register_erased(name, executor);
+        self.type_ttls.insert(name.to_string(), ttl);
     }
 }
 

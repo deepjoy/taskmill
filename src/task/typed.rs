@@ -1,12 +1,14 @@
 //! The [`TypedTask`] trait for strongly-typed task payloads.
 
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::priority::Priority;
 
 use super::submission::DuplicateStrategy;
-use super::IoBudget;
+use super::{IoBudget, TtlFrom};
 
 /// A strongly-typed task that bundles serialization, task type name, and default
 /// IO estimates.
@@ -64,5 +66,15 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// Duplicate-handling strategy. Default: [`DuplicateStrategy::Skip`].
     fn on_duplicate(&self) -> DuplicateStrategy {
         DuplicateStrategy::default()
+    }
+
+    /// Optional time-to-live. Default: `None` (no TTL).
+    fn ttl(&self) -> Option<Duration> {
+        None
+    }
+
+    /// When the TTL clock starts. Default: [`TtlFrom::Submission`].
+    fn ttl_from(&self) -> TtlFrom {
+        TtlFrom::default()
     }
 }

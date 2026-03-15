@@ -117,6 +117,25 @@ let deleted = store.prune_history_by_count(5_000).await?;
 let deleted = store.prune_history_by_age(30).await?;
 ```
 
+## Task TTL and expiry
+
+Tasks with a TTL that haven't started running before their deadline are automatically expired. Expired tasks are moved to the history table with `HistoryStatus::Expired` — they are never silently deleted.
+
+### What happens on expiry
+
+1. The task is removed from the active `tasks` table.
+2. A history record is created with `status = 'expired'`.
+3. A `TaskExpired` event is emitted with the task header and age.
+4. If the expired task has pending or paused children, they are cascade-expired too.
+
+### TTL and crash recovery
+
+TTL deadlines (`expires_at`) are persisted in SQLite, so they survive crashes. After a restart, the scheduler's first expiry sweep picks up any tasks that expired while the process was down.
+
+### TTL and deduplication
+
+When a task expires, its dedup key is freed (since it moves to history). The same work can be submitted again after expiry.
+
 ## Testing with in-memory stores
 
 For tests, use an in-memory database that doesn't touch the filesystem:
@@ -150,8 +169,13 @@ You normally don't need to know the schema, but it's documented here for debuggi
 | `last_error` | TEXT | Most recent error message |
 | `created_at` | TEXT | ISO 8601 timestamp |
 | `started_at` | TEXT | Set when dispatched, cleared on pause |
+| `ttl_seconds` | INTEGER | TTL duration in seconds (NULL = no TTL) |
+| `ttl_from` | TEXT DEFAULT 'submission' | When TTL clock starts: `submission` or `first_attempt` |
+| `expires_at` | TEXT | ISO 8601 deadline (NULL = no expiry) |
 
-**Index:** `idx_tasks_pending(status, priority ASC, id ASC) WHERE status = 'pending'` — partial index for fast priority-ordered dispatch.
+**Indexes:**
+- `idx_tasks_pending(status, priority ASC, id ASC) WHERE status = 'pending'` — fast priority-ordered dispatch.
+- `idx_tasks_expires(expires_at ASC) WHERE expires_at IS NOT NULL AND status IN ('pending', 'paused')` — efficient expiry sweep.
 
 ### `task_history` — completed and failed tasks
 
@@ -165,7 +189,10 @@ All columns from `tasks`, plus:
 | `actual_net_tx_bytes` | INTEGER | Reported by executor |
 | `completed_at` | TEXT | ISO 8601 timestamp |
 | `duration_ms` | INTEGER | Wall-clock duration |
-| `status` | TEXT | `completed` or `failed` |
+| `status` | TEXT | `completed`, `failed`, `cancelled`, `superseded`, or `expired` |
+| `ttl_seconds` | INTEGER | TTL duration in seconds (NULL = no TTL) |
+| `ttl_from` | TEXT DEFAULT 'submission' | When TTL clock started |
+| `expires_at` | TEXT | ISO 8601 deadline (NULL = no expiry) |
 
 **Index:** `idx_history_type_completed(task_type, completed_at DESC) WHERE status = 'completed'` — for per-type history queries and throughput calculations.
 

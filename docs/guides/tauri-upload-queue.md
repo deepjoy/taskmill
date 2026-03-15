@@ -60,6 +60,11 @@ impl TypedTask for UploadTask {
         Some(self.file_path.clone())
     }
 
+    fn ttl(&self) -> Option<std::time::Duration> {
+        // Expire uploads that haven't started within 30 minutes
+        Some(std::time::Duration::from_secs(30 * 60))
+    }
+
     fn label(&self) -> Option<String> {
         // Human-readable name for the UI
         let filename = std::path::Path::new(&self.file_path)
@@ -288,3 +293,16 @@ If your upload target supports resumable uploads, you can store the upload sessi
 ### Duplicate uploads
 
 Handled automatically. The `key()` method on `UploadTask` returns the file path, so submitting the same file twice returns `SubmitOutcome::Duplicate`. The UI can show a "already queued" message.
+
+### Stale uploads
+
+The `ttl()` method on `UploadTask` expires queued uploads that haven't started within 30 minutes. Listen for `TaskExpired` events to notify the user:
+
+```rust
+SchedulerEvent::TaskExpired { header, age } => {
+    notify_user(&format!(
+        "{} expired after {:.0}s in the queue",
+        header.label, age.as_secs_f64(),
+    ));
+}
+```

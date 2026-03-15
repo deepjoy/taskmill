@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use sqlx::Row;
 
-use crate::task::{DuplicateStrategy, SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
+use crate::task::{DuplicateStrategy, SubmitOutcome, TaskSubmission, TtlFrom, MAX_PAYLOAD_BYTES};
 
 use super::row_mapping::row_to_task_record;
 use super::{StoreError, TaskStore};
@@ -32,9 +32,20 @@ pub(crate) async fn submit_one(
     let priority = sub.priority.value() as i32;
     let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
 
+    // Compute TTL columns.
+    let ttl_seconds = sub.ttl.map(|d| d.as_secs() as i64);
+    let ttl_from_str = sub.ttl_from.as_str();
+    let expires_at: Option<String> = match (sub.ttl, sub.ttl_from) {
+        (Some(ttl), TtlFrom::Submission) => {
+            let exp = chrono::Utc::now() + ttl;
+            Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+        }
+        _ => None, // FirstAttempt: set on pop; no TTL: NULL
+    };
+
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&sub.task_type)
     .bind(&key)
@@ -48,6 +59,9 @@ pub(crate) async fn submit_one(
     .bind(sub.parent_id)
     .bind(fail_fast_val)
     .bind(&sub.group_key)
+    .bind(ttl_seconds)
+    .bind(ttl_from_str)
+    .bind(&expires_at)
     .execute(&mut **conn)
     .await?;
 
@@ -145,6 +159,17 @@ pub(crate) async fn supersede_existing(
     let priority = sub.priority.value() as i32;
     let fail_fast_val: i32 = if sub.fail_fast { 1 } else { 0 };
 
+    // Compute TTL columns for the new submission.
+    let ttl_seconds = sub.ttl.map(|d| d.as_secs() as i64);
+    let ttl_from_str = sub.ttl_from.as_str();
+    let expires_at: Option<String> = match (sub.ttl, sub.ttl_from) {
+        (Some(ttl), TtlFrom::Submission) => {
+            let exp = chrono::Utc::now() + ttl;
+            Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+        }
+        _ => None,
+    };
+
     match existing.status {
         crate::task::TaskStatus::Pending | crate::task::TaskStatus::Paused => {
             // In-place update — keeps the row ID and queue position.
@@ -154,7 +179,8 @@ pub(crate) async fn supersede_existing(
                     expected_read_bytes = ?, expected_write_bytes = ?,
                     expected_net_rx_bytes = ?, expected_net_tx_bytes = ?,
                     retry_count = 0, last_error = NULL, status = 'pending',
-                    requeue = 0, requeue_priority = NULL, fail_fast = ?, group_key = ?
+                    requeue = 0, requeue_priority = NULL, fail_fast = ?, group_key = ?,
+                    ttl_seconds = ?, ttl_from = ?, expires_at = ?
                  WHERE id = ?",
             )
             .bind(&sub.label)
@@ -166,6 +192,9 @@ pub(crate) async fn supersede_existing(
             .bind(sub.expected_io.net_tx)
             .bind(fail_fast_val)
             .bind(&sub.group_key)
+            .bind(ttl_seconds)
+            .bind(ttl_from_str)
+            .bind(&expires_at)
             .bind(replaced_id)
             .execute(&mut **conn)
             .await?;
@@ -185,8 +214,9 @@ pub(crate) async fn supersede_existing(
             let result = sqlx::query(
                 "INSERT INTO tasks (task_type, key, label, priority, payload,
                     expected_read_bytes, expected_write_bytes, expected_net_rx_bytes,
-                    expected_net_tx_bytes, parent_id, fail_fast, group_key)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    expected_net_tx_bytes, parent_id, fail_fast, group_key,
+                    ttl_seconds, ttl_from, expires_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(key)
@@ -200,6 +230,9 @@ pub(crate) async fn supersede_existing(
             .bind(sub.parent_id)
             .bind(fail_fast_val)
             .bind(&sub.group_key)
+            .bind(ttl_seconds)
+            .bind(ttl_from_str)
+            .bind(&expires_at)
             .execute(&mut **conn)
             .await?;
 

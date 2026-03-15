@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 use crate::priority::Priority;
-use crate::task::{HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus};
+use crate::task::{HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus, TtlFrom};
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
     // SQLite stores as "YYYY-MM-DD HH:MM:SS". Parse with chrono.
@@ -23,6 +23,9 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
     let requeue_priority_val: Option<i32> = row.get("requeue_priority");
     let parent_id: Option<i64> = row.get("parent_id");
     let fail_fast_val: i32 = row.get("fail_fast");
+
+    let ttl_from_str: String = row.get("ttl_from");
+    let expires_at_str: Option<String> = row.get("expires_at");
 
     TaskRecord {
         id: row.get("id"),
@@ -47,6 +50,9 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         parent_id,
         fail_fast: fail_fast_val != 0,
         group_key: row.get("group_key"),
+        ttl_seconds: row.get("ttl_seconds"),
+        ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
+        expires_at: expires_at_str.map(|s| parse_datetime(&s)),
     }
 }
 
@@ -70,6 +76,9 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         net_rx: actual_rx.unwrap_or(0),
         net_tx: actual_tx.unwrap_or(0),
     });
+
+    let ttl_from_str: String = row.get("ttl_from");
+    let expires_at_str: Option<String> = row.get("expires_at");
 
     TaskHistoryRecord {
         id: row.get("id"),
@@ -95,5 +104,8 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         parent_id,
         fail_fast: fail_fast_val != 0,
         group_key: row.get("group_key"),
+        ttl_seconds: row.get("ttl_seconds"),
+        ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
+        expires_at: expires_at_str.map(|s| parse_datetime(&s)),
     }
 }

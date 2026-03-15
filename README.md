@@ -56,6 +56,7 @@ async fn main() {
 - **Stay responsive** — IO-aware scheduling defers work when disk or network throughput is saturated
 - **Prioritize what matters** — 256-level priority queue with preemption lets urgent work interrupt background tasks
 - **Show progress** — executor-reported and throughput-extrapolated progress for real-time UI updates
+- **Expire stale work** — configurable TTL (per-task, per-type, or global) automatically expires tasks that haven't started in time
 - **Avoid duplicate work** — key-based deduplication prevents the same task from being queued twice
 - **React to system load** — composable backpressure from any signal (disk, network, memory, battery, API limits)
 - **Control concurrency** — per-group limits (e.g., per S3 bucket), global limits, runtime-adjustable

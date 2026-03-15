@@ -91,6 +91,12 @@ pub(crate) struct SchedulerInner {
     pub(crate) group_limits: GroupLimits,
     /// Timeout for on_cancel hooks.
     pub(crate) cancel_hook_timeout: Duration,
+    /// Default TTL for tasks without an explicit TTL.
+    pub(crate) default_ttl: Option<Duration>,
+    /// How often to sweep for expired tasks.
+    pub(crate) expiry_sweep_interval: Option<Duration>,
+    /// Last time the expiry sweep ran.
+    pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
 }
 
 /// IO-aware priority scheduler.
@@ -188,6 +194,9 @@ impl Scheduler {
                 work_notify: Arc::new(Notify::new()),
                 group_limits: GroupLimits::new(),
                 cancel_hook_timeout: config.cancel_hook_timeout,
+                default_ttl: config.default_ttl,
+                expiry_sweep_interval: config.expiry_sweep_interval,
+                last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
             }),
         }
     }

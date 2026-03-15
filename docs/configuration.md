@@ -33,6 +33,8 @@ Controls scheduling behavior. Set via builder methods or pass directly to `Sched
 | `poll_interval` | `Duration` | 500ms | Sleep between dispatch cycles. The scheduler also wakes immediately on submit. | Lower = more responsive but slightly more CPU. 250ms is fine for interactive apps. |
 | `throughput_sample_size` | `i32` | 20 | Recent completions used for progress extrapolation. | More = smoother estimates but slower to adapt to changes in task behavior. |
 | `shutdown_mode` | `ShutdownMode` | `Hard` | `Hard` cancels immediately. `Graceful(Duration)` waits for running tasks. | Always use `Graceful` for desktop apps to avoid data loss. |
+| `default_ttl` | `Option<Duration>` | `None` | Global TTL applied to tasks without a per-task or per-type TTL. | Set to catch stale tasks (e.g., `Duration::from_secs(3600)` for 1 hour). |
+| `expiry_sweep_interval` | `Option<Duration>` | `Some(30s)` | How often the scheduler sweeps for expired tasks. `None` disables periodic sweeps (dispatch-time checks still apply). | Lower for latency-sensitive expiry; `None` if you only need dispatch-time checks. |
 
 ### Builder methods
 
@@ -132,6 +134,80 @@ When the scheduler stops (the `CancellationToken` passed to `run()` is cancelled
 
 Both modes stop the resource sampler. **For desktop apps, always use `Graceful` to avoid interrupting in-progress uploads or file operations.**
 
+## Task TTL (time-to-live)
+
+Tasks can expire automatically if they haven't started running within a configurable duration. TTL is resolved with a priority chain: **per-task > per-type > global default > none**.
+
+### Per-task TTL
+
+Set directly on a submission:
+
+```rust
+use std::time::Duration;
+use taskmill::{TaskSubmission, TtlFrom};
+
+let sub = TaskSubmission::new("sync")
+    .payload_json(&data)
+    .ttl(Duration::from_secs(300))          // expire after 5 minutes
+    .ttl_from(TtlFrom::Submission);         // clock starts at submit time (default)
+```
+
+`TtlFrom::FirstAttempt` starts the clock when the task is first dispatched — useful when queue wait time shouldn't count against the deadline.
+
+### Per-type TTL
+
+Register a default TTL for all tasks of a given type:
+
+```rust
+use std::time::Duration;
+
+let scheduler = Scheduler::builder()
+    .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600))
+    .build()
+    .await?;
+```
+
+Tasks submitted with an explicit `.ttl()` override the per-type default.
+
+### Global default TTL
+
+Catch-all for tasks without a per-task or per-type TTL:
+
+```rust
+use std::time::Duration;
+
+let scheduler = Scheduler::builder()
+    .default_ttl(Duration::from_secs(3600))  // 1 hour
+    .build()
+    .await?;
+```
+
+### Expiry sweep
+
+The scheduler catches expired tasks in two ways:
+
+1. **Dispatch-time** — before dispatching a task, the scheduler checks `expires_at`. This has zero extra cost.
+2. **Periodic sweep** — every `expiry_sweep_interval` (default 30s), the scheduler batch-expires pending and paused tasks. Disable with `.expiry_sweep_interval(None)`.
+
+### Child TTL inheritance
+
+Children spawned via `ctx.spawn_child()` without an explicit TTL inherit the **remaining** parent TTL. A child can never outlive its parent's deadline. When a parent expires, its pending and paused children are cascade-expired.
+
+### Typed tasks
+
+Implement `ttl()` and `ttl_from()` on your `TypedTask`:
+
+```rust
+use std::time::Duration;
+use taskmill::{TypedTask, TtlFrom};
+
+impl TypedTask for SyncTask {
+    const TASK_TYPE: &'static str = "sync";
+    fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(300)) }
+    fn ttl_from(&self) -> TtlFrom { TtlFrom::FirstAttempt }
+}
+```
+
 ## Application state
 
 Executors often need shared services (HTTP clients, database connections, caches). Rather than capturing `Arc<T>` per executor, register state on the builder:
@@ -215,12 +291,16 @@ All `SchedulerBuilder` methods:
 | `store(store)` | Use a pre-opened `TaskStore`. |
 | `store_config(config)` | Pool size and retention settings. |
 | `executor(name, executor)` | Register a `TaskExecutor` by name. |
+| `executor_with_ttl(name, executor, ttl)` | Register with a per-type default TTL. |
 | `typed_executor::<T>(executor)` | Register using `T::TASK_TYPE` as the name. |
 | `max_concurrency(n)` | Set initial max concurrent tasks. |
 | `max_retries(n)` | Set retry limit. |
 | `preempt_priority(p)` | Set preemption threshold. |
 | `poll_interval(d)` | Set dispatch cycle interval. |
 | `shutdown_mode(mode)` | Set shutdown behavior. |
+| `default_ttl(d)` | Global TTL for tasks without per-task or per-type TTL. |
+| `expiry_sweep_interval(opt_d)` | How often to sweep for expired tasks (`None` to disable). |
+| `cancel_hook_timeout(d)` | Timeout for `on_cancel` hooks. |
 | `pressure_source(source)` | Add a `PressureSource` to the composite. |
 | `throttle_policy(policy)` | Set a custom `ThrottlePolicy`. |
 | `with_resource_monitoring()` | Enable platform resource monitoring. |

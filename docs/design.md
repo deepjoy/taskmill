@@ -47,10 +47,12 @@ Submit ──► Pending ──► Running ──► Completed  (moved to task_h
                 │         │
                 │         └──► Paused         (preempted by higher-priority work)
                 │                 │
-                └─────────────────┘            (resumed when preemptors finish)
+                ├─────────────────┘            (resumed when preemptors finish)
+                │
+                └──► Expired                  (TTL exceeded → task_history)
 ```
 
-Active states live in the `tasks` table. Terminal states (`completed`, `failed`) are atomically moved to `task_history`.
+Active states live in the `tasks` table. Terminal states (`completed`, `failed`, `cancelled`, `superseded`, `expired`) are atomically moved to `task_history`.
 
 ### Data flow
 
@@ -83,7 +85,10 @@ The scheduler's dispatch loop uses a two-step approach: first *peek* at the next
 
 ```mermaid
 flowchart TD
-    PEEK["peek_next()\n(non-mutating)"] --> GATE{"gate.admit()\nbackpressure + IO budget"}
+    PEEK["peek_next()\n(non-mutating)"] --> TTL{"expires_at\npassed?"}
+    TTL -- yes --> EXPIRE["expire_single()\n→ task_history"]
+    EXPIRE --> PEEK
+    TTL -- no --> GATE{"gate.admit()\nbackpressure + IO budget"}
     GATE -- rejected --> WAIT["Wait for next cycle"]
     GATE -- admitted --> POP["pop_by_id()\n(atomic claim)"]
     POP -- claimed --> SPAWN["spawn_task()"]
@@ -159,9 +164,10 @@ The run loop wakes on two signals:
 Each cycle, the loop:
 
 1. Checks if the scheduler is globally paused.
-2. Resumes paused tasks if no active preemptors remain.
-3. While `active_count < max_concurrency`: peek the next candidate, check the dispatch gate, pop-by-id if admitted, spawn the executor.
-4. Sleep until the next signal.
+2. Sweeps expired tasks (if the expiry sweep interval has elapsed).
+3. Resumes paused tasks if no active preemptors remain.
+4. While `active_count < max_concurrency`: peek the next candidate, check for TTL expiry, check the dispatch gate, pop-by-id if admitted, spawn the executor.
+5. Sleep until the next signal.
 
 ## Retry flow
 
