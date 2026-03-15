@@ -57,6 +57,7 @@ impl Scheduler {
                 task_type: sub.task_type.clone(),
                 key: sub.effective_key(),
                 label: sub.label.clone(),
+                tags: sub.tags.clone(),
             };
             let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
                 old: old_header,
@@ -110,6 +111,7 @@ impl Scheduler {
                     task_type: sub.task_type.clone(),
                     key: sub.effective_key(),
                     label: sub.label.clone(),
+                    tags: sub.tags.clone(),
                 };
                 let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
                     old: old_header,

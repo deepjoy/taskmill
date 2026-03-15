@@ -8,6 +8,8 @@
 //! - [`DependencyFailed { task_id, failed_dependency }`](SchedulerEvent::DependencyFailed)
 //!   — a blocked task was cancelled because a dependency failed
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 
@@ -62,6 +64,8 @@ pub struct TaskEventHeader {
     pub task_type: String,
     pub key: String,
     pub label: String,
+    /// Key-value metadata tags from the task record.
+    pub tags: HashMap<String, String>,
 }
 
 // ── Events ──────────────────────────────────────────────────────────

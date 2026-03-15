@@ -246,6 +246,7 @@ impl TaskRecord {
             task_type: self.task_type.clone(),
             key: self.key.clone(),
             label: self.label.clone(),
+            tags: self.tags.clone(),
         }
     }
 }
