@@ -1174,4 +1174,120 @@ mod tests {
 
         assert!(store.peek_next().await.unwrap().is_none());
     }
+
+    // ── Tag lifecycle tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_complete() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-complete")
+            .tag("env", "staging")
+            .tag("owner", "alice");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].tags.get("env").unwrap(), "staging");
+        assert_eq!(hist[0].tags.get("owner").unwrap(), "alice");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_fail() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-fail")
+            .tag("region", "us-west");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store
+            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .await
+            .unwrap();
+
+        let hist = store.failed_tasks(10).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].tags.get("region").unwrap(), "us-west");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_cancel() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-cancel")
+            .tag("priority_class", "low");
+
+        let id = store.submit(&sub).await.unwrap().id().unwrap();
+        store.cancel_to_history(id).await.unwrap();
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Cancelled);
+        assert_eq!(hist[0].tags.get("priority_class").unwrap(), "low");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_expire() {
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-expire")
+            .tag("source", "cron")
+            .ttl(Duration::from_secs(0)); // Expire immediately.
+
+        store.submit(&sub).await.unwrap();
+
+        // Small delay so expires_at is in the past.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let expired = store.expire_tasks().await.unwrap();
+        assert!(!expired.is_empty());
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Expired);
+        assert_eq!(hist[0].tags.get("source").unwrap(), "cron");
+    }
+
+    #[tokio::test]
+    async fn tags_preserved_on_recurring_requeue() {
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("recurring-tags")
+            .tag("schedule", "hourly")
+            .recurring(Duration::from_secs(3600));
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.tags.get("schedule").unwrap(), "hourly");
+
+        store
+            .complete_with_record(&task, &IoBudget::default())
+            .await
+            .unwrap();
+
+        // The next recurring instance should have the same tags.
+        let key = sub.effective_key();
+        let next = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(next.tags.get("schedule").unwrap(), "hourly");
+    }
+
+    #[tokio::test]
+    async fn tags_in_pop_next() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("pop-tags")
+            .tag("color", "blue");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.tags.get("color").unwrap(), "blue");
+    }
 }

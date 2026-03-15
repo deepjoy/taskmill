@@ -359,7 +359,9 @@ impl Default for BatchSubmission {
 ///     .key("img-001")
 ///     .priority(Priority::HIGH)
 ///     .payload_json(&my_payload)?
-///     .expected_io(IoBudget::disk(4096, 1024));
+///     .expected_io(IoBudget::disk(4096, 1024))
+///     .tag("profile", "default")
+///     .tag("source", "upload");
 /// ```
 ///
 /// For strongly-typed tasks, prefer [`TaskSubmission::from_typed`] or

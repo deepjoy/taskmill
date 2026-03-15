@@ -403,6 +403,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_inherits_parent_tags() {
+        use crate::registry::child_spawner::{ChildSpawner, ParentContext};
+        use std::sync::Arc;
+
+        let store = test_store().await;
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        // Submit a parent with tags.
+        let parent_sub = TaskSubmission::new("test")
+            .key("tagged-parent")
+            .tag("env", "prod")
+            .tag("region", "us-east");
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        let parent = store.pop_next().await.unwrap().unwrap();
+
+        let ctx = ParentContext {
+            created_at: parent.created_at,
+            ttl_seconds: None,
+            ttl_from: crate::task::TtlFrom::Submission,
+            started_at: parent.started_at,
+            tags: parent.tags.clone(),
+        };
+        let spawner = ChildSpawner::new(store.clone(), parent_id, notify, ctx);
+
+        // Spawn a child without tags — should inherit parent tags.
+        let child_sub = TaskSubmission::new("test").key("child-no-tags");
+        let outcome = spawner.spawn(child_sub).await.unwrap();
+        let child_id = outcome.id().unwrap();
+
+        let child = store.task_by_id(child_id).await.unwrap().unwrap();
+        assert_eq!(child.tags.get("env").unwrap(), "prod");
+        assert_eq!(child.tags.get("region").unwrap(), "us-east");
+    }
+
+    #[tokio::test]
+    async fn child_overrides_parent_tag() {
+        use crate::registry::child_spawner::{ChildSpawner, ParentContext};
+        use std::sync::Arc;
+
+        let store = test_store().await;
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let parent_sub = TaskSubmission::new("test")
+            .key("tagged-parent-2")
+            .tag("env", "prod")
+            .tag("region", "us-east");
+        let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
+        let parent = store.pop_next().await.unwrap().unwrap();
+
+        let ctx = ParentContext {
+            created_at: parent.created_at,
+            ttl_seconds: None,
+            ttl_from: crate::task::TtlFrom::Submission,
+            started_at: parent.started_at,
+            tags: parent.tags.clone(),
+        };
+        let spawner = ChildSpawner::new(store.clone(), parent_id, notify, ctx);
+
+        // Spawn a child that overrides "region" but inherits "env".
+        let child_sub = TaskSubmission::new("test")
+            .key("child-override")
+            .tag("region", "eu-west")
+            .tag("extra", "yes");
+        let outcome = spawner.spawn(child_sub).await.unwrap();
+        let child_id = outcome.id().unwrap();
+
+        let child = store.task_by_id(child_id).await.unwrap().unwrap();
+        assert_eq!(child.tags.get("env").unwrap(), "prod"); // Inherited.
+        assert_eq!(child.tags.get("region").unwrap(), "eu-west"); // Overridden.
+        assert_eq!(child.tags.get("extra").unwrap(), "yes"); // Child's own.
+    }
+
+    #[tokio::test]
     async fn recover_preserves_waiting_parents() {
         let store = test_store().await;
 

@@ -182,3 +182,71 @@ fn batch_submission_builder_no_defaults() {
     assert!(subs[0].group_key.is_none());
     assert_eq!(subs[0].priority, Priority::NORMAL);
 }
+
+#[test]
+fn typed_task_with_tags() {
+    use std::collections::HashMap;
+
+    #[derive(Serialize, Deserialize)]
+    struct TaggedTask {
+        profile: String,
+    }
+
+    impl TypedTask for TaggedTask {
+        const TASK_TYPE: &'static str = "tagged";
+
+        fn tags(&self) -> HashMap<String, String> {
+            HashMap::from([("profile".into(), self.profile.clone())])
+        }
+    }
+
+    let task = TaggedTask {
+        profile: "default".into(),
+    };
+    let sub = TaskSubmission::from_typed(&task);
+    assert_eq!(sub.tags.get("profile").unwrap(), "default");
+}
+
+#[test]
+fn event_header_includes_tags() {
+    use std::collections::HashMap;
+
+    let mut record = super::TaskRecord {
+        id: 42,
+        task_type: "test".into(),
+        key: "abc".into(),
+        label: "Test task".into(),
+        priority: Priority::NORMAL,
+        status: super::TaskStatus::Running,
+        payload: None,
+        expected_io: IoBudget::default(),
+        retry_count: 0,
+        last_error: None,
+        created_at: chrono::Utc::now(),
+        started_at: Some(chrono::Utc::now()),
+        parent_id: None,
+        fail_fast: true,
+        requeue: false,
+        requeue_priority: None,
+        group_key: None,
+        ttl_seconds: None,
+        ttl_from: super::TtlFrom::Submission,
+        expires_at: None,
+        run_after: None,
+        recurring_interval_secs: None,
+        recurring_max_executions: None,
+        recurring_execution_count: 0,
+        recurring_paused: false,
+        tags: HashMap::new(),
+        dependencies: Vec::new(),
+        on_dependency_failure: super::submission::DependencyFailurePolicy::Cancel,
+    };
+    record.tags.insert("env".into(), "prod".into());
+    record.tags.insert("owner".into(), "alice".into());
+
+    let header = record.event_header();
+    assert_eq!(header.task_id, 42);
+    assert_eq!(header.tags.get("env").unwrap(), "prod");
+    assert_eq!(header.tags.get("owner").unwrap(), "alice");
+    assert_eq!(header.tags.len(), 2);
+}
