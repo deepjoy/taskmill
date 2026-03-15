@@ -84,6 +84,7 @@ tokio::spawn(async move {
 | `Cancelled(TaskEventHeader)` | Task cancelled via `scheduler.cancel()` |
 | `Progress { header, percent, message }` | Progress update from executor |
 | `Waiting { task_id, children_count }` | Parent task waiting for children to complete |
+| `TaskExpired { header, age }` | Task expired (TTL exceeded) — `age` is the time since the TTL clock started |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
 
@@ -98,6 +99,7 @@ Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key
 | Error alerting | `Failed` where `will_retry` is false |
 | A "pause/resume" button | `Paused`, `Resumed` |
 | Upload status indicators | `Dispatched`, `Progress`, `Completed`, `Failed`, `Preempted` |
+| Stale task cleanup UI | `TaskExpired` |
 
 ## Querying progress
 

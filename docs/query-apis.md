@@ -34,6 +34,8 @@ Use these queries to build dashboards, debug stuck tasks, and gather analytics a
 | `history_by_key(key)` | `Vec<TaskHistoryRecord>` | All past runs matching a dedup key. |
 | `failed_tasks(limit)` | `Vec<TaskHistoryRecord>` | Recent failures with error messages. |
 
+History records include a `status` field that can be `completed`, `failed`, `cancelled`, `superseded`, or `expired`. Filter by status to find expired tasks (e.g., for analytics on TTL effectiveness).
+
 ## Aggregate queries
 
 | Method | Returns | Description |

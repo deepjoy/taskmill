@@ -141,6 +141,10 @@ impl TypedTask for ResizeTask {
 
     fn expected_io(&self) -> IoBudget { IoBudget::disk(4096, 1024) }
     fn priority(&self) -> Priority { Priority::NORMAL }
+
+    // Optional: expire if not started within 10 minutes.
+    // fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(600)) }
+    // fn ttl_from(&self) -> TtlFrom { TtlFrom::Submission }
 }
 
 // Submit:
