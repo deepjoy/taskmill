@@ -87,6 +87,8 @@ tokio::spawn(async move {
 | `TaskExpired { header, age }` | Task expired (TTL exceeded) — `age` is the time since the TTL clock started |
 | `RecurringSkipped { header, reason }` | A recurring instance was skipped (e.g., pile-up prevention) |
 | `RecurringCompleted { header, occurrences }` | A recurring schedule finished all its occurrences |
+| `TaskUnblocked { task_id }` | A blocked task's dependencies are all satisfied — it transitions to `pending` |
+| `DependencyFailed { task_id, failed_dependency }` | A blocked task was cancelled because a dependency failed permanently |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
 
@@ -103,6 +105,7 @@ Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key
 | Upload status indicators | `Dispatched`, `Progress`, `Completed`, `Failed`, `Preempted` |
 | Stale task cleanup UI | `TaskExpired` |
 | Recurring schedule monitoring | `RecurringSkipped`, `RecurringCompleted` |
+| Dependency chain tracking | `TaskUnblocked`, `DependencyFailed` |
 
 ## Querying progress
 

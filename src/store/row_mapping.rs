@@ -4,7 +4,10 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 
 use crate::priority::Priority;
-use crate::task::{HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus, TtlFrom};
+use crate::task::{
+    DependencyFailurePolicy, HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus,
+    TtlFrom,
+};
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
     // SQLite stores as "YYYY-MM-DD HH:MM:SS". Parse with chrono.
@@ -28,6 +31,7 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
     let expires_at_str: Option<String> = row.get("expires_at");
     let run_after_str: Option<String> = row.get("run_after");
     let recurring_paused_val: i32 = row.get("recurring_paused");
+    let on_dep_failure_str: String = row.get("on_dep_failure");
 
     TaskRecord {
         id: row.get("id"),
@@ -60,6 +64,11 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         recurring_max_executions: row.get("recurring_max_executions"),
         recurring_execution_count: row.get("recurring_execution_count"),
         recurring_paused: recurring_paused_val != 0,
+        // Dependencies are populated separately from the task_deps table.
+        dependencies: Vec::new(),
+        on_dependency_failure: on_dep_failure_str
+            .parse()
+            .unwrap_or(DependencyFailurePolicy::Cancel),
     }
 }
 

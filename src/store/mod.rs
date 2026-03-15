@@ -2,8 +2,19 @@
 //!
 //! [`TaskStore`] manages the active task queue and completed/failed/cancelled/superseded
 //! history in a single SQLite database. It handles deduplication, priority upgrades,
-//! retries, parent-child hierarchy, cancellation history, superseding, and automatic
-//! history pruning.
+//! retries, parent-child hierarchy, cancellation history, superseding, task
+//! dependencies, and automatic history pruning.
+//!
+//! # Dependency-related errors
+//!
+//! Submitting a task with dependencies can produce these [`StoreError`] variants:
+//!
+//! - [`InvalidDependency(i64)`](StoreError::InvalidDependency) — the referenced
+//!   task ID does not exist in the active queue or history
+//! - [`DependencyFailed(i64)`](StoreError::DependencyFailed) — the referenced
+//!   task has already failed or been cancelled
+//! - [`CyclicDependency`](StoreError::CyclicDependency) — a circular dependency
+//!   was detected at submission time
 //!
 //! Most users interact with the store through [`Scheduler`](crate::Scheduler)
 //! methods like [`submit`](crate::Scheduler::submit) and
@@ -37,6 +48,12 @@ pub enum StoreError {
     Serialization(String),
     #[error("database error: {0}")]
     Database(String),
+    #[error("dependency task {0} does not exist")]
+    InvalidDependency(i64),
+    #[error("dependency task {0} has already failed")]
+    DependencyFailed(i64),
+    #[error("circular dependency detected")]
+    CyclicDependency,
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -223,6 +240,11 @@ impl TaskStore {
             include_str!("../../migrations/005_scheduling.sql"),
         )
         .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../../migrations/006_dependencies.sql"),
+        )
+        .await?;
         Ok(())
     }
 
@@ -267,6 +289,37 @@ impl TaskStore {
         if count > 0 {
             tracing::info!(count, "recovered interrupted tasks back to pending");
         }
+
+        // Clean up stale dependency edges pointing to tasks that no longer
+        // exist (e.g. crashed mid-cancellation). Then unblock any tasks with
+        // zero remaining edges.
+        let stale = sqlx::query(
+            "DELETE FROM task_deps
+             WHERE depends_on_id NOT IN (SELECT id FROM tasks)",
+        )
+        .execute(&self.pool)
+        .await?;
+        if stale.rows_affected() > 0 {
+            tracing::info!(
+                count = stale.rows_affected(),
+                "cleaned up stale dependency edges"
+            );
+            // Unblock tasks that now have zero remaining deps.
+            let unblocked = sqlx::query(
+                "UPDATE tasks SET status = 'pending'
+                 WHERE status = 'blocked'
+                   AND id NOT IN (SELECT task_id FROM task_deps)",
+            )
+            .execute(&self.pool)
+            .await?;
+            if unblocked.rows_affected() > 0 {
+                tracing::info!(
+                    count = unblocked.rows_affected(),
+                    "unblocked tasks after stale edge cleanup"
+                );
+            }
+        }
+
         Ok(())
     }
 

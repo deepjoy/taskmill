@@ -418,6 +418,19 @@ pub(crate) async fn spawn_task(
                 // Remove from active tracking AFTER the store write completes.
                 active.remove(task_id);
                 let _ = event_tx.send(SchedulerEvent::Completed(task.event_header()));
+
+                // Resolve dependency edges: unblock tasks waiting on this one.
+                match store.resolve_dependents(task_id).await {
+                    Ok(unblocked) => {
+                        for uid in &unblocked {
+                            let _ = event_tx.send(SchedulerEvent::TaskUnblocked { task_id: *uid });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(task_id, error = %e, "failed to resolve dependents");
+                    }
+                }
+
                 work_notify.notify_one();
 
                 // If this was a child task, check if parent is ready.
@@ -463,9 +476,29 @@ pub(crate) async fn spawn_task(
                 });
                 work_notify.notify_one();
 
-                // If this child failed permanently and parent is fail_fast,
-                // cancel siblings and fail the parent.
+                // If permanent failure, propagate to dependency chain.
                 if !will_retry {
+                    match store.fail_dependents(task_id).await {
+                        Ok((failed_ids, unblocked_ids)) => {
+                            for fid in &failed_ids {
+                                let _ = event_tx.send(SchedulerEvent::DependencyFailed {
+                                    task_id: *fid,
+                                    failed_dependency: task_id,
+                                });
+                            }
+                            for uid in &unblocked_ids {
+                                let _ =
+                                    event_tx.send(SchedulerEvent::TaskUnblocked { task_id: *uid });
+                            }
+                            if !unblocked_ids.is_empty() {
+                                work_notify.notify_one();
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(task_id, error = %e, "failed to propagate failure to dependents");
+                        }
+                    }
+
                     if let Some(parent_id) = task.parent_id {
                         // Check if parent uses fail_fast.
                         if let Ok(Some(parent)) = store.task_by_id(parent_id).await {

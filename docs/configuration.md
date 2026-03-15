@@ -208,6 +208,18 @@ impl TypedTask for SyncTask {
 }
 ```
 
+## Dependency failure policy
+
+When a task declares dependencies via `.depends_on()`, you can configure what happens if a dependency fails permanently. The default is `Cancel`.
+
+| Variant | Behavior |
+|---------|----------|
+| `Cancel` (default) | The dependent task is moved to history with `DependencyFailed` status. Other dependents in the chain are also cascade-cancelled. |
+| `Fail` | The dependent is moved to history as `DependencyFailed`, but other dependents in the chain are not affected (for manual intervention). |
+| `Ignore` | The dependent is unblocked and runs anyway. The executor must handle missing upstream results. |
+
+Set per-submission with `.on_dependency_failure(DependencyFailurePolicy::Ignore)`. There is no global builder option — the default `Cancel` is appropriate for most use cases.
+
 ## Application state
 
 Executors often need shared services (HTTP clients, database connections, caches). Rather than capturing `Arc<T>` per executor, register state on the builder:

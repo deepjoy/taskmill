@@ -1,6 +1,18 @@
 //! Task submission types: [`TaskSubmission`] for single tasks, [`BatchSubmission`]
 //! for building batches with shared defaults, [`SubmitOutcome`] for per-task
 //! results, and [`BatchOutcome`] for categorized batch summaries.
+//!
+//! # Task dependencies
+//!
+//! Tasks can declare dependencies on other tasks via builder methods:
+//!
+//! - [`.depends_on(task_id)`](TaskSubmission::depends_on) — add a single dependency
+//! - [`.depends_on_all(ids)`](TaskSubmission::depends_on_all) — add multiple dependencies
+//! - [`.on_dependency_failure(policy)`](TaskSubmission::on_dependency_failure) — set the
+//!   [`DependencyFailurePolicy`] (`Cancel`, `Fail`, or `Ignore`)
+//!
+//! A task with dependencies enters [`Blocked`](crate::TaskStatus::Blocked) status
+//! and transitions to `Pending` only after all dependencies complete successfully.
 
 use std::time::Duration;
 
@@ -22,6 +34,44 @@ pub struct RecurringSchedule {
     pub initial_delay: Option<Duration>,
     /// Maximum number of executions. `None` = run indefinitely.
     pub max_executions: Option<u64>,
+}
+
+/// What happens to a dependent task when one of its dependencies fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyFailurePolicy {
+    /// Auto-cancel the dependent and record it as `DependencyFailed` (default).
+    #[default]
+    Cancel,
+    /// Move the dependent to `DependencyFailed` status in history but don't
+    /// cancel other dependents in the same chain (for manual intervention).
+    Fail,
+    /// Ignore the failure and unblock the dependent anyway.
+    /// Use with caution — the dependent must handle missing upstream results.
+    Ignore,
+}
+
+impl DependencyFailurePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Fail => "fail",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
+impl std::str::FromStr for DependencyFailurePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cancel" => Ok(Self::Cancel),
+            "fail" => Ok(Self::Fail),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(format!("unknown DependencyFailurePolicy: {other}")),
+        }
+    }
 }
 
 /// Strategy for handling duplicate dedup keys on submission.
@@ -343,6 +393,12 @@ pub struct TaskSubmission {
     /// Recurring schedule configuration. When set, the task automatically
     /// re-enqueues after each execution.
     pub recurring: Option<RecurringSchedule>,
+    /// Task IDs that this task depends on. The task enters `blocked` status
+    /// and transitions to `pending` only after all dependencies complete.
+    pub dependencies: Vec<i64>,
+    /// What happens when a dependency fails. Default: [`DependencyFailurePolicy::Cancel`].
+    #[serde(default)]
+    pub on_dependency_failure: DependencyFailurePolicy,
 }
 
 impl TaskSubmission {
@@ -379,6 +435,8 @@ impl TaskSubmission {
             payload_error: None,
             run_after: None,
             recurring: None,
+            dependencies: Vec::new(),
+            on_dependency_failure: DependencyFailurePolicy::default(),
         }
     }
 
@@ -506,6 +564,29 @@ impl TaskSubmission {
             initial_delay: None,
             max_executions: None,
         });
+        self
+    }
+
+    /// Declare that this task depends on another task completing successfully.
+    ///
+    /// The task enters `blocked` status and transitions to `pending` only
+    /// after all dependencies have completed. Can be called multiple times
+    /// to declare multiple dependencies (fan-in).
+    pub fn depends_on(mut self, task_id: i64) -> Self {
+        self.dependencies.push(task_id);
+        self
+    }
+
+    /// Declare multiple dependencies at once.
+    pub fn depends_on_all(mut self, task_ids: impl IntoIterator<Item = i64>) -> Self {
+        self.dependencies.extend(task_ids);
+        self
+    }
+
+    /// Configure behavior when a dependency fails.
+    /// Default: [`DependencyFailurePolicy::Cancel`].
+    pub fn on_dependency_failure(mut self, policy: DependencyFailurePolicy) -> Self {
+        self.on_dependency_failure = policy;
         self
     }
 

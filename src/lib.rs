@@ -27,14 +27,15 @@
 //! A task flows through a linear pipeline:
 //!
 //! ```text
-//! submit → pending ──────────────→ running → completed
-//!            ↑    ↓     ↘ paused ↗     ↘ failed (retryable → pending)
-//!  (run_after elapsed)                  ↘ failed (permanent → history)
-//!            │                          ↘ cancelled (via cancel() or supersede)
-//!    pending (gated)                    ↘ expired (TTL, cascade to children)
-//!        cancelled
-//!        superseded
-//!        expired (TTL)
+//! submit → blocked ─(deps met)─→ pending ──────────────→ running → completed
+//!                                   ↑    ↓     ↘ paused ↗     ↘ failed (retryable → pending)
+//!                         (run_after elapsed)                  ↘ failed (permanent → history)
+//!                                   │                          ↘ cancelled (via cancel() or supersede)
+//!                           pending (gated)                    ↘ expired (TTL, cascade to children)
+//!                               cancelled
+//!                               superseded
+//!                               expired (TTL)
+//!    blocked ─(dep failed)─→ dep_failed (history)
 //! ```
 //!
 //! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
@@ -177,6 +178,67 @@
 //! The scheduler optimizes idle wakeups: when the next scheduled task is far
 //! in the future, the run loop sleeps until `min(poll_interval, next_run_after)`
 //! instead of waking every poll interval.
+//!
+//! ## Task dependencies
+//!
+//! Tasks can declare **dependencies on other tasks** so they only become
+//! eligible for dispatch after their prerequisites complete. Dependencies
+//! are peer-to-peer relationships — distinct from the parent-child hierarchy
+//! used for fan-out/finalize patterns. Parent-child means "I spawned you and
+//! I finalize after you." A dependency means "I cannot start until you finish."
+//! The two compose orthogonally: a child task can depend on an unrelated peer,
+//! and a parent can depend on another peer.
+//!
+//! ### Blocked status
+//!
+//! A task with unresolved dependencies enters the [`TaskStatus::Blocked`]
+//! state. Blocked tasks are invisible to the dispatch loop — the existing
+//! `WHERE status = 'pending'` filter excludes them automatically. Resolution
+//! is event-driven: when a dependency completes, the scheduler checks whether
+//! the dependent's remaining edges have all been satisfied. If so, the task
+//! transitions to `pending` and becomes eligible for dispatch. If a dependency
+//! was already completed at submission time, its edge is skipped entirely; if
+//! all dependencies are already complete, the task starts as `pending`
+//! immediately.
+//!
+//! ### Failure policy
+//!
+//! [`DependencyFailurePolicy`] controls what happens when a dependency fails
+//! permanently (after exhausting retries):
+//!
+//! - **`Cancel`** (default) — the dependent is moved to history with
+//!   [`HistoryStatus::DependencyFailed`] and its own dependents are
+//!   cascade-failed.
+//! - **`Fail`** — same terminal status, but does not cascade to other
+//!   dependents in the same chain (useful for manual intervention).
+//! - **`Ignore`** — the failed edge is removed and, if no other edges
+//!   remain, the dependent is unblocked. Use with caution — the dependent
+//!   must tolerate missing upstream results.
+//!
+//! ### Circular dependency detection
+//!
+//! At submission time the scheduler walks the dependency graph upward from
+//! each declared dependency using iterative BFS (bounded stack depth). If
+//! the new task's ID is encountered during the walk, submission fails with
+//! a [`StoreError::CyclicDependency`] error. This catches both direct
+//! cycles (A depends on B, B depends on A) and transitive cycles
+//! (A → B → C → A).
+//!
+//! ### Interaction with other features
+//!
+//! - **Dedup**: a blocked task still occupies its dedup key. Duplicate
+//!   submissions follow normal [`DuplicateStrategy`] rules.
+//! - **TTL**: a blocked task's TTL clock ticks normally. If the TTL expires
+//!   while blocked, the task moves to history as [`HistoryStatus::Expired`]
+//!   and its edges are cleaned up.
+//! - **Recurring**: recurring tasks can declare dependencies. Each generated
+//!   instance starts as `blocked` independently — useful for "run B every
+//!   hour, but only after A's latest run completes."
+//! - **Delayed**: `run_after` and dependencies compose. A task with both
+//!   starts as `blocked`, transitions to `pending` when deps are met, but
+//!   is still gated by `run_after` in the dispatch query.
+//! - **Groups**: blocked tasks are not dispatched, so they do not count
+//!   against group concurrency limits.
 //!
 //! ## Cancellation
 //!
@@ -557,6 +619,88 @@
 //! scheduler.cancel_recurring(task_id).await?;
 //! ```
 //!
+//! ## Task chains
+//!
+//! Use [`TaskSubmission::depends_on`] to build dependency chains between
+//! independent tasks. Unlike parent-child relationships (which model
+//! fan-out from a single executor), chains connect separately submitted
+//! tasks into ordered workflows.
+//!
+//! ### Sequential chain
+//!
+//! Upload a file, verify its checksum, then delete the local copy:
+//!
+//! ```ignore
+//! let upload = scheduler.submit(
+//!     TaskSubmission::new("upload").key("file-a").payload_json(&upload_plan)
+//! ).await?;
+//!
+//! let verify = scheduler.submit(
+//!     TaskSubmission::new("verify")
+//!         .key("file-a-verify")
+//!         .depends_on(upload.id().unwrap())
+//!         .payload_json(&verify_plan)
+//! ).await?;
+//!
+//! scheduler.submit(
+//!     TaskSubmission::new("delete-local")
+//!         .key("file-a-delete")
+//!         .depends_on(verify.id().unwrap())
+//!         .payload_json(&delete_plan)
+//! ).await?;
+//! ```
+//!
+//! ### Fan-in
+//!
+//! Multiple uploads converging on a single finalize step:
+//!
+//! ```ignore
+//! let mut upload_ids = Vec::new();
+//! for part in &parts {
+//!     let outcome = scheduler.submit(
+//!         TaskSubmission::new("upload-part")
+//!             .key(&part.key)
+//!             .payload_json(part)
+//!     ).await?;
+//!     upload_ids.push(outcome.id().unwrap());
+//! }
+//!
+//! scheduler.submit(
+//!     TaskSubmission::new("finalize")
+//!         .key("finalize-upload")
+//!         .depends_on_all(upload_ids)
+//!         .payload_json(&finalize_plan)
+//! ).await?;
+//! ```
+//!
+//! ### Diamond dependency
+//!
+//! Task A fans out to B and C, which both converge on D:
+//!
+//! ```ignore
+//! let a = scheduler.submit(
+//!     TaskSubmission::new("extract").key("a").payload_json(&extract)
+//! ).await?;
+//! let a_id = a.id().unwrap();
+//!
+//! let b = scheduler.submit(
+//!     TaskSubmission::new("transform-x")
+//!         .key("b").depends_on(a_id).payload_json(&tx)
+//! ).await?;
+//!
+//! let c = scheduler.submit(
+//!     TaskSubmission::new("transform-y")
+//!         .key("c").depends_on(a_id).payload_json(&ty)
+//! ).await?;
+//!
+//! scheduler.submit(
+//!     TaskSubmission::new("load")
+//!         .key("d")
+//!         .depends_on_all([b.id().unwrap(), c.id().unwrap()])
+//!         .payload_json(&load)
+//! ).await?;
+//! ```
+//!
 //! ## Task superseding
 //!
 //! Use [`DuplicateStrategy::Supersede`] for "latest-value-wins" scenarios
@@ -627,10 +771,10 @@ pub use scheduler::{
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
-    generate_dedup_key, BatchOutcome, BatchSubmission, DuplicateStrategy, HistoryStatus, IoBudget,
-    ParentResolution, RecurringSchedule, RecurringScheduleInfo, SubmitOutcome, TaskError,
-    TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats,
-    TypedTask,
+    generate_dedup_key, BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy,
+    HistoryStatus, IoBudget, ParentResolution, RecurringSchedule, RecurringScheduleInfo,
+    SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus,
+    TaskSubmission, TtlFrom, TypeStats, TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

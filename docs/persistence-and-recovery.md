@@ -21,6 +21,16 @@ Delayed and recurring tasks are fully persistent and survive restarts:
 - **Missed delayed tasks run immediately** — if a task's `run_after` timestamp is in the past when the scheduler starts (e.g., the app was offline), the task is dispatched on the first cycle rather than being silently dropped.
 - **Running recurring instances are reset to pending** — this is the same behavior as all running tasks during crash recovery. The crash does not count as a retry, and the recurring schedule continues normally after the re-run completes.
 
+## Dependency recovery
+
+Task dependency edges (stored in the `task_deps` table) are fully persisted and survive restarts.
+
+- **Blocked tasks stay blocked.** Their edges are in `task_deps` and resolution happens normally when their dependencies complete.
+- **Running dependencies are reset to pending.** This is the standard crash recovery behavior for all running tasks. Once the reset dependency re-executes and completes, its dependents are unblocked as usual.
+- **Stale edge cleanup on startup.** During recovery, the scheduler deletes any edges in `task_deps` that point to tasks no longer in the active queue (e.g., if a cancellation was interrupted mid-operation). Any blocked tasks left with zero remaining edges are then transitioned to `pending`.
+
+No manual intervention is needed — dependency chains resume correctly after any restart or crash.
+
 ## Deduplication
 
 A common problem: your app submits "upload photo.jpg" twice because the user clicked a button while a sync was already running. Without dedup, you'd upload the same file twice.
