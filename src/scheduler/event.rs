@@ -35,6 +35,8 @@ pub struct SchedulerSnapshot {
     pub byte_progress: Vec<TaskProgress>,
     /// Whether the scheduler is globally paused.
     pub is_paused: bool,
+    /// Active recurring schedules with their next run times.
+    pub recurring_schedules: Vec<crate::task::RecurringScheduleInfo>,
 }
 
 // ── Task Event Header ────────────────────────────────────────────────
@@ -106,6 +108,20 @@ pub enum SchedulerEvent {
         /// How long the task lived before expiring.
         age: Duration,
     },
+    /// A recurring task instance was skipped because the previous instance
+    /// hasn't been dispatched yet (pile-up prevention).
+    RecurringSkipped {
+        header: TaskEventHeader,
+        reason: String,
+    },
+    /// A recurring task instance completed and the next instance was
+    /// (or was not) created.
+    RecurringCompleted {
+        header: TaskEventHeader,
+        execution_count: i64,
+        /// `None` if `max_executions` reached or schedule paused.
+        next_run: Option<chrono::DateTime<chrono::Utc>>,
+    },
     /// The scheduler was globally paused via [`Scheduler::pause_all`].
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
@@ -122,7 +138,9 @@ impl SchedulerEvent {
             Self::Failed { header, .. }
             | Self::Progress { header, .. }
             | Self::Superseded { old: header, .. }
-            | Self::TaskExpired { header, .. } => Some(header),
+            | Self::TaskExpired { header, .. }
+            | Self::RecurringSkipped { header, .. }
+            | Self::RecurringCompleted { header, .. } => Some(header),
             Self::Waiting { .. } | Self::BatchSubmitted { .. } | Self::Paused | Self::Resumed => {
                 None
             }

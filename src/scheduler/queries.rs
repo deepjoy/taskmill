@@ -78,6 +78,7 @@ impl Scheduler {
         let pressure = self.inner.gate.pressure().await;
         let pressure_breakdown = self.inner.gate.pressure_breakdown().await;
         let max_concurrency = self.max_concurrency();
+        let recurring_schedules = self.inner.store.recurring_schedules().await?;
 
         Ok(SchedulerSnapshot {
             running,
@@ -90,6 +91,7 @@ impl Scheduler {
             pressure_breakdown,
             max_concurrency,
             is_paused: self.is_paused(),
+            recurring_schedules,
         })
     }
 }

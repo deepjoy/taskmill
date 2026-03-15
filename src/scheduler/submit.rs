@@ -309,6 +309,37 @@ impl Scheduler {
         Ok(cancelled)
     }
 
+    /// Pause a recurring schedule. The current instance (if running) is
+    /// not affected, but no new instances will be created on completion.
+    pub async fn pause_recurring(&self, task_id: i64) -> Result<(), StoreError> {
+        self.inner.store.pause_recurring(task_id).await
+    }
+
+    /// Resume a paused recurring schedule.
+    pub async fn resume_recurring(&self, task_id: i64) -> Result<(), StoreError> {
+        self.inner.store.resume_recurring(task_id).await
+    }
+
+    /// Cancel a recurring schedule entirely. Cancels any pending instance
+    /// and prevents future ones.
+    pub async fn cancel_recurring(&self, task_id: i64) -> Result<bool, StoreError> {
+        // If it's active (running), cancel via the normal cancel path.
+        if let Some(at) = self.inner.active.remove(task_id) {
+            at.token.cancel();
+            self.inner
+                .store
+                .cancel_to_history_with_record(&at.record)
+                .await?;
+            self.fire_on_cancel(&at.record).await;
+            let _ = self
+                .inner
+                .event_tx
+                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+            return Ok(true);
+        }
+        self.inner.store.cancel_recurring(task_id).await
+    }
+
     /// Handle the scheduler-side effects of a superseded task.
     ///
     /// If the replaced task was running (in the active map), cancel its token,

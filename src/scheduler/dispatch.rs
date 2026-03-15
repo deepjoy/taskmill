@@ -396,8 +396,24 @@ pub(crate) async fn spawn_task(
                     }
                 }
 
-                if let Err(e) = store.complete_with_record(&task, &metrics).await {
-                    tracing::error!(task_id, error = %e, "failed to record task completion");
+                match store.complete_with_record(&task, &metrics).await {
+                    Ok(recurring_info) => {
+                        // Emit recurring event if this was a recurring task.
+                        if task.recurring_interval_secs.is_some() {
+                            let (next_run, exec_count) = match recurring_info {
+                                Some((next, count)) => (Some(next), count),
+                                None => (None, task.recurring_execution_count + 1),
+                            };
+                            let _ = event_tx.send(SchedulerEvent::RecurringCompleted {
+                                header: task.event_header(),
+                                execution_count: exec_count,
+                                next_run,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(task_id, error = %e, "failed to record task completion");
+                    }
                 }
                 // Remove from active tracking AFTER the store write completes.
                 active.remove(task_id);

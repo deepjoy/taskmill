@@ -28,8 +28,8 @@ pub(crate) async fn insert_history(
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
             retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key,
-            ttl_seconds, ttl_from, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ttl_seconds, ttl_from, expires_at, run_after)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.task_type)
     .bind(&task.key)
@@ -62,6 +62,10 @@ pub(crate) async fn insert_history(
         task.expires_at
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
     )
+    .bind(
+        task.run_after
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+    )
     .execute(&mut **conn)
     .await?;
     Ok(())
@@ -77,13 +81,15 @@ impl TaskStore {
     // ── Pop / lifecycle ─────────────────────────────────────────────
 
     /// Peek at the highest-priority pending task without modifying it.
-    /// Returns `None` if the queue is empty.
+    /// Returns `None` if the queue is empty. Tasks with a future `run_after`
+    /// timestamp are excluded (not yet eligible for dispatch).
     pub async fn peek_next(&self) -> Result<Option<TaskRecord>, StoreError> {
         let row = sqlx::query(
             "SELECT * FROM tasks
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
+                   AND (run_after IS NULL OR run_after <= datetime('now'))
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )",
@@ -123,7 +129,8 @@ impl TaskStore {
     }
 
     /// Pop the highest-priority pending task and mark it as running.
-    /// Returns `None` if the queue is empty.
+    /// Returns `None` if the queue is empty. Tasks with a future `run_after`
+    /// timestamp are excluded.
     ///
     /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
     /// the first pop.
@@ -140,6 +147,7 @@ impl TaskStore {
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
+                   AND (run_after IS NULL OR run_after <= datetime('now'))
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )
@@ -180,7 +188,7 @@ impl TaskStore {
         let Some(row) = row else { return Ok(()) };
         let task = row_to_task_record(&row);
 
-        Self::complete_inner(&mut conn, &task, metrics).await?;
+        let _recurring = Self::complete_inner(&mut conn, &task, metrics).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -195,15 +203,18 @@ impl TaskStore {
     /// redundant `SELECT *` round-trip. The `requeue` flag is still checked
     /// from the database row since it may have been set by a concurrent
     /// `submit()` while the task was running.
+    ///
+    /// Returns `Some((next_run, execution_count))` if a recurring next
+    /// instance was created, `None` otherwise.
     pub async fn complete_with_record(
         &self,
         task: &TaskRecord,
         metrics: &IoBudget,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, i64)>, StoreError> {
         tracing::debug!(task_id = task.id, "store.complete_with_record: BEGIN tx");
         let mut conn = self.begin_write().await?;
 
-        Self::complete_inner(&mut conn, task, metrics).await?;
+        let recurring_info = Self::complete_inner(&mut conn, task, metrics).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -211,15 +222,19 @@ impl TaskStore {
 
         self.maybe_prune().await;
 
-        Ok(())
+        Ok(recurring_info)
     }
 
-    /// Shared completion logic: insert history, then handle requeue or delete.
+    /// Shared completion logic: insert history, handle recurring next instance,
+    /// then handle requeue or delete.
+    ///
+    /// Returns `Some((next_run, exec_count))` if a recurring next instance was
+    /// created, `None` otherwise.
     async fn complete_inner(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         task: &TaskRecord,
         metrics: &IoBudget,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<(chrono::DateTime<chrono::Utc>, i64)>, StoreError> {
         let duration_ms = compute_duration_ms(task);
 
         // Insert into history.
@@ -252,9 +267,85 @@ impl TaskStore {
             .bind(task.id)
             .execute(&mut **conn)
             .await?;
+            // Don't create recurring next instance if requeued.
+            return Ok(None);
         }
 
-        Ok(())
+        // Handle recurring tasks: create the next instance after deleting
+        // the completed one (to avoid UNIQUE constraint on key).
+        let mut recurring_info = None;
+        if let Some(interval) = task.recurring_interval_secs {
+            if !task.recurring_paused {
+                let execution_count = task.recurring_execution_count + 1;
+                let should_create = task
+                    .recurring_max_executions
+                    .map_or(true, |max| execution_count < max);
+
+                if should_create {
+                    // Pile-up prevention: check if a pending instance already exists
+                    // (e.g. from a concurrent submit with the same key).
+                    let existing: Option<(i64,)> =
+                        sqlx::query_as("SELECT id FROM tasks WHERE key = ? AND status = 'pending'")
+                            .bind(&task.key)
+                            .fetch_optional(&mut **conn)
+                            .await?;
+
+                    if existing.is_none() {
+                        let next_run = chrono::Utc::now() + chrono::Duration::seconds(interval);
+                        let next_run_str = next_run.format("%Y-%m-%d %H:%M:%S").to_string();
+                        let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
+
+                        // Compute TTL columns for the next instance.
+                        let expires_at_str: Option<String> = match (task.ttl_seconds, task.ttl_from)
+                        {
+                            (Some(ttl_secs), crate::task::TtlFrom::Submission) => {
+                                let exp = chrono::Utc::now() + chrono::Duration::seconds(ttl_secs);
+                                Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+                            }
+                            _ => None,
+                        };
+
+                        sqlx::query(
+                            "INSERT INTO tasks (task_type, key, label, priority, status, payload,
+                                expected_read_bytes, expected_write_bytes,
+                                expected_net_rx_bytes, expected_net_tx_bytes,
+                                parent_id, fail_fast, group_key,
+                                ttl_seconds, ttl_from, expires_at,
+                                run_after, recurring_interval_secs,
+                                recurring_max_executions, recurring_execution_count,
+                                recurring_paused)
+                             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                        )
+                        .bind(&task.task_type)
+                        .bind(&task.key)
+                        .bind(&task.label)
+                        .bind(task.priority.value() as i32)
+                        .bind(&task.payload)
+                        .bind(task.expected_io.disk_read)
+                        .bind(task.expected_io.disk_write)
+                        .bind(task.expected_io.net_rx)
+                        .bind(task.expected_io.net_tx)
+                        .bind(task.parent_id)
+                        .bind(fail_fast_val)
+                        .bind(&task.group_key)
+                        .bind(task.ttl_seconds)
+                        .bind(task.ttl_from.as_str())
+                        .bind(&expires_at_str)
+                        .bind(&next_run_str)
+                        .bind(task.recurring_interval_secs)
+                        .bind(task.recurring_max_executions)
+                        .bind(execution_count)
+                        .execute(&mut **conn)
+                        .await?;
+
+                        recurring_info = Some((next_run, execution_count));
+                    }
+                    // If existing.is_some(), skip (pile-up prevention).
+                }
+            }
+        }
+
+        Ok(recurring_info)
     }
 
     /// Mark a task as failed. If `retryable` and under max retries, requeue

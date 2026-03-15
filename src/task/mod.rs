@@ -29,7 +29,8 @@ use crate::priority::Priority;
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
 pub use submission::{
-    BatchOutcome, BatchSubmission, DuplicateStrategy, SubmitOutcome, TaskSubmission,
+    BatchOutcome, BatchSubmission, DuplicateStrategy, RecurringSchedule, SubmitOutcome,
+    TaskSubmission,
 };
 pub use typed::TypedTask;
 
@@ -178,6 +179,17 @@ pub struct TaskRecord {
     pub ttl_from: TtlFrom,
     /// Pre-computed expiry datetime. `None` means never expires.
     pub expires_at: Option<DateTime<Utc>>,
+    /// Delayed dispatch: task is pending but not eligible until this
+    /// timestamp. `None` means immediately eligible.
+    pub run_after: Option<DateTime<Utc>>,
+    /// Recurring interval in seconds. `None` means non-recurring.
+    pub recurring_interval_secs: Option<i64>,
+    /// Maximum number of recurring executions. `None` means unlimited.
+    pub recurring_max_executions: Option<i64>,
+    /// Number of recurring executions completed so far.
+    pub recurring_execution_count: i64,
+    /// Whether the recurring schedule is paused (no new instances created).
+    pub recurring_paused: bool,
 }
 
 impl TaskRecord {
@@ -237,6 +249,8 @@ pub struct TaskHistoryRecord {
     pub ttl_from: TtlFrom,
     /// Pre-computed expiry datetime. `None` means never expires.
     pub expires_at: Option<DateTime<Utc>>,
+    /// Delayed dispatch timestamp at submission time (diagnostic).
+    pub run_after: Option<DateTime<Utc>>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.
@@ -293,6 +307,19 @@ pub enum TaskLookup {
     History(TaskHistoryRecord),
     /// No task with this key exists in either table.
     NotFound,
+}
+
+/// Information about an active recurring schedule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecurringScheduleInfo {
+    pub task_id: i64,
+    pub task_type: String,
+    pub label: String,
+    pub interval_secs: i64,
+    pub next_run: Option<DateTime<Utc>>,
+    pub execution_count: i64,
+    pub max_executions: Option<i64>,
+    pub paused: bool,
 }
 
 /// Aggregate statistics for a task type from history.

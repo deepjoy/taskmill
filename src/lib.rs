@@ -27,11 +27,14 @@
 //! A task flows through a linear pipeline:
 //!
 //! ```text
-//! submit → pending → running → completed
-//!            ↓     ↘ paused ↗     ↘ failed (retryable → pending)
-//!        cancelled                 ↘ failed (permanent → history)
-//!        superseded                ↘ cancelled (via cancel() or supersede)
-//!        expired (TTL)             ↘ expired (TTL, cascade to children)
+//! submit → pending ──────────────→ running → completed
+//!            ↑    ↓     ↘ paused ↗     ↘ failed (retryable → pending)
+//!  (run_after elapsed)                  ↘ failed (permanent → history)
+//!            │                          ↘ cancelled (via cancel() or supersede)
+//!    pending (gated)                    ↘ expired (TTL, cascade to children)
+//!        cancelled
+//!        superseded
+//!        expired (TTL)
 //! ```
 //!
 //! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
@@ -142,6 +145,38 @@
 //! Child tasks without an explicit TTL inherit the **remaining** parent TTL
 //! (with `TtlFrom::Submission`), so a child can never outlive its parent's
 //! deadline.
+//!
+//! ## Delayed & scheduled tasks
+//!
+//! A task can declare **when** it becomes eligible for dispatch:
+//!
+//! - **Immediate** (default) — dispatched as soon as a slot is free.
+//! - **Delayed** (one-shot) — [`TaskSubmission::run_after`] or
+//!   [`TaskSubmission::run_at`] sets a `run_after` timestamp. The task enters
+//!   `pending` immediately but is invisible to the dispatch loop until its
+//!   timestamp passes.
+//! - **Recurring** — [`TaskSubmission::recurring`] or
+//!   [`TaskSubmission::recurring_schedule`] configures automatic re-enqueueing.
+//!   After each execution, the scheduler creates a new pending instance with
+//!   `run_after` set to `now + interval`.
+//!
+//! Delayed tasks interact naturally with other features:
+//! - **Priority**: `run_after` tasks respect normal priority ordering among
+//!   eligible tasks.
+//! - **TTL**: A delayed task's TTL clock ticks from submission (or first
+//!   attempt). If the TTL expires before `run_after`, the task expires.
+//! - **Dedup**: Recurring tasks reuse the same dedup key. Pile-up prevention
+//!   skips creating a new instance if the previous one is still pending.
+//! - **Parent/Child**: Recurring tasks cannot be children (enforced at submit).
+//!
+//! Recurring schedules can be paused, resumed, or cancelled via
+//! [`Scheduler::pause_recurring`], [`Scheduler::resume_recurring`], and
+//! [`Scheduler::cancel_recurring`]. Pausing stops new instances from being
+//! created without affecting any currently running instance.
+//!
+//! The scheduler optimizes idle wakeups: when the next scheduled task is far
+//! in the future, the run loop sleeps until `min(poll_interval, next_run_after)`
+//! instead of waking every poll interval.
 //!
 //! ## Cancellation
 //!
@@ -486,6 +521,42 @@
 //! }
 //! ```
 //!
+//! ## Scheduled tasks
+//!
+//! Delay a task or create recurring schedules:
+//!
+//! ```ignore
+//! use std::time::Duration;
+//! use taskmill::{TaskSubmission, RecurringSchedule};
+//!
+//! // One-shot delay — dispatch after 30 seconds.
+//! let sub = TaskSubmission::new("cleanup")
+//!     .key("stale-uploads")
+//!     .run_after(Duration::from_secs(30));
+//! scheduler.submit(&sub).await?;
+//!
+//! // Recurring — abort stale uploads every 6 hours.
+//! let sub = TaskSubmission::new("cleanup")
+//!     .key("stale-uploads")
+//!     .recurring(Duration::from_secs(6 * 3600));
+//! scheduler.submit(&sub).await?;
+//!
+//! // Full schedule control — initial delay, max executions.
+//! let sub = TaskSubmission::new("sync")
+//!     .key("daily-sync")
+//!     .recurring_schedule(RecurringSchedule {
+//!         interval: Duration::from_secs(86400),
+//!         initial_delay: Some(Duration::from_secs(60)),
+//!         max_executions: Some(30),
+//!     });
+//! scheduler.submit(&sub).await?;
+//!
+//! // Pause/resume/cancel recurring schedules.
+//! scheduler.pause_recurring(task_id).await?;
+//! scheduler.resume_recurring(task_id).await?;
+//! scheduler.cancel_recurring(task_id).await?;
+//! ```
+//!
 //! ## Task superseding
 //!
 //! Use [`DuplicateStrategy::Supersede`] for "latest-value-wins" scenarios
@@ -557,8 +628,9 @@ pub use scheduler::{
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, DuplicateStrategy, HistoryStatus, IoBudget,
-    ParentResolution, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord,
-    TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask,
+    ParentResolution, RecurringSchedule, RecurringScheduleInfo, SubmitOutcome, TaskError,
+    TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats,
+    TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]
