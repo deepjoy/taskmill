@@ -30,6 +30,7 @@
 
 pub mod dedup;
 mod error;
+pub mod retry;
 mod submission;
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,7 @@ use crate::priority::Priority;
 
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
+pub use retry::{BackoffStrategy, RetryPolicy};
 pub use submission::{
     BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy, RecurringSchedule,
     SubmitOutcome, TaskSubmission, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,

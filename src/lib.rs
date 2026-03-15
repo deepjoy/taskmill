@@ -792,11 +792,11 @@ pub use scheduler::{
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
-    generate_dedup_key, BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy,
-    HistoryStatus, IoBudget, ParentResolution, RecurringSchedule, RecurringScheduleInfo,
-    SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus,
-    TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN,
-    MAX_TAG_VALUE_LEN,
+    generate_dedup_key, BackoffStrategy, BatchOutcome, BatchSubmission, DependencyFailurePolicy,
+    DuplicateStrategy, HistoryStatus, IoBudget, ParentResolution, RecurringSchedule,
+    RecurringScheduleInfo, RetryPolicy, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup,
+    TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK,
+    MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 
 #[cfg(feature = "sysinfo-monitor")]
