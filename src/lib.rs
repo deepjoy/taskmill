@@ -487,7 +487,7 @@ pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, DuplicateStrategy, HistoryStatus, IoBudget,
     ParentResolution, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord,
-    TaskStatus, TaskSubmission, TypeStats, TypedTask,
+    TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

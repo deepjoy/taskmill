@@ -100,6 +100,12 @@ pub enum SchedulerEvent {
         /// Task IDs that were inserted (new tasks only, not upgrades/requeues).
         inserted_ids: Vec<i64>,
     },
+    /// A task expired because its TTL elapsed before execution started.
+    TaskExpired {
+        header: TaskEventHeader,
+        /// How long the task lived before expiring.
+        age: Duration,
+    },
     /// The scheduler was globally paused via [`Scheduler::pause_all`].
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`].
@@ -115,7 +121,8 @@ impl SchedulerEvent {
             }
             Self::Failed { header, .. }
             | Self::Progress { header, .. }
-            | Self::Superseded { old: header, .. } => Some(header),
+            | Self::Superseded { old: header, .. }
+            | Self::TaskExpired { header, .. } => Some(header),
             Self::Waiting { .. } | Self::BatchSubmitted { .. } | Self::Paused | Self::Resumed => {
                 None
             }
@@ -187,6 +194,12 @@ pub struct SchedulerConfig {
     /// hooks. If a cancel hook does not complete within this duration it is
     /// aborted. Default: 30 seconds.
     pub cancel_hook_timeout: Duration,
+    /// Default TTL applied to tasks that don't specify one. `None` (default)
+    /// means no global TTL.
+    pub default_ttl: Option<Duration>,
+    /// How often to sweep for expired tasks. `None` disables periodic sweeps
+    /// (dispatch-time checks still apply). Default: `Some(30s)`.
+    pub expiry_sweep_interval: Option<Duration>,
 }
 
 impl Default for SchedulerConfig {
@@ -200,6 +213,8 @@ impl Default for SchedulerConfig {
             shutdown_mode: ShutdownMode::Hard,
             progress_interval: None,
             cancel_hook_timeout: Duration::from_secs(30),
+            default_ttl: None,
+            expiry_sweep_interval: Some(Duration::from_secs(30)),
         }
     }
 }

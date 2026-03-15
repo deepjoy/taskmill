@@ -16,13 +16,31 @@ use super::progress::ProgressReporter;
 use super::{Scheduler, SchedulerEvent};
 
 impl Scheduler {
+    /// Resolve the effective TTL for a submission.
+    ///
+    /// Priority: per-task TTL > per-type TTL > global default TTL > None
+    fn resolve_ttl(&self, sub: &mut TaskSubmission) {
+        if sub.ttl.is_some() {
+            return; // per-task TTL takes precedence
+        }
+        if let Some(type_ttl) = self.inner.registry.type_ttl(&sub.task_type) {
+            sub.ttl = Some(*type_ttl);
+            return;
+        }
+        if let Some(default_ttl) = self.inner.default_ttl {
+            sub.ttl = Some(default_ttl);
+        }
+    }
+
     /// Submit a task.
     ///
     /// If the task's priority meets the preemption threshold, running tasks
     /// with lower priority are preempted (their cancellation tokens are cancelled
     /// and they are paused in the store).
     pub async fn submit(&self, sub: &TaskSubmission) -> Result<SubmitOutcome, StoreError> {
-        let outcome = self.inner.store.submit(sub).await?;
+        let mut sub = sub.clone();
+        self.resolve_ttl(&mut sub);
+        let outcome = self.inner.store.submit(&sub).await?;
 
         // Handle superseded tasks.
         if let SubmitOutcome::Superseded {
@@ -72,10 +90,15 @@ impl Scheduler {
         &self,
         submissions: &[TaskSubmission],
     ) -> Result<BatchOutcome, StoreError> {
-        let results = self.inner.store.submit_batch(submissions).await?;
+        // Resolve TTLs for all submissions.
+        let mut resolved: Vec<TaskSubmission> = submissions.to_vec();
+        for sub in &mut resolved {
+            self.resolve_ttl(sub);
+        }
+        let results = self.inner.store.submit_batch(&resolved).await?;
 
         // Handle superseded tasks.
-        for (sub, outcome) in submissions.iter().zip(results.iter()) {
+        for (sub, outcome) in resolved.iter().zip(results.iter()) {
             if let SubmitOutcome::Superseded {
                 new_task_id,
                 replaced_task_id,
@@ -97,7 +120,7 @@ impl Scheduler {
 
         // Find the highest (lowest numeric value) priority among tasks that
         // were inserted or had their priority upgraded.
-        let best_priority = submissions
+        let best_priority = resolved
             .iter()
             .zip(results.iter())
             .filter(|(_, outcome)| {
@@ -124,7 +147,7 @@ impl Scheduler {
         if any_changed {
             let inserted_ids = outcome.inserted();
             let _ = self.inner.event_tx.send(SchedulerEvent::BatchSubmitted {
-                count: submissions.len(),
+                count: resolved.len(),
                 inserted_ids,
             });
 

@@ -27,8 +27,9 @@ pub(crate) async fn insert_history(
         "INSERT INTO task_history (task_type, key, label, priority, status, payload,
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
-            retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key,
+            ttl_seconds, ttl_from, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.task_type)
     .bind(&task.key)
@@ -55,6 +56,12 @@ pub(crate) async fn insert_history(
     .bind(task.parent_id)
     .bind(fail_fast_val)
     .bind(&task.group_key)
+    .bind(task.ttl_seconds)
+    .bind(task.ttl_from.as_str())
+    .bind(
+        task.expires_at
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+    )
     .execute(&mut **conn)
     .await?;
     Ok(())
@@ -90,10 +97,20 @@ impl TaskStore {
     /// Atomically claim a specific pending task by id, setting it to running.
     /// Returns `None` if the task is no longer pending (e.g. claimed by another
     /// dispatcher or cancelled).
+    ///
+    /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on the
+    /// first pop (when `expires_at IS NULL` and `ttl_seconds IS NOT NULL`).
     pub async fn pop_by_id(&self, id: i64) -> Result<Option<TaskRecord>, StoreError> {
         tracing::debug!(task_id = id, "store.pop_by_id: UPDATE start");
         let row = sqlx::query(
-            "UPDATE tasks SET status = 'running', started_at = datetime('now')
+            "UPDATE tasks SET
+                status = 'running',
+                started_at = datetime('now'),
+                expires_at = CASE
+                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    ELSE expires_at
+                END
              WHERE id = ? AND status = 'pending'
              RETURNING *",
         )
@@ -107,9 +124,19 @@ impl TaskStore {
 
     /// Pop the highest-priority pending task and mark it as running.
     /// Returns `None` if the queue is empty.
+    ///
+    /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
+    /// the first pop.
     pub async fn pop_next(&self) -> Result<Option<TaskRecord>, StoreError> {
         let row = sqlx::query(
-            "UPDATE tasks SET status = 'running', started_at = datetime('now')
+            "UPDATE tasks SET
+                status = 'running',
+                started_at = datetime('now'),
+                expires_at = CASE
+                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    ELSE expires_at
+                END
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
@@ -402,6 +429,128 @@ impl TaskStore {
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         Ok(())
+    }
+
+    /// Sweep for expired tasks and move them to history.
+    ///
+    /// Finds tasks whose `expires_at` has passed and that are still pending
+    /// or paused, records them in history as "expired", cascade-expires their
+    /// pending/paused children, and deletes them from the active queue.
+    ///
+    /// Returns the expired task records (for event emission).
+    pub async fn expire_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
+        let mut conn = self.begin_write().await?;
+
+        // Find expired tasks.
+        let rows = sqlx::query(
+            "SELECT * FROM tasks
+             WHERE expires_at IS NOT NULL
+               AND expires_at <= datetime('now')
+               AND status IN ('pending', 'paused')
+             ORDER BY expires_at ASC
+             LIMIT 500",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let mut expired = Vec::with_capacity(rows.len());
+
+        for row in &rows {
+            let task = row_to_task_record(row);
+
+            // Record in history as expired.
+            insert_history(
+                &mut conn,
+                &task,
+                "expired",
+                &IoBudget::default(),
+                None,
+                None,
+            )
+            .await?;
+
+            // Cascade: expire pending/paused children.
+            let child_rows = sqlx::query(
+                "SELECT * FROM tasks
+                 WHERE parent_id = ? AND status IN ('pending', 'paused')",
+            )
+            .bind(task.id)
+            .fetch_all(&mut *conn)
+            .await?;
+
+            for child_row in &child_rows {
+                let child = row_to_task_record(child_row);
+                insert_history(
+                    &mut conn,
+                    &child,
+                    "expired",
+                    &IoBudget::default(),
+                    None,
+                    None,
+                )
+                .await?;
+                sqlx::query("DELETE FROM tasks WHERE id = ?")
+                    .bind(child.id)
+                    .execute(&mut *conn)
+                    .await?;
+                expired.push(child);
+            }
+
+            // Delete the expired task itself.
+            sqlx::query("DELETE FROM tasks WHERE id = ?")
+                .bind(task.id)
+                .execute(&mut *conn)
+                .await?;
+
+            expired.push(task);
+        }
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok(expired)
+    }
+
+    /// Expire a single task by ID if it has passed its `expires_at`.
+    ///
+    /// Returns `Some(task)` if the task was expired, `None` if it wasn't
+    /// found, not expired, or not in an expirable state.
+    pub async fn expire_single(&self, id: i64) -> Result<Option<TaskRecord>, StoreError> {
+        let mut conn = self.begin_write().await?;
+
+        let row = sqlx::query(
+            "SELECT * FROM tasks
+             WHERE id = ?
+               AND expires_at IS NOT NULL
+               AND expires_at <= datetime('now')
+               AND status IN ('pending', 'paused')",
+        )
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
+
+        let Some(row) = row else {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            return Ok(None);
+        };
+
+        let task = row_to_task_record(&row);
+
+        insert_history(
+            &mut conn,
+            &task,
+            "expired",
+            &IoBudget::default(),
+            None,
+            None,
+        )
+        .await?;
+
+        sqlx::query("DELETE FROM tasks WHERE id = ?")
+            .bind(task.id)
+            .execute(&mut *conn)
+            .await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok(Some(task))
     }
 }
 

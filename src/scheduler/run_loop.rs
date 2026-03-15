@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 use crate::store::StoreError;
 use crate::task::IoBudget;
 
+use super::SchedulerEvent;
+
 use super::dispatch::{self, SpawnContext};
 use super::gate::GateContext;
 use super::{Scheduler, ShutdownMode};
@@ -43,6 +45,23 @@ impl Scheduler {
         let Some(candidate) = self.inner.store.peek_next().await? else {
             return Ok(false);
         };
+
+        // Dispatch-time expiry check: if the candidate has expired, expire
+        // it and retry (return Ok(true) to loop again).
+        if let Some(expires_at) = candidate.expires_at {
+            if expires_at <= chrono::Utc::now() {
+                if let Ok(Some(task)) = self.inner.store.expire_single(candidate.id).await {
+                    let age = (chrono::Utc::now() - task.created_at)
+                        .to_std()
+                        .unwrap_or_default();
+                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
+                        header: task.event_header(),
+                        age,
+                    });
+                }
+                return Ok(true);
+            }
+        }
 
         // Build gate context from current state.
         let reader_guard = self.inner.resource_reader.lock().await;
@@ -195,11 +214,49 @@ impl Scheduler {
         }
     }
 
+    /// Run the periodic expiry sweep if the interval has elapsed.
+    async fn maybe_expire_tasks(&self) {
+        let Some(interval) = self.inner.expiry_sweep_interval else {
+            return;
+        };
+        let should_sweep = {
+            let last = self.inner.last_expiry_sweep.lock().unwrap();
+            last.elapsed() >= interval
+        };
+        if !should_sweep {
+            return;
+        }
+        *self.inner.last_expiry_sweep.lock().unwrap() = tokio::time::Instant::now();
+
+        match self.inner.store.expire_tasks().await {
+            Ok(expired) => {
+                for task in &expired {
+                    let age = (chrono::Utc::now() - task.created_at)
+                        .to_std()
+                        .unwrap_or_default();
+                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
+                        header: task.event_header(),
+                        age,
+                    });
+                }
+                if !expired.is_empty() {
+                    tracing::info!(count = expired.len(), "expired stale tasks");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "expiry sweep failed");
+            }
+        }
+    }
+
     /// Resume paused tasks, dispatch finalizers, and dispatch pending work.
     async fn poll_and_dispatch(&self) {
         if self.is_paused() {
             return;
         }
+
+        // Run expiry sweep before dispatching.
+        self.maybe_expire_tasks().await;
 
         // Resume paused tasks only if no active preemptors exist.
         if let Ok(paused) = self.inner.store.paused_tasks().await {

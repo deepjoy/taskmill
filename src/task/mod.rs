@@ -33,6 +33,39 @@ pub use submission::{
 };
 pub use typed::TypedTask;
 
+/// When the TTL clock starts ticking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TtlFrom {
+    /// TTL starts at submission time (default). `expires_at` is set immediately.
+    #[default]
+    Submission,
+    /// TTL starts at first execution attempt. `expires_at` is set when the
+    /// task transitions from pending to running for the first time.
+    FirstAttempt,
+}
+
+impl TtlFrom {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Submission => "submission",
+            Self::FirstAttempt => "first_attempt",
+        }
+    }
+}
+
+impl std::str::FromStr for TtlFrom {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "submission" => Ok(Self::Submission),
+            "first_attempt" => Ok(Self::FirstAttempt),
+            other => Err(format!("unknown TtlFrom: {other}")),
+        }
+    }
+}
+
 /// Lifecycle state of a task in the active queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +112,7 @@ pub enum HistoryStatus {
     Failed,
     Cancelled,
     Superseded,
+    Expired,
 }
 
 impl HistoryStatus {
@@ -88,6 +122,7 @@ impl HistoryStatus {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Superseded => "superseded",
+            Self::Expired => "expired",
         }
     }
 }
@@ -101,6 +136,7 @@ impl std::str::FromStr for HistoryStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             "superseded" => Ok(Self::Superseded),
+            "expired" => Ok(Self::Expired),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }
@@ -136,6 +172,12 @@ pub struct TaskRecord {
     /// Optional group key for per-group concurrency limiting (e.g. an
     /// endpoint URL). Tasks in the same group share a concurrency budget.
     pub group_key: Option<String>,
+    /// Original TTL duration in seconds. `None` means no TTL.
+    pub ttl_seconds: Option<i64>,
+    /// When the TTL clock starts.
+    pub ttl_from: TtlFrom,
+    /// Pre-computed expiry datetime. `None` means never expires.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl TaskRecord {
@@ -189,6 +231,12 @@ pub struct TaskHistoryRecord {
     pub fail_fast: bool,
     /// Optional group key for per-group concurrency limiting.
     pub group_key: Option<String>,
+    /// Original TTL duration in seconds. `None` means no TTL.
+    pub ttl_seconds: Option<i64>,
+    /// When the TTL clock starts.
+    pub ttl_from: TtlFrom,
+    /// Pre-computed expiry datetime. `None` means never expires.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.

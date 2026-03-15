@@ -217,6 +217,7 @@ impl TaskStore {
             include_str!("../../migrations/003_net_io_and_groups.sql"),
         )
         .await?;
+        Self::run_alter_migration(&self.pool, include_str!("../../migrations/004_ttl.sql")).await?;
         Ok(())
     }
 

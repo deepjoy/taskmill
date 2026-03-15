@@ -41,7 +41,11 @@ pub struct SchedulerBuilder {
     store_path: Option<String>,
     store_config: StoreConfig,
     store: Option<TaskStore>,
-    executors: Vec<(String, Arc<dyn crate::registry::ErasedExecutor>)>,
+    executors: Vec<(
+        String,
+        Arc<dyn crate::registry::ErasedExecutor>,
+        Option<Duration>,
+    )>,
     config: SchedulerConfig,
     pressure_sources: Vec<Box<dyn crate::backpressure::PressureSource + 'static>>,
     policy: Option<ThrottlePolicy>,
@@ -98,6 +102,25 @@ impl SchedulerBuilder {
         self.executors.push((
             name.to_string(),
             executor as Arc<dyn crate::registry::ErasedExecutor>,
+            None,
+        ));
+        self
+    }
+
+    /// Register a task executor with a per-type default TTL.
+    ///
+    /// Tasks of this type that don't specify their own TTL will use this
+    /// duration as their TTL.
+    pub fn executor_with_ttl<E: TaskExecutor>(
+        mut self,
+        name: &str,
+        executor: Arc<E>,
+        ttl: Duration,
+    ) -> Self {
+        self.executors.push((
+            name.to_string(),
+            executor as Arc<dyn crate::registry::ErasedExecutor>,
+            Some(ttl),
         ));
         self
     }
@@ -155,6 +178,24 @@ impl SchedulerBuilder {
     /// Default: 30 seconds.
     pub fn cancel_hook_timeout(mut self, timeout: Duration) -> Self {
         self.config.cancel_hook_timeout = timeout;
+        self
+    }
+
+    /// Set the default TTL applied to tasks without an explicit TTL.
+    ///
+    /// `None` (default) means no global TTL.
+    pub fn default_ttl(mut self, ttl: Duration) -> Self {
+        self.config.default_ttl = Some(ttl);
+        self
+    }
+
+    /// Set the expiry sweep interval.
+    ///
+    /// Controls how often the scheduler sweeps for expired tasks. `None`
+    /// disables periodic sweeps (dispatch-time checks still apply).
+    /// Default: `Some(30s)`.
+    pub fn expiry_sweep_interval(mut self, interval: Option<Duration>) -> Self {
+        self.config.expiry_sweep_interval = interval;
         self
     }
 
@@ -289,11 +330,15 @@ impl SchedulerBuilder {
 
         // Build registry.
         let mut registry = crate::registry::TaskTypeRegistry::new();
-        for (name, executor) in self.executors {
+        for (name, executor, ttl) in self.executors {
             if registry.get(&name).is_some() {
                 panic!("task type '{name}' already registered");
             }
-            registry.register_erased(&name, executor);
+            if let Some(ttl) = ttl {
+                registry.register_erased_with_ttl(&name, executor, ttl);
+            } else {
+                registry.register_erased(&name, executor);
+            }
         }
 
         // Prepare resource monitoring reader early so NetworkPressure can

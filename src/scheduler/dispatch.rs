@@ -296,7 +296,15 @@ pub(crate) async fn spawn_task(
     let child_token = CancellationToken::new();
 
     // Build execution context.
-    let child_spawner = ChildSpawner::new(store.clone(), task.id, work_notify.clone());
+    let child_spawner = ChildSpawner::new(
+        store.clone(),
+        task.id,
+        work_notify.clone(),
+        task.created_at,
+        task.ttl_seconds,
+        task.ttl_from,
+        task.started_at,
+    );
     let io = Arc::new(IoTracker::new());
 
     // Insert into active map before spawning to avoid races.
