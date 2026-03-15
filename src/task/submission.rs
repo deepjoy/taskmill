@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::priority::Priority;
@@ -11,6 +12,17 @@ use crate::priority::Priority;
 use super::dedup::generate_dedup_key;
 use super::typed::TypedTask;
 use super::{IoBudget, TtlFrom};
+
+/// Configuration for recurring task schedules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecurringSchedule {
+    /// Interval between consecutive executions.
+    pub interval: Duration,
+    /// Initial delay before the first execution. `None` = start immediately.
+    pub initial_delay: Option<Duration>,
+    /// Maximum number of executions. `None` = run indefinitely.
+    pub max_executions: Option<u64>,
+}
 
 /// Strategy for handling duplicate dedup keys on submission.
 ///
@@ -325,6 +337,12 @@ pub struct TaskSubmission {
     /// Surfaced at submit time as [`StoreError::Serialization`](crate::StoreError::Serialization).
     #[serde(skip)]
     pub(crate) payload_error: Option<String>,
+    /// Delayed dispatch: task enters `pending` but is not eligible for dispatch
+    /// until this timestamp. `None` = immediately eligible.
+    pub run_after: Option<DateTime<Utc>>,
+    /// Recurring schedule configuration. When set, the task automatically
+    /// re-enqueues after each execution.
+    pub recurring: Option<RecurringSchedule>,
 }
 
 impl TaskSubmission {
@@ -359,6 +377,8 @@ impl TaskSubmission {
             ttl: None,
             ttl_from: TtlFrom::default(),
             payload_error: None,
+            run_after: None,
+            recurring: None,
         }
     }
 
@@ -460,6 +480,46 @@ impl TaskSubmission {
         self
     }
 
+    /// Delay execution by `delay` from submission time.
+    ///
+    /// The task enters `pending` immediately but is not eligible for
+    /// dispatch until `now + delay`. Combines with priority, TTL, etc.
+    pub fn run_after(mut self, delay: Duration) -> Self {
+        self.run_after = Some(Utc::now() + delay);
+        self
+    }
+
+    /// Schedule execution at a specific wall-clock time.
+    ///
+    /// If `at` is in the past, the task is immediately eligible.
+    pub fn run_at(mut self, at: DateTime<Utc>) -> Self {
+        self.run_after = Some(at);
+        self
+    }
+
+    /// Make this a recurring task that re-enqueues every `interval`.
+    ///
+    /// First execution is immediate (unless combined with `run_after`).
+    pub fn recurring(mut self, interval: Duration) -> Self {
+        self.recurring = Some(RecurringSchedule {
+            interval,
+            initial_delay: None,
+            max_executions: None,
+        });
+        self
+    }
+
+    /// Make this a recurring task with full schedule control.
+    pub fn recurring_schedule(mut self, schedule: RecurringSchedule) -> Self {
+        if let Some(delay) = schedule.initial_delay {
+            if self.run_after.is_none() {
+                self.run_after = Some(Utc::now() + delay);
+            }
+        }
+        self.recurring = Some(schedule);
+        self
+    }
+
     /// Resolve the effective dedup key. Always incorporates the task type
     /// so different task types never collide, even with the same logical key.
     ///
@@ -473,8 +533,8 @@ impl TaskSubmission {
     }
 
     /// Create a submission from a [`TypedTask`], serializing the payload and
-    /// pulling task type, priority, IO estimates, key, label, and group key
-    /// from the trait.
+    /// pulling task type, priority, IO estimates, key, label, group key,
+    /// scheduling delay, and recurring schedule from the trait.
     pub fn from_typed<T: TypedTask>(task: &T) -> Self {
         let mut sub = Self::new(T::TASK_TYPE)
             .priority(task.priority())
@@ -493,6 +553,12 @@ impl TaskSubmission {
         }
         if let Some(g) = task.group_key() {
             sub = sub.group(g);
+        }
+        if let Some(delay) = task.run_after() {
+            sub = sub.run_after(delay);
+        }
+        if let Some(sched) = task.recurring() {
+            sub = sub.recurring_schedule(sched);
         }
         sub
     }

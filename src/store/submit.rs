@@ -43,9 +43,27 @@ pub(crate) async fn submit_one(
         _ => None, // FirstAttempt: set on pop; no TTL: NULL
     };
 
+    // Compute scheduling columns.
+    let run_after_str: Option<String> = sub
+        .run_after
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    let recurring_interval_secs: Option<i64> =
+        sub.recurring.as_ref().map(|r| r.interval.as_secs() as i64);
+    let recurring_max_executions: Option<i64> = sub
+        .recurring
+        .as_ref()
+        .and_then(|r| r.max_executions.map(|n| n as i64));
+
+    // Reject recurring tasks with a parent (not supported).
+    if sub.parent_id.is_some() && sub.recurring.is_some() {
+        return Err(StoreError::Database(
+            "recurring tasks cannot be children (parent_id must be None)".into(),
+        ));
+    }
+
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at, run_after, recurring_interval_secs, recurring_max_executions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&sub.task_type)
     .bind(&key)
@@ -62,6 +80,9 @@ pub(crate) async fn submit_one(
     .bind(ttl_seconds)
     .bind(ttl_from_str)
     .bind(&expires_at)
+    .bind(&run_after_str)
+    .bind(recurring_interval_secs)
+    .bind(recurring_max_executions)
     .execute(&mut **conn)
     .await?;
 

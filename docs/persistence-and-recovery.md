@@ -13,6 +13,14 @@ When your app starts up, taskmill automatically recovers:
 
 The guarantee is **at-least-once execution**: a task might run partially, crash, and re-run from the beginning. Design your executors to be idempotent (or to check for partial work) so re-execution is safe.
 
+## Scheduled task recovery
+
+Delayed and recurring tasks are fully persistent and survive restarts:
+
+- **Recurring schedules survive restarts** — the schedule metadata (interval, remaining occurrences, paused state) is persisted in SQLite. After a restart, recurring tasks resume their schedules automatically.
+- **Missed delayed tasks run immediately** — if a task's `run_after` timestamp is in the past when the scheduler starts (e.g., the app was offline), the task is dispatched on the first cycle rather than being silently dropped.
+- **Running recurring instances are reset to pending** — this is the same behavior as all running tasks during crash recovery. The crash does not count as a retry, and the recurring schedule continues normally after the re-run completes.
+
 ## Deduplication
 
 A common problem: your app submits "upload photo.jpg" twice because the user clicked a button while a sync was already running. Without dedup, you'd upload the same file twice.

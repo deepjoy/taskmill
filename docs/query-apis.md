@@ -53,6 +53,35 @@ History records include a `status` field that can be `completed`, `failed`, `can
 | `avg_write_bytes` | `f64` | Average actual write bytes. |
 | `failure_rate` | `f64` | Fraction of tasks that failed (0.0–1.0). A rate above 0.1 may indicate a systemic issue. |
 
+## Scheduled and recurring task queries
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `next_run_after()` | `Option<DateTime<Utc>>` | Earliest `run_after` timestamp among pending delayed tasks. Useful for knowing when the next scheduled task will fire. |
+| `recurring_schedules()` | `Vec<RecurringScheduleInfo>` | All active recurring schedules with their interval, remaining occurrences, and paused state. |
+
+The `SchedulerSnapshot` also includes recurring schedule information:
+
+```rust
+let snap = scheduler.snapshot().await?;
+// snap.recurring_schedules — Vec<RecurringScheduleInfo> for all active schedules
+```
+
+### Managing recurring schedules
+
+Pause, resume, or cancel recurring schedules via the `Scheduler`:
+
+```rust
+// Pause — stops new occurrences from being enqueued
+scheduler.pause_recurring(task_id).await?;
+
+// Resume — re-enables the schedule from where it left off
+scheduler.resume_recurring(task_id).await?;
+
+// Cancel — permanently removes the recurring schedule
+scheduler.cancel_recurring(task_id).await?;
+```
+
 ## Unified lookup
 
 Search both active and history tables by dedup key — useful for checking whether a task has been submitted or has already completed:

@@ -217,6 +217,74 @@ let token = CancellationToken::new();
 scheduler.run(token).await;
 ```
 
+## Delayed and recurring tasks
+
+### Delayed tasks
+
+You can schedule a task to run after a specific delay or at a specific point in time. The task stays in the queue but won't be dispatched until the scheduled time arrives.
+
+```rust
+use std::time::Duration;
+use chrono::Utc;
+
+// Run after a delay
+let sub = TaskSubmission::new("cleanup")
+    .payload_json(&serde_json::json!({"path": "/tmp/stale"}))
+    .run_after(Duration::from_secs(3600)); // run in 1 hour
+scheduler.submit(&sub).await?;
+
+// Run at a specific time
+let sub = TaskSubmission::new("report")
+    .payload_json(&serde_json::json!({"date": "2025-01-15"}))
+    .run_at(Utc::now() + chrono::Duration::hours(6));
+scheduler.submit(&sub).await?;
+```
+
+If the `run_after` time is in the past (e.g., because the app was offline), the task runs immediately on the next dispatch cycle.
+
+### Recurring tasks
+
+A recurring task automatically re-submits itself on a schedule after each completion. Configure the schedule with `RecurringSchedule`:
+
+```rust
+use taskmill::RecurringSchedule;
+
+let sub = TaskSubmission::new("sync")
+    .payload_json(&serde_json::json!({"source": "remote"}))
+    .recurring(RecurringSchedule::new(Duration::from_secs(300))); // every 5 minutes
+scheduler.submit(&sub).await?;
+```
+
+`RecurringSchedule` supports additional options:
+
+```rust
+let schedule = RecurringSchedule::new(Duration::from_secs(60))
+    .max_occurrences(100)          // stop after 100 runs
+    .initial_delay(Duration::from_secs(10)); // wait 10s before the first run
+
+let sub = TaskSubmission::new("heartbeat")
+    .payload_json(&serde_json::json!({}))
+    .recurring_schedule(schedule);
+scheduler.submit(&sub).await?;
+```
+
+Pile-up prevention is built in: if a recurring instance hasn't been dispatched yet when the next occurrence is due, the new instance is skipped to avoid unbounded queue growth.
+
+### Managing recurring schedules
+
+Recurring schedules can be paused, resumed, or cancelled at runtime:
+
+```rust
+// Pause — stops new occurrences from being enqueued
+scheduler.pause_recurring(task_id).await?;
+
+// Resume — re-enables the schedule
+scheduler.resume_recurring(task_id).await?;
+
+// Cancel — permanently stops the schedule and removes it
+scheduler.cancel_recurring(task_id).await?;
+```
+
 ## Tauri integration
 
 Taskmill is designed for Tauri. The `Scheduler` drops directly into Tauri state, and all events are serializable for IPC.

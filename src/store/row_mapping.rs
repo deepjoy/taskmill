@@ -26,6 +26,8 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
 
     let ttl_from_str: String = row.get("ttl_from");
     let expires_at_str: Option<String> = row.get("expires_at");
+    let run_after_str: Option<String> = row.get("run_after");
+    let recurring_paused_val: i32 = row.get("recurring_paused");
 
     TaskRecord {
         id: row.get("id"),
@@ -53,6 +55,11 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         ttl_seconds: row.get("ttl_seconds"),
         ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
         expires_at: expires_at_str.map(|s| parse_datetime(&s)),
+        run_after: run_after_str.map(|s| parse_datetime(&s)),
+        recurring_interval_secs: row.get("recurring_interval_secs"),
+        recurring_max_executions: row.get("recurring_max_executions"),
+        recurring_execution_count: row.get("recurring_execution_count"),
+        recurring_paused: recurring_paused_val != 0,
     }
 }
 
@@ -79,6 +86,7 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
 
     let ttl_from_str: String = row.get("ttl_from");
     let expires_at_str: Option<String> = row.get("expires_at");
+    let run_after_str: Option<String> = row.get("run_after");
 
     TaskHistoryRecord {
         id: row.get("id"),
@@ -107,5 +115,6 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         ttl_seconds: row.get("ttl_seconds"),
         ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
         expires_at: expires_at_str.map(|s| parse_datetime(&s)),
+        run_after: run_after_str.map(|s| parse_datetime(&s)),
     }
 }

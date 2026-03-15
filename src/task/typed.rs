@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::priority::Priority;
 
-use super::submission::DuplicateStrategy;
+use super::submission::{DuplicateStrategy, RecurringSchedule};
 use super::{IoBudget, TtlFrom};
 
 /// A strongly-typed task that bundles serialization, task type name, and default
@@ -76,5 +76,15 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// When the TTL clock starts. Default: [`TtlFrom::Submission`].
     fn ttl_from(&self) -> TtlFrom {
         TtlFrom::default()
+    }
+
+    /// Optional initial delay before first dispatch. Default: `None`.
+    fn run_after(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Optional recurring schedule. Default: `None` (one-shot).
+    fn recurring(&self) -> Option<RecurringSchedule> {
+        None
     }
 }

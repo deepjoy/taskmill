@@ -198,6 +198,17 @@ impl Scheduler {
         }
 
         loop {
+            // Compute sleep duration: min(poll_interval, time until next scheduled task).
+            let sleep_dur = match self.inner.store.next_run_after().await {
+                Ok(Some(next)) => {
+                    let until_next = (next - chrono::Utc::now())
+                        .to_std()
+                        .unwrap_or(std::time::Duration::ZERO);
+                    std::cmp::min(self.inner.poll_interval, until_next)
+                }
+                _ => self.inner.poll_interval,
+            };
+
             tokio::select! {
                 _ = token.cancelled() => {
                     tracing::info!("taskmill scheduler shutting down");
@@ -207,7 +218,7 @@ impl Scheduler {
                 _ = self.inner.work_notify.notified() => {
                     self.poll_and_dispatch().await;
                 }
-                _ = tokio::time::sleep(self.inner.poll_interval) => {
+                _ = tokio::time::sleep(sleep_dur) => {
                     self.poll_and_dispatch().await;
                 }
             }

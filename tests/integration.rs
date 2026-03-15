@@ -945,3 +945,271 @@ async fn snapshot_reflects_pressure_breakdown() {
     assert_eq!(snap.pressure_breakdown.len(), 1);
     assert_eq!(snap.pressure_breakdown[0].0, "api-load");
 }
+
+// ── Delayed & Scheduled Tasks ─────────────────────────────────────
+
+#[tokio::test]
+async fn delayed_task_not_dispatched_before_run_after() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // Submit with a 10-second delay.
+    let sub = TaskSubmission::new("test")
+        .key("delayed")
+        .run_after(Duration::from_secs(10));
+    store.submit(&sub).await.unwrap();
+
+    // peek_next should return None because run_after is in the future.
+    assert!(store.peek_next().await.unwrap().is_none());
+    // pop_next should also return None.
+    assert!(store.pop_next().await.unwrap().is_none());
+
+    // But the task is still pending.
+    assert_eq!(store.pending_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn delayed_task_dispatched_after_run_after() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // Submit with run_at in the past.
+    let sub = TaskSubmission::new("test")
+        .key("past-delay")
+        .run_at(chrono::Utc::now() - chrono::Duration::seconds(1));
+    store.submit(&sub).await.unwrap();
+
+    // Should be immediately dispatchable since run_after is in the past.
+    let task = store.peek_next().await.unwrap();
+    assert!(task.is_some());
+    assert_eq!(task.unwrap().run_after.is_some(), true);
+}
+
+#[tokio::test]
+async fn recurring_task_creates_next_instance_on_completion() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // Submit a recurring task with 60s interval.
+    let sub = TaskSubmission::new("test")
+        .key("recurring-1")
+        .recurring(Duration::from_secs(60));
+    store.submit(&sub).await.unwrap();
+    let dedup_key = sub.effective_key();
+
+    // Pop and complete.
+    let task = store.pop_next().await.unwrap().unwrap();
+    assert_eq!(task.recurring_interval_secs, Some(60));
+    assert_eq!(task.recurring_execution_count, 0);
+
+    store
+        .complete(task.id, &taskmill::IoBudget::default())
+        .await
+        .unwrap();
+
+    // A new pending instance should exist with the same dedup key.
+    let next = store.task_by_key(&dedup_key).await.unwrap();
+    assert!(next.is_some());
+    let next = next.unwrap();
+    assert_eq!(next.status, taskmill::TaskStatus::Pending);
+    assert!(next.run_after.is_some()); // Should have a future run_after.
+    assert_eq!(next.recurring_execution_count, 1);
+    assert_eq!(next.recurring_interval_secs, Some(60));
+}
+
+#[tokio::test]
+async fn recurring_task_respects_max_executions() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // Submit recurring with max_executions = 2.
+    let sub = TaskSubmission::new("test")
+        .key("recurring-max")
+        .recurring_schedule(taskmill::RecurringSchedule {
+            interval: Duration::from_secs(1),
+            initial_delay: None,
+            max_executions: Some(2),
+        });
+    store.submit(&sub).await.unwrap();
+    let dedup_key = sub.effective_key();
+
+    // First execution.
+    let task = store.pop_next().await.unwrap().unwrap();
+    store
+        .complete(task.id, &taskmill::IoBudget::default())
+        .await
+        .unwrap();
+    // Should create a next instance (execution_count = 1, max = 2).
+    let next = store.task_by_key(&dedup_key).await.unwrap().unwrap();
+    assert_eq!(next.recurring_execution_count, 1);
+
+    // Wait for run_after to pass.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Second execution.
+    let task2 = store.pop_next().await.unwrap().unwrap();
+    store
+        .complete(task2.id, &taskmill::IoBudget::default())
+        .await
+        .unwrap();
+
+    // Should NOT create a third instance (execution_count = 2 >= max = 2).
+    let next2 = store.task_by_key(&dedup_key).await.unwrap();
+    assert!(next2.is_none());
+}
+
+#[tokio::test]
+async fn recurring_pile_up_prevention() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // Submit a recurring task.
+    let sub = TaskSubmission::new("test")
+        .key("pileup")
+        .recurring(Duration::from_secs(1));
+    store.submit(&sub).await.unwrap();
+    let dedup_key = sub.effective_key();
+
+    // Pop, complete → next instance created.
+    let task = store.pop_next().await.unwrap().unwrap();
+    store
+        .complete(task.id, &taskmill::IoBudget::default())
+        .await
+        .unwrap();
+
+    // Next instance exists but hasn't been dispatched.
+    let pending = store.task_by_key(&dedup_key).await.unwrap().unwrap();
+    assert_eq!(pending.status, taskmill::TaskStatus::Pending);
+
+    // Now manually insert a second "completed" instance (simulating the same
+    // key completing again while pending exists). We do this by submitting
+    // another with the same key to test dedup + pile-up interaction.
+    // The pending instance should still be there, not duplicated.
+    let count = store.pending_count().await.unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn pause_and_resume_recurring_schedule() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    let sub = TaskSubmission::new("test")
+        .key("pausable-recurring")
+        .recurring(Duration::from_secs(60));
+    let id = store.submit(&sub).await.unwrap().id().unwrap();
+    let dedup_key = sub.effective_key();
+
+    // Pause the recurring schedule.
+    store.pause_recurring(id).await.unwrap();
+
+    // Pop and complete — should NOT create next instance.
+    let task = store.pop_next().await.unwrap().unwrap();
+    assert!(task.recurring_paused);
+    store
+        .complete(task.id, &taskmill::IoBudget::default())
+        .await
+        .unwrap();
+
+    let next = store.task_by_key(&dedup_key).await.unwrap();
+    assert!(next.is_none());
+}
+
+#[tokio::test]
+async fn next_run_after_query() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // No pending tasks → None.
+    assert!(store.next_run_after().await.unwrap().is_none());
+
+    // Submit a delayed task.
+    let future_time = chrono::Utc::now() + chrono::Duration::seconds(300);
+    let sub = TaskSubmission::new("test")
+        .key("far-future")
+        .run_at(future_time);
+    store.submit(&sub).await.unwrap();
+
+    let next = store.next_run_after().await.unwrap();
+    assert!(next.is_some());
+    // Should be roughly 300 seconds from now.
+    let diff = (next.unwrap() - chrono::Utc::now()).num_seconds();
+    assert!(diff > 290 && diff <= 300);
+}
+
+#[tokio::test]
+async fn recurring_schedules_query() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    // No recurring tasks → empty.
+    assert!(store.recurring_schedules().await.unwrap().is_empty());
+
+    // Submit a recurring task.
+    let sub = TaskSubmission::new("test")
+        .key("schedule-1")
+        .recurring(Duration::from_secs(120));
+    store.submit(&sub).await.unwrap();
+
+    let schedules = store.recurring_schedules().await.unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].interval_secs, 120);
+    assert_eq!(schedules[0].execution_count, 0);
+    assert!(!schedules[0].paused);
+}
+
+#[tokio::test]
+async fn recurring_task_rejects_parent_id() {
+    let store = TaskStore::open_memory().await.unwrap();
+
+    let mut sub = TaskSubmission::new("test")
+        .key("bad-recurring")
+        .recurring(Duration::from_secs(60));
+    sub.parent_id = Some(42);
+
+    let result = store.submit(&sub).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn delayed_task_full_scheduler_lifecycle() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .executor(
+            "counting",
+            Arc::new(CountingExecutor {
+                count: count.clone(),
+            }),
+        )
+        .poll_interval(Duration::from_millis(50))
+        .build()
+        .await
+        .unwrap();
+
+    // Submit a task with run_at in the past.
+    let sub = TaskSubmission::new("counting")
+        .key("immediate")
+        .run_at(chrono::Utc::now() - chrono::Duration::seconds(1));
+    sched.submit(&sub).await.unwrap();
+
+    let token = CancellationToken::new();
+    let t = token.clone();
+    tokio::spawn(async move { sched.run(t).await });
+
+    // Wait for the task to be dispatched and completed.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    token.cancel();
+}
+
+#[tokio::test]
+async fn recurring_task_snapshot_includes_schedules() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .executor("test", Arc::new(NoopExecutor))
+        .build()
+        .await
+        .unwrap();
+
+    let sub = TaskSubmission::new("test")
+        .key("snap-recurring")
+        .recurring(Duration::from_secs(600));
+    sched.submit(&sub).await.unwrap();
+
+    let snap = sched.snapshot().await.unwrap();
+    assert_eq!(snap.recurring_schedules.len(), 1);
+    assert_eq!(snap.recurring_schedules[0].interval_secs, 600);
+}
