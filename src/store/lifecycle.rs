@@ -112,7 +112,11 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Atomically claim a specific pending task by id, setting it to running.
@@ -140,7 +144,11 @@ impl TaskStore {
         .await?;
         tracing::debug!(task_id = id, "store.pop_by_id: UPDATE end");
 
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Pop the highest-priority pending task and mark it as running.
@@ -171,7 +179,11 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| row_to_task_record(&r)))
+        let mut record = row.map(|r| row_to_task_record(&r));
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Atomically requeue a running task back to pending.
@@ -792,7 +804,8 @@ impl TaskStore {
         let mut expired = Vec::with_capacity(rows.len());
 
         for row in &rows {
-            let task = row_to_task_record(row);
+            let mut task = row_to_task_record(row);
+            task.tags = super::load_task_tags(&mut conn, task.id).await?;
 
             // Record in history as expired.
             insert_history(
@@ -815,7 +828,8 @@ impl TaskStore {
             .await?;
 
             for child_row in &child_rows {
-                let child = row_to_task_record(child_row);
+                let mut child = row_to_task_record(child_row);
+                child.tags = super::load_task_tags(&mut conn, child.id).await?;
                 insert_history(
                     &mut conn,
                     &child,
@@ -884,7 +898,8 @@ impl TaskStore {
             return Ok(None);
         };
 
-        let task = row_to_task_record(&row);
+        let mut task = row_to_task_record(&row);
+        task.tags = super::load_task_tags(&mut conn, task.id).await?;
 
         insert_history(
             &mut conn,

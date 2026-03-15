@@ -1,5 +1,7 @@
 //! Read-only query methods for the active queue and history tables.
 
+use std::collections::HashMap;
+
 use sqlx::Row;
 
 use crate::task::{TaskHistoryRecord, TaskLookup, TaskRecord, TypeStats};
@@ -8,6 +10,66 @@ use super::row_mapping::{row_to_history_record, row_to_task_record};
 use super::{StoreError, TaskStore};
 
 impl TaskStore {
+    // ── Tag population ─────────────────────────────────────────────
+
+    /// Populate tags for a slice of task records from the task_tags table.
+    pub(crate) async fn populate_tags(&self, records: &mut [TaskRecord]) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query =
+            format!("SELECT task_id, key, value FROM task_tags WHERE task_id IN ({placeholders})");
+        let mut q = sqlx::query_as::<_, (i64, String, String)>(&query);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        let tag_rows = q.fetch_all(&self.pool).await?;
+
+        let mut tag_map: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        for (task_id, key, value) in tag_rows {
+            tag_map.entry(task_id).or_default().insert(key, value);
+        }
+        for record in records {
+            if let Some(tags) = tag_map.remove(&record.id) {
+                record.tags = tags;
+            }
+        }
+        Ok(())
+    }
+
+    /// Populate tags for a slice of history records from the task_history_tags table.
+    pub(crate) async fn populate_history_tags(
+        &self,
+        records: &mut [TaskHistoryRecord],
+    ) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT history_rowid, key, value FROM task_history_tags WHERE history_rowid IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (i64, String, String)>(&query);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        let tag_rows = q.fetch_all(&self.pool).await?;
+
+        let mut tag_map: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        for (history_rowid, key, value) in tag_rows {
+            tag_map.entry(history_rowid).or_default().insert(key, value);
+        }
+        for record in records {
+            if let Some(tags) = tag_map.remove(&record.id) {
+                record.tags = tags;
+            }
+        }
+        Ok(())
+    }
+
     // ── Query: active queue ─────────────────────────────────────────
 
     /// All currently running tasks.
@@ -17,7 +79,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of running tasks.
@@ -36,7 +100,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of pending tasks.
@@ -55,7 +121,9 @@ impl TaskStore {
         .bind(task_type)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of paused tasks.
@@ -73,7 +141,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Look up an active task by its row id. Returns `None` if no active
@@ -83,7 +153,11 @@ impl TaskStore {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Look up an active task by its dedup key. Returns `None` if no active
@@ -93,7 +167,11 @@ impl TaskStore {
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Sum of expected read/write bytes for all running tasks.
@@ -136,7 +214,11 @@ impl TaskStore {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_history_record))
+        let mut record = row.as_ref().map(row_to_history_record);
+        if let Some(ref mut r) = record {
+            self.populate_history_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Recent history entries, newest first.
@@ -151,7 +233,9 @@ impl TaskStore {
                 .bind(offset)
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// History filtered by task type.
@@ -167,7 +251,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// History for a specific key (all past runs of that key).
@@ -177,7 +263,9 @@ impl TaskStore {
                 .bind(key)
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Failed tasks from history.
@@ -188,7 +276,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Aggregate stats for a task type from completed history.
@@ -252,6 +342,7 @@ impl TaskStore {
     /// or [`TaskSubmission::effective_key`]).
     pub async fn task_lookup(&self, key: &str) -> Result<TaskLookup, StoreError> {
         // Check active queue first (pending / running / paused).
+        // task_by_key already populates tags.
         if let Some(record) = self.task_by_key(key).await? {
             return Ok(TaskLookup::Active(record));
         }
@@ -265,7 +356,12 @@ impl TaskStore {
         .await?;
 
         match row {
-            Some(r) => Ok(TaskLookup::History(row_to_history_record(&r))),
+            Some(r) => {
+                let mut hist = row_to_history_record(&r);
+                self.populate_history_tags(std::slice::from_mut(&mut hist))
+                    .await?;
+                Ok(TaskLookup::History(hist))
+            }
             None => Ok(TaskLookup::NotFound),
         }
     }
@@ -287,7 +383,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks in a specific group.
@@ -296,7 +394,9 @@ impl TaskStore {
             .bind(group_key)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks of a specific type.
@@ -305,7 +405,9 @@ impl TaskStore {
             .bind(task_type)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks (any status).
@@ -313,7 +415,9 @@ impl TaskStore {
         let rows = sqlx::query("SELECT * FROM tasks ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     // ── Scheduling ─────────────────────────────────────────────────
@@ -392,7 +496,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of blocked tasks.

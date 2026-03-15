@@ -446,6 +446,19 @@ pub(crate) async fn delete_task_tags(
     Ok(())
 }
 
+/// Load tags for a single task within an existing connection/transaction.
+pub(crate) async fn load_task_tags(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    task_id: i64,
+) -> Result<std::collections::HashMap<String, String>, StoreError> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, value FROM task_tags WHERE task_id = ?")
+            .bind(task_id)
+            .fetch_all(&mut **conn)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Insert tags for a task into the task_tags table.
 pub(crate) async fn insert_tags(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
