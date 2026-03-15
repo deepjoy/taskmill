@@ -69,6 +69,20 @@ pub(crate) async fn insert_history(
     )
     .execute(&mut **conn)
     .await?;
+
+    // Copy tags from task_tags to task_history_tags.
+    let history_rowid = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+        .fetch_one(&mut **conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO task_history_tags (history_rowid, key, value)
+         SELECT ?, key, value FROM task_tags WHERE task_id = ?",
+    )
+    .bind(history_rowid)
+    .bind(task.id)
+    .execute(&mut **conn)
+    .await?;
+
     Ok(())
 }
 
@@ -98,7 +112,11 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Atomically claim a specific pending task by id, setting it to running.
@@ -126,7 +144,11 @@ impl TaskStore {
         .await?;
         tracing::debug!(task_id = id, "store.pop_by_id: UPDATE end");
 
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Pop the highest-priority pending task and mark it as running.
@@ -157,7 +179,11 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| row_to_task_record(&r)))
+        let mut record = row.map(|r| row_to_task_record(&r));
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Atomically requeue a running task back to pending.
@@ -249,6 +275,16 @@ impl TaskStore {
         )
         .await?;
 
+        // Read tags into memory before potential deletion (needed for recurring re-creation).
+        let saved_tags: Vec<(String, String)> = if task.recurring_interval_secs.is_some() {
+            sqlx::query_as("SELECT key, value FROM task_tags WHERE task_id = ?")
+                .bind(task.id)
+                .fetch_all(&mut **conn)
+                .await?
+        } else {
+            Vec::new()
+        };
+
         // Try to delete (normal completion, requeue = 0).
         let del = sqlx::query("DELETE FROM tasks WHERE id = ? AND requeue = 0")
             .bind(task.id)
@@ -271,6 +307,9 @@ impl TaskStore {
             // Don't create recurring next instance if requeued.
             return Ok(None);
         }
+
+        // Task was deleted — clean up orphaned tags.
+        super::delete_task_tags(conn, task.id).await?;
 
         // Handle recurring tasks: create the next instance after deleting
         // the completed one (to avoid UNIQUE constraint on key).
@@ -306,7 +345,7 @@ impl TaskStore {
                             _ => None,
                         };
 
-                        sqlx::query(
+                        let recurring_result = sqlx::query(
                             "INSERT INTO tasks (task_type, key, label, priority, status, payload,
                                 expected_read_bytes, expected_write_bytes,
                                 expected_net_rx_bytes, expected_net_tx_bytes,
@@ -338,6 +377,19 @@ impl TaskStore {
                         .bind(execution_count)
                         .execute(&mut **conn)
                         .await?;
+
+                        // Copy tags to the new recurring instance.
+                        let next_id = recurring_result.last_insert_rowid();
+                        for (key, value) in &saved_tags {
+                            sqlx::query(
+                                "INSERT INTO task_tags (task_id, key, value) VALUES (?, ?, ?)",
+                            )
+                            .bind(next_id)
+                            .bind(key)
+                            .bind(value)
+                            .execute(&mut **conn)
+                            .await?;
+                        }
 
                         recurring_info = Some((next_run, execution_count));
                     }
@@ -433,6 +485,7 @@ impl TaskStore {
 
             insert_history(conn, task, "failed", metrics, duration_ms, Some(error)).await?;
 
+            super::delete_task_tags(conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(task.id)
                 .execute(&mut **conn)
@@ -576,6 +629,7 @@ impl TaskStore {
                                 .execute(&mut **conn)
                                 .await?;
 
+                            super::delete_task_tags(conn, dep_id).await?;
                             sqlx::query("DELETE FROM tasks WHERE id = ?")
                                 .bind(dep_id)
                                 .execute(&mut **conn)
@@ -672,6 +726,7 @@ impl TaskStore {
             .execute(&mut *conn)
             .await?;
 
+        super::delete_task_tags(&mut conn, id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(id)
             .execute(&mut *conn)
@@ -709,6 +764,7 @@ impl TaskStore {
             .execute(&mut *conn)
             .await?;
 
+        super::delete_task_tags(&mut conn, task.id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(task.id)
             .execute(&mut *conn)
@@ -748,7 +804,8 @@ impl TaskStore {
         let mut expired = Vec::with_capacity(rows.len());
 
         for row in &rows {
-            let task = row_to_task_record(row);
+            let mut task = row_to_task_record(row);
+            task.tags = super::load_task_tags(&mut conn, task.id).await?;
 
             // Record in history as expired.
             insert_history(
@@ -771,7 +828,8 @@ impl TaskStore {
             .await?;
 
             for child_row in &child_rows {
-                let child = row_to_task_record(child_row);
+                let mut child = row_to_task_record(child_row);
+                child.tags = super::load_task_tags(&mut conn, child.id).await?;
                 insert_history(
                     &mut conn,
                     &child,
@@ -781,6 +839,7 @@ impl TaskStore {
                     None,
                 )
                 .await?;
+                super::delete_task_tags(&mut conn, child.id).await?;
                 sqlx::query("DELETE FROM tasks WHERE id = ?")
                     .bind(child.id)
                     .execute(&mut *conn)
@@ -796,6 +855,7 @@ impl TaskStore {
                 .await?;
 
             // Delete the expired task itself.
+            super::delete_task_tags(&mut conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(task.id)
                 .execute(&mut *conn)
@@ -838,7 +898,8 @@ impl TaskStore {
             return Ok(None);
         };
 
-        let task = row_to_task_record(&row);
+        let mut task = row_to_task_record(&row);
+        task.tags = super::load_task_tags(&mut conn, task.id).await?;
 
         insert_history(
             &mut conn,
@@ -850,6 +911,7 @@ impl TaskStore {
         )
         .await?;
 
+        super::delete_task_tags(&mut conn, task.id).await?;
         sqlx::query("DELETE FROM tasks WHERE id = ?")
             .bind(task.id)
             .execute(&mut *conn)
@@ -1111,5 +1173,121 @@ mod tests {
         assert_eq!(claimed.status, TaskStatus::Running);
 
         assert!(store.peek_next().await.unwrap().is_none());
+    }
+
+    // ── Tag lifecycle tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_complete() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-complete")
+            .tag("env", "staging")
+            .tag("owner", "alice");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].tags.get("env").unwrap(), "staging");
+        assert_eq!(hist[0].tags.get("owner").unwrap(), "alice");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_fail() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-fail")
+            .tag("region", "us-west");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store
+            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .await
+            .unwrap();
+
+        let hist = store.failed_tasks(10).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].tags.get("region").unwrap(), "us-west");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_cancel() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-cancel")
+            .tag("priority_class", "low");
+
+        let id = store.submit(&sub).await.unwrap().id().unwrap();
+        store.cancel_to_history(id).await.unwrap();
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Cancelled);
+        assert_eq!(hist[0].tags.get("priority_class").unwrap(), "low");
+    }
+
+    #[tokio::test]
+    async fn tags_copied_to_history_on_expire() {
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("hist-tags-expire")
+            .tag("source", "cron")
+            .ttl(Duration::from_secs(0)); // Expire immediately.
+
+        store.submit(&sub).await.unwrap();
+
+        // Small delay so expires_at is in the past.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let expired = store.expire_tasks().await.unwrap();
+        assert!(!expired.is_empty());
+
+        let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Expired);
+        assert_eq!(hist[0].tags.get("source").unwrap(), "cron");
+    }
+
+    #[tokio::test]
+    async fn tags_preserved_on_recurring_requeue() {
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("recurring-tags")
+            .tag("schedule", "hourly")
+            .recurring(Duration::from_secs(3600));
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.tags.get("schedule").unwrap(), "hourly");
+
+        store
+            .complete_with_record(&task, &IoBudget::default())
+            .await
+            .unwrap();
+
+        // The next recurring instance should have the same tags.
+        let key = sub.effective_key();
+        let next = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(next.tags.get("schedule").unwrap(), "hourly");
+    }
+
+    #[tokio::test]
+    async fn tags_in_pop_next() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("pop-tags")
+            .tag("color", "blue");
+
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.tags.get("color").unwrap(), "blue");
     }
 }

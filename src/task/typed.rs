@@ -1,5 +1,6 @@
 //! The [`TypedTask`] trait for strongly-typed task payloads.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -23,15 +24,19 @@ use super::{IoBudget, TtlFrom};
 /// # Example
 ///
 /// ```ignore
+/// use std::collections::HashMap;
 /// use serde::{Serialize, Deserialize};
 /// use taskmill::{TypedTask, IoBudget, Priority};
 ///
 /// #[derive(Serialize, Deserialize)]
-/// struct Thumbnail { path: String, size: u32 }
+/// struct Thumbnail { path: String, size: u32, profile: String }
 ///
 /// impl TypedTask for Thumbnail {
 ///     const TASK_TYPE: &'static str = "thumbnail";
 ///     fn expected_io(&self) -> IoBudget { IoBudget::disk(4096, 1024) }
+///     fn tags(&self) -> HashMap<String, String> {
+///         HashMap::from([("profile".into(), self.profile.clone())])
+///     }
 /// }
 /// ```
 pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
@@ -86,5 +91,10 @@ pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
     /// Optional recurring schedule. Default: `None` (one-shot).
     fn recurring(&self) -> Option<RecurringSchedule> {
         None
+    }
+
+    /// Metadata tags for filtering and grouping. Default: empty.
+    fn tags(&self) -> HashMap<String, String> {
+        HashMap::new()
     }
 }

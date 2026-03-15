@@ -1,5 +1,7 @@
 //! Read-only query methods for the active queue and history tables.
 
+use std::collections::HashMap;
+
 use sqlx::Row;
 
 use crate::task::{TaskHistoryRecord, TaskLookup, TaskRecord, TypeStats};
@@ -8,6 +10,66 @@ use super::row_mapping::{row_to_history_record, row_to_task_record};
 use super::{StoreError, TaskStore};
 
 impl TaskStore {
+    // ── Tag population ─────────────────────────────────────────────
+
+    /// Populate tags for a slice of task records from the task_tags table.
+    pub(crate) async fn populate_tags(&self, records: &mut [TaskRecord]) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query =
+            format!("SELECT task_id, key, value FROM task_tags WHERE task_id IN ({placeholders})");
+        let mut q = sqlx::query_as::<_, (i64, String, String)>(&query);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        let tag_rows = q.fetch_all(&self.pool).await?;
+
+        let mut tag_map: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        for (task_id, key, value) in tag_rows {
+            tag_map.entry(task_id).or_default().insert(key, value);
+        }
+        for record in records {
+            if let Some(tags) = tag_map.remove(&record.id) {
+                record.tags = tags;
+            }
+        }
+        Ok(())
+    }
+
+    /// Populate tags for a slice of history records from the task_history_tags table.
+    pub(crate) async fn populate_history_tags(
+        &self,
+        records: &mut [TaskHistoryRecord],
+    ) -> Result<(), StoreError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT history_rowid, key, value FROM task_history_tags WHERE history_rowid IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, (i64, String, String)>(&query);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        let tag_rows = q.fetch_all(&self.pool).await?;
+
+        let mut tag_map: HashMap<i64, HashMap<String, String>> = HashMap::new();
+        for (history_rowid, key, value) in tag_rows {
+            tag_map.entry(history_rowid).or_default().insert(key, value);
+        }
+        for record in records {
+            if let Some(tags) = tag_map.remove(&record.id) {
+                record.tags = tags;
+            }
+        }
+        Ok(())
+    }
+
     // ── Query: active queue ─────────────────────────────────────────
 
     /// All currently running tasks.
@@ -17,7 +79,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of running tasks.
@@ -36,7 +100,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of pending tasks.
@@ -55,7 +121,9 @@ impl TaskStore {
         .bind(task_type)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of paused tasks.
@@ -73,7 +141,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Look up an active task by its row id. Returns `None` if no active
@@ -83,7 +153,11 @@ impl TaskStore {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Look up an active task by its dedup key. Returns `None` if no active
@@ -93,7 +167,11 @@ impl TaskStore {
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_task_record))
+        let mut record = row.as_ref().map(row_to_task_record);
+        if let Some(ref mut r) = record {
+            self.populate_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Sum of expected read/write bytes for all running tasks.
@@ -136,7 +214,11 @@ impl TaskStore {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        Ok(row.as_ref().map(row_to_history_record))
+        let mut record = row.as_ref().map(row_to_history_record);
+        if let Some(ref mut r) = record {
+            self.populate_history_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
     }
 
     /// Recent history entries, newest first.
@@ -151,7 +233,9 @@ impl TaskStore {
                 .bind(offset)
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// History filtered by task type.
@@ -167,7 +251,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// History for a specific key (all past runs of that key).
@@ -177,7 +263,9 @@ impl TaskStore {
                 .bind(key)
                 .fetch_all(&self.pool)
                 .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Failed tasks from history.
@@ -188,7 +276,9 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_history_record).collect())
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Aggregate stats for a task type from completed history.
@@ -252,6 +342,7 @@ impl TaskStore {
     /// or [`TaskSubmission::effective_key`]).
     pub async fn task_lookup(&self, key: &str) -> Result<TaskLookup, StoreError> {
         // Check active queue first (pending / running / paused).
+        // task_by_key already populates tags.
         if let Some(record) = self.task_by_key(key).await? {
             return Ok(TaskLookup::Active(record));
         }
@@ -265,7 +356,12 @@ impl TaskStore {
         .await?;
 
         match row {
-            Some(r) => Ok(TaskLookup::History(row_to_history_record(&r))),
+            Some(r) => {
+                let mut hist = row_to_history_record(&r);
+                self.populate_history_tags(std::slice::from_mut(&mut hist))
+                    .await?;
+                Ok(TaskLookup::History(hist))
+            }
             None => Ok(TaskLookup::NotFound),
         }
     }
@@ -287,7 +383,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks in a specific group.
@@ -296,7 +394,9 @@ impl TaskStore {
             .bind(group_key)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks of a specific type.
@@ -305,7 +405,9 @@ impl TaskStore {
             .bind(task_type)
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// All active tasks (any status).
@@ -313,7 +415,122 @@ impl TaskStore {
         let rows = sqlx::query("SELECT * FROM tasks ORDER BY id ASC")
             .fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    // ── Tag-based queries ───────────────────────────────────────────
+
+    /// Find active tasks matching all specified tag filters (AND semantics).
+    ///
+    /// Each `(key, value)` pair adds an INNER JOIN, so only tasks matching
+    /// **all** filters are returned. Optionally filter by status.
+    pub async fn tasks_by_tags(
+        &self,
+        filters: &[(&str, &str)],
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        if filters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from("SELECT t.* FROM tasks t");
+        for (i, _) in filters.iter().enumerate() {
+            sql.push_str(&format!(
+                " INNER JOIN task_tags tt{i} ON t.id = tt{i}.task_id AND tt{i}.key = ? AND tt{i}.value = ?"
+            ));
+        }
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" WHERE t.status = '{}'", s.as_str()));
+        }
+        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
+
+        let mut q = sqlx::query(&sql);
+        for (key, value) in filters {
+            q = q.bind(key).bind(value);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    /// Count active tasks matching all specified tag filters (AND semantics).
+    pub async fn count_by_tags(
+        &self,
+        filters: &[(&str, &str)],
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        if filters.is_empty() {
+            return Ok(0);
+        }
+
+        let mut sql = String::from("SELECT COUNT(*) FROM tasks t");
+        for (i, _) in filters.iter().enumerate() {
+            sql.push_str(&format!(
+                " INNER JOIN task_tags tt{i} ON t.id = tt{i}.task_id AND tt{i}.key = ? AND tt{i}.value = ?"
+            ));
+        }
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" WHERE t.status = '{}'", s.as_str()));
+        }
+
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+        for (key, value) in filters {
+            q = q.bind(key).bind(value);
+        }
+        let (count,) = q.fetch_one(&self.pool).await?;
+        Ok(count)
+    }
+
+    /// List distinct values for a tag key across active tasks, with counts.
+    ///
+    /// Returns `(value, count)` pairs sorted by count descending.
+    pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT value, COUNT(*) as cnt FROM task_tags WHERE key = ? GROUP BY value ORDER BY cnt DESC",
+        )
+        .bind(key)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Count active tasks grouped by a tag key's values.
+    ///
+    /// Returns `(tag_value, count)` pairs sorted by count descending.
+    /// Optionally filter by task status.
+    pub async fn count_by_tag(
+        &self,
+        key: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        let (sql, bind_status) = match status {
+            Some(ref s) => (
+                "SELECT tt.value, COUNT(*) as cnt FROM task_tags tt \
+                 JOIN tasks t ON t.id = tt.task_id \
+                 WHERE tt.key = ? AND t.status = ? \
+                 GROUP BY tt.value ORDER BY cnt DESC"
+                    .to_string(),
+                Some(s.as_str()),
+            ),
+            None => (
+                "SELECT tt.value, COUNT(*) as cnt FROM task_tags tt \
+                 JOIN tasks t ON t.id = tt.task_id \
+                 WHERE tt.key = ? \
+                 GROUP BY tt.value ORDER BY cnt DESC"
+                    .to_string(),
+                None,
+            ),
+        };
+
+        let mut q = sqlx::query_as::<_, (String, i64)>(&sql).bind(key);
+        if let Some(status_str) = bind_status {
+            q = q.bind(status_str);
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        Ok(rows)
     }
 
     // ── Scheduling ─────────────────────────────────────────────────
@@ -392,7 +609,9 @@ impl TaskStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_task_record).collect())
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
     }
 
     /// Count of blocked tasks.
@@ -597,5 +816,147 @@ mod tests {
 
         let hist = store.history(100, 0).await.unwrap();
         assert_eq!(hist.len(), 3);
+    }
+
+    // ── Tag query tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tasks_by_tags_single_filter() {
+        let store = test_store().await;
+
+        store
+            .submit(&TaskSubmission::new("test").key("tbt-1").tag("env", "prod"))
+            .await
+            .unwrap();
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key("tbt-2")
+                    .tag("env", "staging"),
+            )
+            .await
+            .unwrap();
+        store
+            .submit(&TaskSubmission::new("test").key("tbt-3").tag("env", "prod"))
+            .await
+            .unwrap();
+
+        let results = store.tasks_by_tags(&[("env", "prod")], None).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        let results = store
+            .tasks_by_tags(&[("env", "staging")], None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn tasks_by_tags_multiple_filters_and() {
+        let store = test_store().await;
+
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key("multi-1")
+                    .tag("env", "prod")
+                    .tag("region", "us"),
+            )
+            .await
+            .unwrap();
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key("multi-2")
+                    .tag("env", "prod")
+                    .tag("region", "eu"),
+            )
+            .await
+            .unwrap();
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key("multi-3")
+                    .tag("env", "staging")
+                    .tag("region", "us"),
+            )
+            .await
+            .unwrap();
+
+        // AND semantics: only task matching both filters.
+        let results = store
+            .tasks_by_tags(&[("env", "prod"), ("region", "us")], None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+
+        // With status filter.
+        let results = store
+            .tasks_by_tags(&[("env", "prod")], Some(TaskStatus::Pending))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn count_by_tag_groups() {
+        let store = test_store().await;
+
+        for i in 0..3 {
+            store
+                .submit(
+                    &TaskSubmission::new("test")
+                        .key(format!("free-{i}"))
+                        .tag("tier", "free"),
+                )
+                .await
+                .unwrap();
+        }
+        for i in 0..2 {
+            store
+                .submit(
+                    &TaskSubmission::new("test")
+                        .key(format!("pro-{i}"))
+                        .tag("tier", "pro"),
+                )
+                .await
+                .unwrap();
+        }
+
+        let groups = store.count_by_tag("tier", None).await.unwrap();
+        assert_eq!(groups.len(), 2);
+        // Sorted by count descending.
+        assert_eq!(groups[0].0, "free");
+        assert_eq!(groups[0].1, 3);
+        assert_eq!(groups[1].0, "pro");
+        assert_eq!(groups[1].1, 2);
+    }
+
+    #[tokio::test]
+    async fn tag_values_distinct() {
+        let store = test_store().await;
+
+        store
+            .submit(&TaskSubmission::new("test").key("tv-1").tag("color", "red"))
+            .await
+            .unwrap();
+        store
+            .submit(&TaskSubmission::new("test").key("tv-2").tag("color", "red"))
+            .await
+            .unwrap();
+        store
+            .submit(&TaskSubmission::new("test").key("tv-3").tag("color", "blue"))
+            .await
+            .unwrap();
+
+        let values = store.tag_values("color").await.unwrap();
+        assert_eq!(values.len(), 2);
+        // Sorted by count descending.
+        assert_eq!(values[0], ("red".to_string(), 2));
+        assert_eq!(values[1], ("blue".to_string(), 1));
+
+        // Non-existent key returns empty.
+        let empty = store.tag_values("nonexistent").await.unwrap();
+        assert!(empty.is_empty());
     }
 }

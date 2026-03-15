@@ -35,6 +35,8 @@ mod submission;
 mod tests;
 pub mod typed;
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +46,7 @@ pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
 pub use submission::{
     BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy, RecurringSchedule,
-    SubmitOutcome, TaskSubmission,
+    SubmitOutcome, TaskSubmission, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 pub use typed::TypedTask;
 
@@ -220,6 +222,8 @@ pub struct TaskRecord {
     pub dependencies: Vec<i64>,
     /// What happens when a dependency fails.
     pub on_dependency_failure: DependencyFailurePolicy,
+    /// Key-value metadata tags for filtering, grouping, and display.
+    pub tags: HashMap<String, String>,
 }
 
 impl TaskRecord {
@@ -242,6 +246,7 @@ impl TaskRecord {
             task_type: self.task_type.clone(),
             key: self.key.clone(),
             label: self.label.clone(),
+            tags: self.tags.clone(),
         }
     }
 }
@@ -281,6 +286,8 @@ pub struct TaskHistoryRecord {
     pub expires_at: Option<DateTime<Utc>>,
     /// Delayed dispatch timestamp at submission time (diagnostic).
     pub run_after: Option<DateTime<Utc>>,
+    /// Key-value metadata tags for filtering, grouping, and display.
+    pub tags: HashMap<String, String>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.

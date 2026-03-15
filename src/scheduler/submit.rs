@@ -57,6 +57,7 @@ impl Scheduler {
                 task_type: sub.task_type.clone(),
                 key: sub.effective_key(),
                 label: sub.label.clone(),
+                tags: sub.tags.clone(),
             };
             let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
                 old: old_header,
@@ -110,6 +111,7 @@ impl Scheduler {
                     task_type: sub.task_type.clone(),
                     key: sub.effective_key(),
                     label: sub.label.clone(),
+                    tags: sub.tags.clone(),
                 };
                 let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
                     old: old_header,
@@ -285,6 +287,25 @@ impl Scheduler {
     /// Cancel all tasks of a given type.
     pub async fn cancel_type(&self, task_type: &str) -> Result<Vec<i64>, StoreError> {
         let tasks = self.inner.store.tasks_by_type(task_type).await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    /// Cancel all active tasks matching a tag key-value pair.
+    ///
+    /// Finds tasks via [`TaskStore::tasks_by_tags`] and cancels each one.
+    /// Returns the ids of tasks that were successfully cancelled.
+    pub async fn cancel_by_tag(&self, key: &str, value: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .inner
+            .store
+            .tasks_by_tags(&[(key, value)], None)
+            .await?;
         let mut cancelled = Vec::new();
         for task in &tasks {
             if self.cancel(task.id).await? {

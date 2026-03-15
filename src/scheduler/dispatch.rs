@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
-use crate::registry::{ChildSpawner, IoTracker, TaskContext};
+use crate::registry::{ChildSpawner, IoTracker, ParentContext, TaskContext};
 use crate::store::TaskStore;
 use crate::task::{IoBudget, ParentResolution, TaskRecord};
 
@@ -300,10 +300,13 @@ pub(crate) async fn spawn_task(
         store.clone(),
         task.id,
         work_notify.clone(),
-        task.created_at,
-        task.ttl_seconds,
-        task.ttl_from,
-        task.started_at,
+        ParentContext {
+            created_at: task.created_at,
+            ttl_seconds: task.ttl_seconds,
+            ttl_from: task.ttl_from,
+            started_at: task.started_at,
+            tags: task.tags.clone(),
+        },
     );
     let io = Arc::new(IoTracker::new());
 

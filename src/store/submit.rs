@@ -7,7 +7,7 @@ use sqlx::Row;
 
 use crate::task::{
     DependencyFailurePolicy, DuplicateStrategy, SubmitOutcome, TaskSubmission, TtlFrom,
-    MAX_PAYLOAD_BYTES,
+    MAX_PAYLOAD_BYTES, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 
 use super::row_mapping::row_to_task_record;
@@ -17,6 +17,31 @@ use super::{StoreError, TaskStore};
 /// are split into multiple transactions to avoid holding the SQLite write
 /// lock for too long.
 const BATCH_CHUNK_SIZE: usize = 10_000;
+
+/// Validate tag constraints: key length, value length, max count.
+fn validate_tags(tags: &HashMap<String, String>) -> Result<(), StoreError> {
+    if tags.len() > MAX_TAGS_PER_TASK {
+        return Err(StoreError::InvalidTag(format!(
+            "too many tags: {} > {MAX_TAGS_PER_TASK}",
+            tags.len()
+        )));
+    }
+    for (k, v) in tags {
+        if k.len() > MAX_TAG_KEY_LEN {
+            return Err(StoreError::InvalidTag(format!(
+                "tag key too long: {} > {MAX_TAG_KEY_LEN}",
+                k.len()
+            )));
+        }
+        if v.len() > MAX_TAG_VALUE_LEN {
+            return Err(StoreError::InvalidTag(format!(
+                "tag value too long: {} > {MAX_TAG_VALUE_LEN}",
+                v.len()
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Core dedup logic for a single task submission within an existing connection.
 ///
@@ -30,6 +55,8 @@ pub(crate) async fn submit_one(
     if let Some(ref err) = sub.payload_error {
         return Err(StoreError::Serialization(err.clone()));
     }
+
+    validate_tags(&sub.tags)?;
 
     let key = sub.effective_key();
     let priority = sub.priority.value() as i32;
@@ -94,6 +121,9 @@ pub(crate) async fn submit_one(
 
     if result.rows_affected() > 0 {
         let task_id = result.last_insert_rowid();
+
+        // Insert tags.
+        super::insert_tags(conn, task_id, &sub.tags).await?;
 
         // Handle dependencies if any.
         if !sub.dependencies.is_empty() {
@@ -256,6 +286,10 @@ pub(crate) async fn supersede_existing(
             .execute(&mut **conn)
             .await?;
 
+            // Replace tags: delete old, insert new.
+            super::delete_task_tags(conn, replaced_id).await?;
+            super::insert_tags(conn, replaced_id, &sub.tags).await?;
+
             Ok(SubmitOutcome::Superseded {
                 new_task_id: replaced_id,
                 replaced_task_id: replaced_id,
@@ -263,6 +297,7 @@ pub(crate) async fn supersede_existing(
         }
         crate::task::TaskStatus::Running | crate::task::TaskStatus::Waiting => {
             // Delete existing and insert new.
+            super::delete_task_tags(conn, replaced_id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
                 .bind(replaced_id)
                 .execute(&mut **conn)
@@ -293,8 +328,11 @@ pub(crate) async fn supersede_existing(
             .execute(&mut **conn)
             .await?;
 
+            let new_task_id = result.last_insert_rowid();
+            super::insert_tags(conn, new_task_id, &sub.tags).await?;
+
             Ok(SubmitOutcome::Superseded {
-                new_task_id: result.last_insert_rowid(),
+                new_task_id,
                 replaced_task_id: replaced_id,
             })
         }
@@ -421,6 +459,7 @@ impl TaskStore {
                 return Err(StoreError::PayloadTooLarge);
             }
         }
+        validate_tags(&sub.tags)?;
 
         let mut conn = self.begin_write().await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
@@ -449,7 +488,7 @@ impl TaskStore {
         &self,
         submissions: &[TaskSubmission],
     ) -> Result<Vec<SubmitOutcome>, StoreError> {
-        // Pre-validate all payloads before starting the transaction
+        // Pre-validate all payloads and tags before starting the transaction
         // to avoid partial inserts on validation errors.
         for sub in submissions {
             if let Some(ref p) = sub.payload {
@@ -457,6 +496,7 @@ impl TaskStore {
                     return Err(StoreError::PayloadTooLarge);
                 }
             }
+            validate_tags(&sub.tags)?;
         }
 
         // Intra-batch dedup: last-wins. Map each effective key to its last
@@ -782,5 +822,177 @@ mod tests {
 
         let count = store.pending_count().await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── Tag tests ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn submit_with_tags() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("tagged-1")
+            .tag("profile", "default")
+            .tag("source", "upload");
+
+        let outcome = store.submit(&sub).await.unwrap();
+        let id = outcome.id().unwrap();
+
+        let task = store.task_by_id(id).await.unwrap().unwrap();
+        assert_eq!(task.tags.len(), 2);
+        assert_eq!(task.tags.get("profile").unwrap(), "default");
+        assert_eq!(task.tags.get("source").unwrap(), "upload");
+    }
+
+    #[tokio::test]
+    async fn submit_batch_with_tags() {
+        let store = test_store().await;
+        let subs: Vec<_> = (0..3)
+            .map(|i| {
+                TaskSubmission::new("test")
+                    .key(format!("batch-tag-{i}"))
+                    .tag("batch", "true")
+                    .tag("index", i.to_string())
+            })
+            .collect();
+
+        let results = store.submit_batch(&subs).await.unwrap();
+        assert!(results.iter().all(|r| r.is_inserted()));
+
+        for (i, result) in results.iter().enumerate() {
+            let task = store
+                .task_by_id(result.id().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(task.tags.get("batch").unwrap(), "true");
+            assert_eq!(task.tags.get("index").unwrap(), &i.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_with_default_tags() {
+        use crate::task::BatchSubmission;
+
+        let store = test_store().await;
+        let subs = BatchSubmission::new()
+            .default_tag("env", "prod")
+            .default_tag("region", "us-east")
+            .task(TaskSubmission::new("test").key("dt-1"))
+            .task(
+                TaskSubmission::new("test")
+                    .key("dt-2")
+                    .tag("region", "eu-west"),
+            )
+            .build();
+
+        let results = store.submit_batch(&subs).await.unwrap();
+
+        // First task gets both defaults.
+        let t1 = store
+            .task_by_id(results[0].id().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t1.tags.get("env").unwrap(), "prod");
+        assert_eq!(t1.tags.get("region").unwrap(), "us-east");
+
+        // Second task overrides "region" but inherits "env".
+        let t2 = store
+            .task_by_id(results[1].id().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(t2.tags.get("env").unwrap(), "prod");
+        assert_eq!(t2.tags.get("region").unwrap(), "eu-west");
+    }
+
+    #[tokio::test]
+    async fn tags_validation_key_too_long() {
+        use crate::store::StoreError;
+        use crate::task::MAX_TAG_KEY_LEN;
+
+        let store = test_store().await;
+        let long_key = "x".repeat(MAX_TAG_KEY_LEN + 1);
+        let sub = TaskSubmission::new("test")
+            .key("bad-key")
+            .tag(long_key, "value");
+
+        let err = store.submit(&sub).await.unwrap_err();
+        assert!(matches!(err, StoreError::InvalidTag(_)));
+    }
+
+    #[tokio::test]
+    async fn tags_validation_value_too_long() {
+        use crate::store::StoreError;
+        use crate::task::MAX_TAG_VALUE_LEN;
+
+        let store = test_store().await;
+        let long_val = "x".repeat(MAX_TAG_VALUE_LEN + 1);
+        let sub = TaskSubmission::new("test")
+            .key("bad-val")
+            .tag("key", long_val);
+
+        let err = store.submit(&sub).await.unwrap_err();
+        assert!(matches!(err, StoreError::InvalidTag(_)));
+    }
+
+    #[tokio::test]
+    async fn tags_validation_too_many() {
+        use crate::store::StoreError;
+        use crate::task::MAX_TAGS_PER_TASK;
+
+        let store = test_store().await;
+        let mut sub = TaskSubmission::new("test").key("too-many");
+        for i in 0..=MAX_TAGS_PER_TASK {
+            sub = sub.tag(format!("key-{i}"), "value");
+        }
+
+        let err = store.submit(&sub).await.unwrap_err();
+        assert!(matches!(err, StoreError::InvalidTag(_)));
+    }
+
+    #[tokio::test]
+    async fn tags_preserved_on_supersede() {
+        use crate::task::DuplicateStrategy;
+
+        let store = test_store().await;
+        let sub1 = TaskSubmission::new("test")
+            .key("supersede-tags")
+            .tag("version", "1")
+            .on_duplicate(DuplicateStrategy::Supersede);
+        let id1 = store.submit(&sub1).await.unwrap().id().unwrap();
+
+        let t1 = store.task_by_id(id1).await.unwrap().unwrap();
+        assert_eq!(t1.tags.get("version").unwrap(), "1");
+
+        // Supersede with new tags.
+        let sub2 = TaskSubmission::new("test")
+            .key("supersede-tags")
+            .tag("version", "2")
+            .tag("extra", "yes")
+            .on_duplicate(DuplicateStrategy::Supersede);
+        let outcome = store.submit(&sub2).await.unwrap();
+        let id2 = outcome.id().unwrap();
+
+        let t2 = store.task_by_id(id2).await.unwrap().unwrap();
+        assert_eq!(t2.tags.get("version").unwrap(), "2");
+        assert_eq!(t2.tags.get("extra").unwrap(), "yes");
+    }
+
+    #[tokio::test]
+    async fn tags_dedup_no_change() {
+        let store = test_store().await;
+        let sub = TaskSubmission::new("test")
+            .key("dedup-tags")
+            .tag("env", "prod");
+
+        store.submit(&sub).await.unwrap();
+        let outcome = store.submit(&sub).await.unwrap();
+        assert_eq!(outcome, SubmitOutcome::Duplicate);
+
+        // Tags should still be intact on the original task.
+        let key = sub.effective_key();
+        let task = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(task.tags.get("env").unwrap(), "prod");
     }
 }

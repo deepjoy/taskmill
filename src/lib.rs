@@ -147,6 +147,27 @@
 //! (with `TtlFrom::Submission`), so a child can never outlive its parent's
 //! deadline.
 //!
+//! ## Task metadata tags
+//!
+//! Tasks can carry schema-free key-value metadata tags for filtering, grouping,
+//! and display — without deserializing the task payload. Tags are immutable
+//! after submission and are persisted, indexed, and queryable.
+//!
+//! Set tags per-task via [`TaskSubmission::tag`], per-type via
+//! [`TypedTask::tags`], or as batch defaults via
+//! [`BatchSubmission::default_tag`]. Tag keys and values are validated at submit
+//! time against [`MAX_TAG_KEY_LEN`], [`MAX_TAG_VALUE_LEN`], and
+//! [`MAX_TAGS_PER_TASK`].
+//!
+//! Child tasks inherit parent tags by default (child tags take precedence).
+//! Tags are copied to history on all terminal transitions and are included in
+//! [`TaskEventHeader`] for event subscribers.
+//!
+//! Query by tags with [`TaskStore::tasks_by_tags`] (AND semantics),
+//! [`TaskStore::count_by_tag`] (grouped counts), or
+//! [`TaskStore::tag_values`] (distinct values). Cancel by tag with
+//! [`Scheduler::cancel_by_tag`].
+//!
 //! ## Delayed & scheduled tasks
 //!
 //! A task can declare **when** it becomes eligible for dispatch:
@@ -774,7 +795,8 @@ pub use task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy,
     HistoryStatus, IoBudget, ParentResolution, RecurringSchedule, RecurringScheduleInfo,
     SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus,
-    TaskSubmission, TtlFrom, TypeStats, TypedTask,
+    TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN,
+    MAX_TAG_VALUE_LEN,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

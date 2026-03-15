@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::task::TaskError;
 
-pub(crate) use child_spawner::ChildSpawner;
+pub(crate) use child_spawner::{ChildSpawner, ParentContext};
 pub use context::TaskContext;
 pub(crate) use io_tracker::IoTracker;
 pub(crate) use state::{StateMap, StateSnapshot};

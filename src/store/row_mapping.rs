@@ -69,6 +69,8 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         on_dependency_failure: on_dep_failure_str
             .parse()
             .unwrap_or(DependencyFailurePolicy::Cancel),
+        // Tags are populated separately from the task_tags table.
+        tags: std::collections::HashMap::new(),
     }
 }
 
@@ -125,5 +127,7 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
         expires_at: expires_at_str.map(|s| parse_datetime(&s)),
         run_after: run_after_str.map(|s| parse_datetime(&s)),
+        // Tags are populated separately from the task_history_tags table.
+        tags: std::collections::HashMap::new(),
     }
 }
