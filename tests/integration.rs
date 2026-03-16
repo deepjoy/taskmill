@@ -1264,7 +1264,14 @@ async fn dep_fail_cancels_dependent() {
     // Fail A permanently.
     let a = store.pop_next().await.unwrap().unwrap();
     store
-        .fail(a.id, "boom", false, 0, &taskmill::IoBudget::default())
+        .fail(
+            a.id,
+            "boom",
+            false,
+            0,
+            &taskmill::IoBudget::default(),
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -1427,7 +1434,14 @@ async fn dep_already_failed() {
 
     let a = store.pop_next().await.unwrap().unwrap();
     store
-        .fail(a.id, "boom", false, 0, &taskmill::IoBudget::default())
+        .fail(
+            a.id,
+            "boom",
+            false,
+            0,
+            &taskmill::IoBudget::default(),
+            &Default::default(),
+        )
         .await
         .unwrap();
 
@@ -1493,7 +1507,14 @@ async fn dep_ignore_policy_unblocks() {
     // Fail A permanently.
     let a = store.pop_next().await.unwrap().unwrap();
     store
-        .fail(a.id, "boom", false, 0, &taskmill::IoBudget::default())
+        .fail(
+            a.id,
+            "boom",
+            false,
+            0,
+            &taskmill::IoBudget::default(),
+            &Default::default(),
+        )
         .await
         .unwrap();
 

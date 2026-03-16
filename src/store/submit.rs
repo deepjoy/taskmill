@@ -680,7 +680,14 @@ mod tests {
         store.submit(&sub_high).await.unwrap();
 
         store
-            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .fail(
+                task.id,
+                "boom",
+                false,
+                0,
+                &IoBudget::default(),
+                &Default::default(),
+            )
             .await
             .unwrap();
 

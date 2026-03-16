@@ -28,6 +28,8 @@ mod query;
 pub(crate) mod row_mapping;
 mod submit;
 
+pub use lifecycle::FailBackoff;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};

@@ -311,7 +311,14 @@ mod tests {
         store.submit(&child_sub).await.unwrap();
         let child = store.pop_next().await.unwrap().unwrap();
         store
-            .fail(child.id, "boom", false, 0, &IoBudget::default())
+            .fail(
+                child.id,
+                "boom",
+                false,
+                0,
+                &IoBudget::default(),
+                &Default::default(),
+            )
             .await
             .unwrap();
 

@@ -1,10 +1,24 @@
 //! Task lifecycle transitions: pop, complete, fail, pause, resume, and
 //! dependency resolution.
 
-use crate::task::{DependencyFailurePolicy, IoBudget, TaskRecord};
+use crate::task::{BackoffStrategy, DependencyFailurePolicy, IoBudget, TaskRecord};
 
 use super::row_mapping::row_to_task_record;
 use super::{StoreError, TaskStore};
+
+/// Backoff parameters for retry delay computation.
+///
+/// Bundles the optional backoff strategy and executor-signaled override into a
+/// single argument to keep `fail()` / `fail_with_record()` under the clippy
+/// argument-count lint.
+#[derive(Debug, Default, Clone)]
+pub struct FailBackoff<'a> {
+    /// Per-type backoff strategy. `None` means immediate retry.
+    pub strategy: Option<&'a BackoffStrategy>,
+    /// Executor-requested retry delay in milliseconds. Overrides the strategy
+    /// when set.
+    pub executor_retry_after_ms: Option<u64>,
+}
 
 /// Insert a task record into the history table.
 ///
@@ -405,6 +419,9 @@ impl TaskStore {
 
     /// Mark a task as failed. If `retryable` and under max retries, requeue
     /// it as pending with the same priority. Otherwise move to history as failed.
+    ///
+    /// `backoff` controls the delay before the next retry attempt. See
+    /// [`fail_inner`] for details.
     pub async fn fail(
         &self,
         id: i64,
@@ -412,6 +429,7 @@ impl TaskStore {
         retryable: bool,
         max_retries: i32,
         metrics: &IoBudget,
+        backoff: &FailBackoff<'_>,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = id, "store.fail: BEGIN tx");
         let mut conn = self.begin_write().await?;
@@ -425,7 +443,16 @@ impl TaskStore {
         let Some(row) = row else { return Ok(()) };
         let task = row_to_task_record(&row);
 
-        Self::fail_inner(&mut conn, &task, error, retryable, max_retries, metrics).await?;
+        Self::fail_inner(
+            &mut conn,
+            &task,
+            error,
+            retryable,
+            max_retries,
+            metrics,
+            backoff,
+        )
+        .await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -445,12 +472,22 @@ impl TaskStore {
         retryable: bool,
         max_retries: i32,
         metrics: &IoBudget,
+        backoff: &FailBackoff<'_>,
     ) -> Result<(), StoreError> {
         tracing::debug!(task_id = task.id, "store.fail_with_record: BEGIN tx");
         let mut conn = self.begin_write().await?;
         tracing::debug!(task_id = task.id, "store.fail_with_record: BEGIN acquired");
 
-        Self::fail_inner(&mut conn, task, error, retryable, max_retries, metrics).await?;
+        Self::fail_inner(
+            &mut conn,
+            task,
+            error,
+            retryable,
+            max_retries,
+            metrics,
+            backoff,
+        )
+        .await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -462,6 +499,13 @@ impl TaskStore {
     }
 
     /// Shared failure logic: retry or move to history.
+    ///
+    /// When retrying, computes the backoff delay from (in priority order):
+    /// 1. `executor_retry_after_ms` — executor-signaled override
+    /// 2. `backoff` strategy — per-type backoff computation
+    /// 3. Immediate retry (no delay) — backward-compatible default
+    ///
+    /// The delay is applied by setting `run_after` on the requeued task.
     async fn fail_inner(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         task: &TaskRecord,
@@ -469,18 +513,45 @@ impl TaskStore {
         retryable: bool,
         max_retries: i32,
         metrics: &IoBudget,
+        backoff: &FailBackoff<'_>,
     ) -> Result<(), StoreError> {
         if retryable && task.retry_count < max_retries {
-            // Requeue with incremented retry count, same priority.
-            sqlx::query(
-                "UPDATE tasks SET status = 'pending', started_at = NULL,
-                    retry_count = retry_count + 1, last_error = ?
-                 WHERE id = ?",
-            )
-            .bind(error)
-            .bind(task.id)
-            .execute(&mut **conn)
-            .await?;
+            // Compute delay: executor override > backoff strategy > immediate.
+            let delay = if let Some(ms) = backoff.executor_retry_after_ms {
+                std::time::Duration::from_millis(ms)
+            } else if let Some(strategy) = backoff.strategy {
+                strategy.delay_for(task.retry_count)
+            } else {
+                std::time::Duration::ZERO
+            };
+
+            if delay.is_zero() {
+                // Immediate retry — current behavior.
+                sqlx::query(
+                    "UPDATE tasks SET status = 'pending', started_at = NULL,
+                        retry_count = retry_count + 1, last_error = ?
+                     WHERE id = ?",
+                )
+                .bind(error)
+                .bind(task.id)
+                .execute(&mut **conn)
+                .await?;
+            } else {
+                // Delayed retry — set run_after.
+                let run_after =
+                    chrono::Utc::now() + chrono::Duration::milliseconds(delay.as_millis() as i64);
+                sqlx::query(
+                    "UPDATE tasks SET status = 'pending', started_at = NULL,
+                        retry_count = retry_count + 1, last_error = ?,
+                        run_after = ?
+                     WHERE id = ?",
+                )
+                .bind(error)
+                .bind(run_after.format("%Y-%m-%d %H:%M:%S").to_string())
+                .bind(task.id)
+                .execute(&mut **conn)
+                .await?;
+            }
         } else {
             // Permanent failure — move to history.
             let duration_ms = compute_duration_ms(task);
@@ -930,6 +1001,7 @@ mod tests {
     use crate::task::{HistoryStatus, IoBudget, TaskStatus, TaskSubmission};
 
     use super::super::TaskStore;
+    use super::FailBackoff;
 
     async fn test_store() -> TaskStore {
         TaskStore::open_memory().await.unwrap()
@@ -999,7 +1071,14 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .fail(task.id, "transient error", true, 3, &IoBudget::default())
+            .fail(
+                task.id,
+                "transient error",
+                true,
+                3,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
             .await
             .unwrap();
 
@@ -1018,13 +1097,27 @@ mod tests {
         let task = store.pop_next().await.unwrap().unwrap();
 
         store
-            .fail(task.id, "err1", true, 1, &IoBudget::default())
+            .fail(
+                task.id,
+                "err1",
+                true,
+                1,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
             .await
             .unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         assert_eq!(task.retry_count, 1);
         store
-            .fail(task.id, "err2", true, 1, &IoBudget::disk(100, 50))
+            .fail(
+                task.id,
+                "err2",
+                true,
+                1,
+                &IoBudget::disk(100, 50),
+                &FailBackoff::default(),
+            )
             .await
             .unwrap();
 
@@ -1207,7 +1300,14 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
         store
-            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .fail(
+                task.id,
+                "boom",
+                false,
+                0,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
             .await
             .unwrap();
 
@@ -1348,7 +1448,14 @@ mod tests {
 
         // Permanent failure (non-retryable).
         store
-            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .fail(
+                task.id,
+                "boom",
+                false,
+                0,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
             .await
             .unwrap();
 
@@ -1373,5 +1480,234 @@ mod tests {
         let key = sub.effective_key();
         let history = store.history_by_key(&key).await.unwrap();
         assert_eq!(history[0].max_retries, None);
+    }
+
+    // ── Phase 4: Retry with backoff ─────────────────────────────────
+
+    #[tokio::test]
+    async fn backoff_constant_sets_run_after() {
+        use crate::task::BackoffStrategy;
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = make_submission("const-backoff", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        let strategy = BackoffStrategy::Constant {
+            delay: Duration::from_secs(60),
+        };
+        store
+            .fail(
+                task.id,
+                "transient",
+                true,
+                3,
+                &IoBudget::default(),
+                &FailBackoff {
+                    strategy: Some(&strategy),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let requeued = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(requeued.status, TaskStatus::Pending);
+        assert_eq!(requeued.retry_count, 1);
+        // run_after should be set roughly 60s in the future.
+        let run_after = requeued.run_after.expect("run_after should be set");
+        let diff = run_after - chrono::Utc::now();
+        assert!(
+            diff.num_seconds() >= 55 && diff.num_seconds() <= 65,
+            "expected run_after ~60s in the future, got {}s",
+            diff.num_seconds()
+        );
+    }
+
+    #[tokio::test]
+    async fn backoff_exponential_increases_across_retries() {
+        use crate::task::BackoffStrategy;
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = make_submission("exp-backoff", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+
+        let strategy = BackoffStrategy::Exponential {
+            initial: Duration::from_secs(10),
+            max: Duration::from_secs(3600),
+            multiplier: 2.0,
+        };
+
+        // First failure (retry_count=0): delay = 10s
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.retry_count, 0);
+        store
+            .fail(
+                task.id,
+                "err",
+                true,
+                5,
+                &IoBudget::default(),
+                &FailBackoff {
+                    strategy: Some(&strategy),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let requeued = store.task_by_key(&key).await.unwrap().unwrap();
+        let run_after_1 = requeued.run_after.expect("run_after should be set");
+        let diff_1 = (run_after_1 - chrono::Utc::now()).num_seconds();
+        assert!(
+            (7..=13).contains(&diff_1),
+            "retry 0: expected ~10s delay, got {diff_1}s"
+        );
+
+        // Manually clear run_after so we can pop the task for the next retry.
+        sqlx::query("UPDATE tasks SET run_after = NULL WHERE key = ?")
+            .bind(&key)
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        // Second failure (retry_count=1): delay = 20s
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.retry_count, 1);
+        store
+            .fail(
+                task.id,
+                "err",
+                true,
+                5,
+                &IoBudget::default(),
+                &FailBackoff {
+                    strategy: Some(&strategy),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let requeued = store.task_by_key(&key).await.unwrap().unwrap();
+        let run_after_2 = requeued.run_after.expect("run_after should be set");
+        let diff_2 = (run_after_2 - chrono::Utc::now()).num_seconds();
+        assert!(
+            (17..=23).contains(&diff_2),
+            "retry 1: expected ~20s delay, got {diff_2}s"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_retry_after_overrides_strategy() {
+        use crate::task::BackoffStrategy;
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = make_submission("override-backoff", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        // Strategy says 10s, but executor override says 120s.
+        let strategy = BackoffStrategy::Constant {
+            delay: Duration::from_secs(10),
+        };
+        store
+            .fail(
+                task.id,
+                "rate limited",
+                true,
+                3,
+                &IoBudget::default(),
+                &FailBackoff {
+                    strategy: Some(&strategy),
+                    executor_retry_after_ms: Some(120_000),
+                },
+            )
+            .await
+            .unwrap();
+
+        let requeued = store.task_by_key(&key).await.unwrap().unwrap();
+        let run_after = requeued.run_after.expect("run_after should be set");
+        let diff = (run_after - chrono::Utc::now()).num_seconds();
+        // Should be ~120s, not ~10s.
+        assert!(
+            (115..=125).contains(&diff),
+            "expected ~120s delay from executor override, got {diff}s"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_backoff_requeues_immediately() {
+        let store = test_store().await;
+        let sub = make_submission("no-backoff", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        // No strategy, no executor override → immediate retry.
+        store
+            .fail(
+                task.id,
+                "err",
+                true,
+                3,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        let requeued = store.task_by_key(&key).await.unwrap().unwrap();
+        assert_eq!(requeued.status, TaskStatus::Pending);
+        assert_eq!(requeued.retry_count, 1);
+        // run_after should remain None (immediate dispatch).
+        assert!(
+            requeued.run_after.is_none(),
+            "run_after should be None for immediate retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_error_skips_retry_moves_to_history() {
+        use crate::task::BackoffStrategy;
+        use std::time::Duration;
+
+        let store = test_store().await;
+        let sub = make_submission("permanent-err", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        // Even with a backoff strategy, non-retryable errors go straight to history.
+        let strategy = BackoffStrategy::Constant {
+            delay: Duration::from_secs(60),
+        };
+        store
+            .fail(
+                task.id,
+                "fatal error",
+                false,
+                3,
+                &IoBudget::default(),
+                &FailBackoff {
+                    strategy: Some(&strategy),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Should be gone from the active queue.
+        assert!(store.task_by_key(&key).await.unwrap().is_none());
+
+        // Should be in history as failed.
+        let hist = store.failed_tasks(10).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Failed);
+        assert_eq!(hist[0].last_error.as_deref(), Some("fatal error"));
     }
 }

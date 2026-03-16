@@ -464,8 +464,19 @@ pub(crate) async fn spawn_task(
                     will_retry,
                     "task failed"
                 );
+                let fail_backoff = crate::store::FailBackoff {
+                    executor_retry_after_ms: te.retry_after_ms,
+                    ..Default::default()
+                };
                 if let Err(e) = store
-                    .fail_with_record(&task, &te.message, te.retryable, max_retries, &metrics)
+                    .fail_with_record(
+                        &task,
+                        &te.message,
+                        te.retryable,
+                        max_retries,
+                        &metrics,
+                        &fail_backoff,
+                    )
                     .await
                 {
                     tracing::error!(task_id, error = %e, "failed to record task failure");
@@ -521,7 +532,14 @@ pub(crate) async fn spawn_task(
                                 // Fail the parent.
                                 let msg = format!("child task {task_id} failed: {}", te.message);
                                 if let Err(e) = store
-                                    .fail_with_record(&parent, &msg, false, 0, &IoBudget::default())
+                                    .fail_with_record(
+                                        &parent,
+                                        &msg,
+                                        false,
+                                        0,
+                                        &IoBudget::default(),
+                                        &Default::default(),
+                                    )
                                     .await
                                 {
                                     tracing::error!(
@@ -579,7 +597,14 @@ async fn handle_parent_resolution(
             // All children done but some failed — fail the parent.
             if let Ok(Some(parent)) = store.task_by_id(parent_id).await {
                 if let Err(e) = store
-                    .fail_with_record(&parent, &reason, false, 0, &IoBudget::default())
+                    .fail_with_record(
+                        &parent,
+                        &reason,
+                        false,
+                        0,
+                        &IoBudget::default(),
+                        &Default::default(),
+                    )
                     .await
                 {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
