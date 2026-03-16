@@ -10,7 +10,10 @@
 //! - Monitors system CPU, disk, and network throughput to adjust concurrency
 //! - Supports [composable backpressure](PressureSource) from arbitrary external sources
 //! - Preempts lower-priority work when high-priority tasks arrive
-//! - [Retries](TaskError::retryable) failed tasks at the same priority level
+//! - [Retries](TaskError::retryable) failed tasks with configurable [backoff](BackoffStrategy)
+//!   ([`Constant`](BackoffStrategy::Constant), [`Linear`](BackoffStrategy::Linear),
+//!   [`Exponential`](BackoffStrategy::Exponential), [`ExponentialJitter`](BackoffStrategy::ExponentialJitter))
+//!   and per-type [retry policies](RetryPolicy)
 //! - Records completed/failed [task history](TaskHistoryRecord) for queries and IO learning
 //! - Supports [batch submission](Scheduler::submit_batch) with intra-batch dedup and chunking
 //! - Emits [lifecycle events](SchedulerEvent) including progress for UI integration
@@ -28,11 +31,11 @@
 //!
 //! ```text
 //! submit → blocked ─(deps met)─→ pending ──────────────→ running → completed
-//!                                   ↑    ↓     ↘ paused ↗     ↘ failed (retryable → pending)
+//!                                   ↑    ↓     ↘ paused ↗     ↘ failed (retryable → pending, with backoff delay)
 //!                         (run_after elapsed)                  ↘ failed (permanent → history)
-//!                                   │                          ↘ cancelled (via cancel() or supersede)
-//!                           pending (gated)                    ↘ expired (TTL, cascade to children)
-//!                               cancelled
+//!                                   │                          ↘ dead_letter (retries exhausted → history)
+//!                           pending (gated)                    ↘ cancelled (via cancel() or supersede)
+//!                               cancelled                      ↘ expired (TTL, cascade to children)
 //!                               superseded
 //!                               expired (TTL)
 //!    blocked ─(dep failed)─→ dep_failed (history)
@@ -49,8 +52,12 @@
 //!    progress reporter.
 //! 4. **Terminal** — on success the task moves to the history table. On failure,
 //!    a [`retryable`](TaskError::retryable) error requeues it (up to
-//!    [`SchedulerBuilder::max_retries`]); a non-retryable error moves it to
-//!    history as failed.
+//!    [`SchedulerBuilder::max_retries`] or per-type [`RetryPolicy::max_retries`])
+//!    with a configurable [`BackoffStrategy`] delay; a non-retryable
+//!    ([`permanent`](TaskError::permanent)) error moves it to history as failed.
+//!    Tasks that exhaust all retries enter [`dead_letter`](HistoryStatus::DeadLetter)
+//!    state — queryable and manually re-submittable via
+//!    [`Scheduler::retry_dead_letter`].
 //!
 //! ## Deduplication & duplicate strategies
 //!
@@ -282,7 +289,7 @@
 //! For long-running transfers (file copies, uploads, downloads), executors can
 //! report byte-level progress via [`TaskContext::set_bytes_total`] and
 //! [`TaskContext::add_bytes`]. The scheduler maintains per-task atomic counters
-//! on the [`IoTracker`](registry::IoTracker) — updates are lock-free and
+//! on the `IoTracker` — updates are lock-free and
 //! impose no overhead on the executor hot path.
 //!
 //! When [`SchedulerBuilder::progress_interval`] is set, a background ticker

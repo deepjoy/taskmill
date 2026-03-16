@@ -16,12 +16,12 @@
 //! For streaming transfers, executors call [`ProgressReporter::set_bytes_total`]
 //! and [`ProgressReporter::add_bytes`] (or the convenience wrappers on
 //! [`TaskContext`](crate::TaskContext)). These update lock-free atomic counters
-//! on the task's [`IoTracker`].
+//! on the task's `IoTracker`.
 //!
-//! A background [`run_progress_ticker`] task (opt-in via
+//! A background progress ticker task (opt-in via
 //! [`SchedulerBuilder::progress_interval`](super::SchedulerBuilder::progress_interval))
 //! polls these counters at a fixed interval, feeds them through an
-//! EWMA-smoothed [`ThroughputTracker`], and emits [`TaskProgress`] events on
+//! EWMA-smoothed `ThroughputTracker`, and emits [`TaskProgress`] events on
 //! a dedicated broadcast channel. Each event includes throughput (bytes/sec)
 //! and an estimated time remaining.
 
@@ -46,7 +46,7 @@ use super::SchedulerEvent;
 ///
 /// Progress reports are emitted as [`SchedulerEvent::Progress`]
 /// events, making them available to the UI via the same broadcast channel.
-/// The reporter also updates the in-memory [`ActiveTaskMap`] directly,
+/// The reporter also updates the in-memory `ActiveTaskMap` directly,
 /// eliminating the need for a per-task broadcast listener.
 ///
 /// # Example

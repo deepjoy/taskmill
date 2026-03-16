@@ -79,7 +79,7 @@ tokio::spawn(async move {
 |-------|---------------|
 | `Dispatched(TaskEventHeader)` | Task picked from queue and executor spawned |
 | `Completed(TaskEventHeader)` | Task finished successfully |
-| `Failed { header, error, will_retry }` | Task failed — `will_retry` tells you if it's being requeued |
+| `Failed { header, error, will_retry, retry_after }` | Task failed — `will_retry` tells you if it's being requeued, `retry_after` is the backoff delay |
 | `Preempted(TaskEventHeader)` | Task paused for higher-priority work |
 | `Cancelled(TaskEventHeader)` | Task cancelled via `scheduler.cancel()` |
 | `Progress { header, percent, message }` | Progress update from executor |
@@ -88,6 +88,7 @@ tokio::spawn(async move {
 | `RecurringSkipped { header, reason }` | A recurring instance was skipped (e.g., pile-up prevention) |
 | `RecurringCompleted { header, occurrences }` | A recurring schedule finished all its occurrences |
 | `TaskUnblocked { task_id }` | A blocked task's dependencies are all satisfied — it transitions to `pending` |
+| `DeadLettered { header, error, retry_count }` | Task exhausted all retries — can be re-submitted via `retry_dead_letter()` |
 | `DependencyFailed { task_id, failed_dependency }` | A blocked task was cancelled because a dependency failed permanently |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
@@ -100,7 +101,7 @@ Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key
 |-----------------------|-----------|
 | A progress bar | `Progress`, `Completed`, `Failed` |
 | An activity log | All events |
-| Error alerting | `Failed` where `will_retry` is false |
+| Error alerting | `Failed` where `will_retry` is false, `DeadLettered` |
 | A "pause/resume" button | `Paused`, `Resumed` |
 | Upload status indicators | `Dispatched`, `Progress`, `Completed`, `Failed`, `Preempted` |
 | Stale task cleanup UI | `TaskExpired` |

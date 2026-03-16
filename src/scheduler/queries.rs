@@ -65,7 +65,7 @@ impl Scheduler {
 
     /// Find active tasks matching all specified tag filters (AND semantics).
     ///
-    /// Delegates to [`TaskStore::tasks_by_tags`].
+    /// Delegates to [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags).
     pub async fn tasks_by_tags(
         &self,
         filters: &[(&str, &str)],
@@ -76,7 +76,7 @@ impl Scheduler {
 
     /// Count active tasks grouped by a tag key's values.
     ///
-    /// Delegates to [`TaskStore::count_by_tag`].
+    /// Delegates to [`TaskStore::count_by_tag`](crate::TaskStore::count_by_tag).
     pub async fn count_by_tag(
         &self,
         key: &str,
@@ -87,7 +87,7 @@ impl Scheduler {
 
     /// List distinct values for a tag key across active tasks, with counts.
     ///
-    /// Delegates to [`TaskStore::tag_values`].
+    /// Delegates to [`TaskStore::tag_values`](crate::TaskStore::tag_values).
     pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
         self.inner.store.tag_values(key).await
     }

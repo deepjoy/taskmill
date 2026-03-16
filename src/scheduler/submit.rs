@@ -298,7 +298,7 @@ impl Scheduler {
 
     /// Cancel all active tasks matching a tag key-value pair.
     ///
-    /// Finds tasks via [`TaskStore::tasks_by_tags`] and cancels each one.
+    /// Finds tasks via [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags) and cancels each one.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag(&self, key: &str, value: &str) -> Result<Vec<i64>, StoreError> {
         let tasks = self

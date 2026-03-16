@@ -421,7 +421,7 @@ impl TaskStore {
     /// it as pending with the same priority. Otherwise move to history as failed.
     ///
     /// `backoff` controls the delay before the next retry attempt. See
-    /// [`fail_inner`] for details.
+    /// `fail_inner` for details.
     pub async fn fail(
         &self,
         id: i64,

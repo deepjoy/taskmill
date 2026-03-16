@@ -73,7 +73,7 @@ pub struct TaskEventHeader {
 /// Events emitted by the scheduler for UI integration and observability.
 ///
 /// Subscribe via the `tokio::sync::broadcast::Receiver` returned by
-/// [`Scheduler::subscribe`] or passed through the builder.
+/// [`Scheduler::subscribe`](super::Scheduler::subscribe) or passed through the builder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SchedulerEvent {
@@ -156,9 +156,9 @@ pub enum SchedulerEvent {
         task_id: i64,
         failed_dependency: i64,
     },
-    /// The scheduler was globally paused via [`Scheduler::pause_all`].
+    /// The scheduler was globally paused via [`Scheduler::pause_all`](super::Scheduler::pause_all).
     Paused,
-    /// The scheduler was resumed via [`Scheduler::resume_all`].
+    /// The scheduler was resumed via [`Scheduler::resume_all`](super::Scheduler::resume_all).
     Resumed,
 }
 

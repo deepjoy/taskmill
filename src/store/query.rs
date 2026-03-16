@@ -357,7 +357,7 @@ impl TaskStore {
     /// This is the low-level building block for [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
     /// The `key` parameter is the pre-computed SHA-256 dedup key (as
     /// returned by [`generate_dedup_key`](crate::task::generate_dedup_key)
-    /// or [`TaskSubmission::effective_key`]).
+    /// or `TaskSubmission::effective_key`).
     pub async fn task_lookup(&self, key: &str) -> Result<TaskLookup, StoreError> {
         // Check active queue first (pending / running / paused).
         // task_by_key already populates tags.

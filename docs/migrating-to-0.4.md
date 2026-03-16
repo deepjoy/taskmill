@@ -116,3 +116,83 @@ let sub = TaskSubmission::from_typed(&task);
 ```
 
 Remove any `?` operators on `payload_json()` or `from_typed()` calls. Errors are still caught before the task is persisted — they just surface at submit time instead.
+
+## Adaptive retry with configurable backoff
+
+### `SchedulerEvent::Failed` gains `retry_after` field
+
+The `Failed` event variant now includes an optional `retry_after: Option<Duration>` field indicating when the next retry will happen. Update any exhaustive pattern matches:
+
+**Before:**
+```rust
+SchedulerEvent::Failed { header, error, will_retry } => { ... }
+```
+
+**After:**
+```rust
+SchedulerEvent::Failed { header, error, will_retry, retry_after } => { ... }
+// retry_after is Some(duration) when backoff is active, None for immediate retry or permanent failure
+```
+
+### New `SchedulerEvent::DeadLettered` variant
+
+A new event variant is emitted when a task exhausts its retries:
+
+```rust
+SchedulerEvent::DeadLettered { header, error, retry_count } => {
+    // Task failed with a retryable error but hit its max_retries limit.
+    // Use scheduler.retry_dead_letter(header.task_id) to re-submit.
+}
+```
+
+Add a match arm for this variant if your match is exhaustive.
+
+### `HistoryStatus` gains `DeadLetter` variant
+
+Tasks that exhaust their retries now receive `HistoryStatus::DeadLetter` instead of `HistoryStatus::Failed`. This distinguishes "might succeed if retried" from "permanently broken." Add a match arm for `DeadLetter` in any exhaustive match on `HistoryStatus`.
+
+### `TaskError` gains `retry_after_ms` field
+
+`TaskError` has a new `retry_after_ms: Option<u64>` field. If you construct `TaskError` via struct literals, add `retry_after_ms: None`. The existing constructors (`new`, `retryable`, `permanent`, `cancelled`) are unaffected.
+
+Executors can now signal a retry delay:
+
+```rust
+Err(TaskError::retryable("rate limited").retry_after(Duration::from_secs(60)))
+```
+
+### New builder methods (non-breaking)
+
+`SchedulerBuilder` gains two new methods for per-type retry policies:
+
+```rust
+// Register with a retry policy (backoff strategy + max_retries)
+.executor_with_retry_policy("api-call", Arc::new(ApiExecutor), RetryPolicy {
+    strategy: BackoffStrategy::Exponential {
+        initial: Duration::from_secs(1),
+        max: Duration::from_secs(300),
+        multiplier: 2.0,
+    },
+    max_retries: 5,
+})
+
+// Register with both TTL and retry policy
+.executor_with_options("upload", Arc::new(UploadExecutor),
+    Some(Duration::from_secs(600)),     // TTL
+    Some(RetryPolicy::default()),       // retry policy
+)
+```
+
+### New dead-letter query and resubmit APIs (non-breaking)
+
+```rust
+// Query tasks that exhausted retries
+let dead = scheduler.dead_letter_tasks(10, 0).await?;
+
+// Re-submit a dead-lettered task (resets retry count)
+scheduler.retry_dead_letter(task_history_id).await?;
+```
+
+### Schema migration
+
+Migration `008_retry_backoff.sql` adds a nullable `max_retries INTEGER` column to both `tasks` and `task_history`. Existing tasks read back `max_retries = None` and fall back to the global `SchedulerConfig::max_retries`.

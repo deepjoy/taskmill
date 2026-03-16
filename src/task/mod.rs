@@ -141,7 +141,7 @@ pub enum HistoryStatus {
     Superseded,
     Expired,
     /// A dependency failed and this task was auto-cancelled per its
-    /// [`DependencyFailurePolicy`](crate::DependencyFailurePolicy).
+    /// [`DependencyFailurePolicy`].
     DependencyFailed,
     /// Retries exhausted — the task failed with a retryable error but has
     /// reached its `max_retries` limit. Unlike `Failed` (permanent/non-retryable
