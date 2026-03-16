@@ -1,0 +1,291 @@
+use crate::priority::Priority;
+use crate::task::{HistoryStatus, IoBudget, TaskLookup, TaskStatus, TaskSubmission};
+
+use super::super::TaskStore;
+
+async fn test_store() -> TaskStore {
+    TaskStore::open_memory().await.unwrap()
+}
+
+fn make_submission(key: &str, priority: Priority) -> TaskSubmission {
+    TaskSubmission::new("test")
+        .key(key)
+        .priority(priority)
+        .payload_raw(b"hello".to_vec())
+        .expected_io(IoBudget::disk(1000, 500))
+}
+
+#[tokio::test]
+async fn task_by_id_lookup() {
+    let store = test_store().await;
+    let sub = make_submission("by-id", Priority::NORMAL);
+    let id = store.submit(&sub).await.unwrap().id().unwrap();
+
+    let task = store.task_by_id(id).await.unwrap().unwrap();
+    assert_eq!(task.id, id);
+    assert_eq!(task.key, sub.effective_key());
+
+    assert!(store.task_by_id(9999).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn history_by_id_lookup() {
+    let store = test_store().await;
+    let sub = make_submission("hist-id", Priority::NORMAL);
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+
+    store
+        .complete(task.id, &IoBudget::disk(100, 50))
+        .await
+        .unwrap();
+
+    let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+    assert_eq!(hist.len(), 1);
+    let hist_id = hist[0].id;
+
+    let record = store.history_by_id(hist_id).await.unwrap().unwrap();
+    assert_eq!(record.key, sub.effective_key());
+    assert_eq!(record.actual_io.unwrap().disk_read, 100);
+
+    assert!(store.history_by_id(9999).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn history_stats_computation() {
+    let store = test_store().await;
+
+    for i in 0..3 {
+        let sub = make_submission(&format!("stat-{i}"), Priority::NORMAL);
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store
+            .complete(task.id, &IoBudget::disk(1000, 500))
+            .await
+            .unwrap();
+    }
+
+    let stats = store.history_stats("test").await.unwrap();
+    assert_eq!(stats.count, 3);
+    assert!(stats.failure_rate == 0.0);
+}
+
+#[tokio::test]
+async fn open_with_custom_config() {
+    let store = TaskStore::open_memory().await.unwrap();
+    let count = store.pending_count().await.unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn delete_task() {
+    let store = test_store().await;
+    let sub = make_submission("del-me", Priority::NORMAL);
+    let key = sub.effective_key();
+    store.submit(&sub).await.unwrap();
+
+    let task = store.task_by_key(&key).await.unwrap().unwrap();
+    assert!(store.delete(task.id).await.unwrap());
+    assert!(store.task_by_key(&key).await.unwrap().is_none());
+
+    assert!(!store.delete(task.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn task_lookup_active() {
+    let store = test_store().await;
+    let sub = make_submission("lookup-active", Priority::NORMAL);
+    let key = sub.effective_key();
+    store.submit(&sub).await.unwrap();
+
+    let result = store.task_lookup(&key).await.unwrap();
+    assert!(matches!(result, TaskLookup::Active(ref r) if r.status == TaskStatus::Pending));
+
+    store.pop_next().await.unwrap();
+    let result = store.task_lookup(&key).await.unwrap();
+    assert!(matches!(result, TaskLookup::Active(ref r) if r.status == TaskStatus::Running));
+}
+
+#[tokio::test]
+async fn task_lookup_history() {
+    let store = test_store().await;
+    let sub = make_submission("lookup-hist", Priority::NORMAL);
+    let key = sub.effective_key();
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+    store.complete(task.id, &IoBudget::default()).await.unwrap();
+
+    let result = store.task_lookup(&key).await.unwrap();
+    assert!(matches!(result, TaskLookup::History(ref r) if r.status == HistoryStatus::Completed));
+}
+
+#[tokio::test]
+async fn task_lookup_not_found() {
+    let store = test_store().await;
+    let key = crate::task::generate_dedup_key("nope", Some(b"nope"));
+    let result = store.task_lookup(&key).await.unwrap();
+    assert!(matches!(result, TaskLookup::NotFound));
+}
+
+#[tokio::test]
+async fn prune_by_count() {
+    let store = test_store().await;
+
+    for i in 0..5 {
+        let sub = make_submission(&format!("prune-{i}"), Priority::NORMAL);
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+    }
+
+    let hist = store.history(100, 0).await.unwrap();
+    assert_eq!(hist.len(), 5);
+
+    let deleted = store.prune_history_by_count(3).await.unwrap();
+    assert_eq!(deleted, 2);
+
+    let hist = store.history(100, 0).await.unwrap();
+    assert_eq!(hist.len(), 3);
+}
+
+// ── Tag query tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn tasks_by_tags_single_filter() {
+    let store = test_store().await;
+
+    store
+        .submit(&TaskSubmission::new("test").key("tbt-1").tag("env", "prod"))
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tbt-2")
+                .tag("env", "staging"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(&TaskSubmission::new("test").key("tbt-3").tag("env", "prod"))
+        .await
+        .unwrap();
+
+    let results = store.tasks_by_tags(&[("env", "prod")], None).await.unwrap();
+    assert_eq!(results.len(), 2);
+
+    let results = store
+        .tasks_by_tags(&[("env", "staging")], None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+#[tokio::test]
+async fn tasks_by_tags_multiple_filters_and() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("multi-1")
+                .tag("env", "prod")
+                .tag("region", "us"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("multi-2")
+                .tag("env", "prod")
+                .tag("region", "eu"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("multi-3")
+                .tag("env", "staging")
+                .tag("region", "us"),
+        )
+        .await
+        .unwrap();
+
+    // AND semantics: only task matching both filters.
+    let results = store
+        .tasks_by_tags(&[("env", "prod"), ("region", "us")], None)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    // With status filter.
+    let results = store
+        .tasks_by_tags(&[("env", "prod")], Some(TaskStatus::Pending))
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn count_by_tag_groups() {
+    let store = test_store().await;
+
+    for i in 0..3 {
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key(format!("free-{i}"))
+                    .tag("tier", "free"),
+            )
+            .await
+            .unwrap();
+    }
+    for i in 0..2 {
+        store
+            .submit(
+                &TaskSubmission::new("test")
+                    .key(format!("pro-{i}"))
+                    .tag("tier", "pro"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let groups = store.count_by_tag("tier", None).await.unwrap();
+    assert_eq!(groups.len(), 2);
+    // Sorted by count descending.
+    assert_eq!(groups[0].0, "free");
+    assert_eq!(groups[0].1, 3);
+    assert_eq!(groups[1].0, "pro");
+    assert_eq!(groups[1].1, 2);
+}
+
+#[tokio::test]
+async fn tag_values_distinct() {
+    let store = test_store().await;
+
+    store
+        .submit(&TaskSubmission::new("test").key("tv-1").tag("color", "red"))
+        .await
+        .unwrap();
+    store
+        .submit(&TaskSubmission::new("test").key("tv-2").tag("color", "red"))
+        .await
+        .unwrap();
+    store
+        .submit(&TaskSubmission::new("test").key("tv-3").tag("color", "blue"))
+        .await
+        .unwrap();
+
+    let values = store.tag_values("color").await.unwrap();
+    assert_eq!(values.len(), 2);
+    // Sorted by count descending.
+    assert_eq!(values[0], ("red".to_string(), 2));
+    assert_eq!(values[1], ("blue".to_string(), 1));
+
+    // Non-existent key returns empty.
+    let empty = store.tag_values("nonexistent").await.unwrap();
+    assert!(empty.is_empty());
+}
