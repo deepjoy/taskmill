@@ -1443,3 +1443,70 @@ async fn chain_of_supersedes() {
     let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
     assert_eq!(task.payload.as_deref(), Some(b"C".as_slice()));
 }
+
+// ── Phase 5: Dead-letter integration tests ──────────────────────
+
+#[tokio::test]
+async fn retry_dead_letter_resubmits_with_reset_retry_count() {
+    // Use max_retries=0 so a retryable failure immediately dead-letters.
+    let store = TaskStore::open_memory().await.unwrap();
+    let mut registry = TaskTypeRegistry::new();
+    registry.register_erased("test", arc_erased(FailingExecutor));
+    let mut config = SchedulerConfig::default();
+    config.max_retries = 0;
+
+    let sched = Scheduler::new(
+        store,
+        config,
+        Arc::new(registry),
+        CompositePressure::new(),
+        ThrottlePolicy::default_three_tier(),
+    );
+
+    let mut rx = sched.subscribe();
+
+    // Submit and dispatch — will fail with retryable error and dead-letter.
+    sched
+        .submit(
+            &TaskSubmission::new("test")
+                .key("dl-retry")
+                .payload_raw(b"payload".to_vec()),
+        )
+        .await
+        .unwrap();
+
+    sched.try_dispatch().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Should have emitted a DeadLettered event.
+    let mut got_dead_lettered = false;
+    while let Ok(evt) = rx.try_recv() {
+        if matches!(evt, SchedulerEvent::DeadLettered { .. }) {
+            got_dead_lettered = true;
+        }
+    }
+    assert!(got_dead_lettered, "expected DeadLettered event");
+
+    // Should be in dead_letter_tasks.
+    let dl = sched.dead_letter_tasks(10, 0).await.unwrap();
+    assert_eq!(dl.len(), 1);
+    assert_eq!(dl[0].status, HistoryStatus::DeadLetter);
+    let history_id = dl[0].id;
+    assert_eq!(dl[0].retry_count, 1); // retry_count was incremented
+
+    // Now re-submit from dead-letter. Replace the executor with one that
+    // succeeds so the re-submitted task can complete.
+    // (retry_dead_letter only re-submits — it doesn't dispatch.)
+    let outcome = sched.retry_dead_letter(history_id).await.unwrap();
+    assert!(outcome.is_inserted());
+
+    // Dead-letter history row should be removed.
+    let dl_after = sched.dead_letter_tasks(10, 0).await.unwrap();
+    assert!(dl_after.is_empty());
+
+    // New task should be in the active queue with retry_count=0.
+    let key = crate::task::generate_dedup_key("test", Some(b"dl-retry"));
+    let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
+    assert_eq!(task.retry_count, 0);
+    assert_eq!(task.payload.as_deref(), Some(b"payload".as_slice()));
+}

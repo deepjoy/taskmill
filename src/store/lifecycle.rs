@@ -33,7 +33,7 @@ pub(crate) async fn insert_history(
     last_error: Option<&str>,
 ) -> Result<(), StoreError> {
     let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
-    let retry_count = if status == "failed" {
+    let retry_count = if status == "failed" || status == "dead_letter" {
         task.retry_count + 1
     } else {
         task.retry_count
@@ -553,10 +553,12 @@ impl TaskStore {
                 .await?;
             }
         } else {
-            // Permanent failure — move to history.
+            // Terminal failure — move to history.
+            // Distinguish: retryable + exhausted → dead_letter; non-retryable → failed.
+            let status = if retryable { "dead_letter" } else { "failed" };
             let duration_ms = compute_duration_ms(task);
 
-            insert_history(conn, task, "failed", metrics, duration_ms, Some(error)).await?;
+            insert_history(conn, task, status, metrics, duration_ms, Some(error)).await?;
 
             super::delete_task_tags(conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
@@ -1122,9 +1124,10 @@ mod tests {
             .unwrap();
 
         assert!(store.task_by_key(&key).await.unwrap().is_none());
-        let hist = store.failed_tasks(10).await.unwrap();
+        // Exhausted retries now produce dead_letter status (phase 5).
+        let hist = store.dead_letter_tasks(10, 0).await.unwrap();
         assert_eq!(hist.len(), 1);
-        assert_eq!(hist[0].status, HistoryStatus::Failed);
+        assert_eq!(hist[0].status, HistoryStatus::DeadLetter);
     }
 
     #[tokio::test]
@@ -1709,5 +1712,141 @@ mod tests {
         assert_eq!(hist.len(), 1);
         assert_eq!(hist[0].status, HistoryStatus::Failed);
         assert_eq!(hist[0].last_error.as_deref(), Some("fatal error"));
+    }
+
+    // ── Phase 5: Dead-letter state ──────────────────────────────────
+
+    #[tokio::test]
+    async fn exhausted_retries_produce_dead_letter_status() {
+        let store = test_store().await;
+        let sub = make_submission("dl-exhausted", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+
+        // First failure: retry_count=0, max_retries=1 → requeue.
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.retry_count, 0);
+        store
+            .fail(
+                task.id,
+                "transient",
+                true,
+                1,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        // Second failure: retry_count=1, max_retries=1 → exhausted → dead_letter.
+        let task = store.pop_next().await.unwrap().unwrap();
+        assert_eq!(task.retry_count, 1);
+        store
+            .fail(
+                task.id,
+                "still transient",
+                true,
+                1,
+                &IoBudget::disk(100, 50),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        // Should be gone from active queue.
+        assert!(store.task_by_key(&key).await.unwrap().is_none());
+
+        // Should be in history as dead_letter (not failed).
+        let hist = store.history_by_key(&key).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::DeadLetter);
+        assert_eq!(hist[0].last_error.as_deref(), Some("still transient"));
+        assert_eq!(hist[0].retry_count, 2); // retry_count incremented
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_still_produces_failed_status() {
+        let store = test_store().await;
+        let sub = make_submission("dl-permanent", Priority::NORMAL);
+        let key = sub.effective_key();
+        store.submit(&sub).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+
+        // Non-retryable error with remaining retries → should be "failed", not "dead_letter".
+        store
+            .fail(
+                task.id,
+                "permanent error",
+                false,
+                3,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.task_by_key(&key).await.unwrap().is_none());
+
+        let hist = store.history_by_key(&key).await.unwrap();
+        assert_eq!(hist.len(), 1);
+        assert_eq!(hist[0].status, HistoryStatus::Failed);
+
+        // Should NOT appear in dead_letter_tasks query.
+        let dl = store.dead_letter_tasks(10, 0).await.unwrap();
+        assert!(dl.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dead_letter_tasks_query_returns_only_dead_lettered() {
+        let store = test_store().await;
+
+        // Create a dead-lettered task (retryable, exhausted).
+        let sub_dl = make_submission("dl-query-dl", Priority::NORMAL);
+        store.submit(&sub_dl).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store
+            .fail(
+                task.id,
+                "transient",
+                true,
+                0, // max_retries=0 → immediately exhausted
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        // Create a failed task (non-retryable).
+        let sub_fail = make_submission("dl-query-fail", Priority::NORMAL);
+        store.submit(&sub_fail).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store
+            .fail(
+                task.id,
+                "permanent",
+                false,
+                3,
+                &IoBudget::default(),
+                &FailBackoff::default(),
+            )
+            .await
+            .unwrap();
+
+        // Create a completed task.
+        let sub_ok = make_submission("dl-query-ok", Priority::NORMAL);
+        store.submit(&sub_ok).await.unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.complete(task.id, &IoBudget::default()).await.unwrap();
+
+        // dead_letter_tasks should return only the dead-lettered one.
+        let dl = store.dead_letter_tasks(10, 0).await.unwrap();
+        assert_eq!(dl.len(), 1);
+        assert_eq!(dl[0].status, HistoryStatus::DeadLetter);
+        assert_eq!(dl[0].task_type, "test");
+
+        // failed_tasks should return only the permanently failed one.
+        let failed = store.failed_tasks(10).await.unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].status, HistoryStatus::Failed);
     }
 }

@@ -92,6 +92,19 @@ impl Scheduler {
         self.inner.store.tag_values(key).await
     }
 
+    /// Dead-lettered tasks (retries exhausted), newest first.
+    ///
+    /// These are tasks that failed with a retryable error but exhausted their
+    /// retry limit. Use [`retry_dead_letter`](Self::retry_dead_letter) to
+    /// re-submit them.
+    pub async fn dead_letter_tasks(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::task::TaskHistoryRecord>, StoreError> {
+        self.inner.store.dead_letter_tasks(limit, offset).await
+    }
+
     /// Capture a single status snapshot for dashboard UIs.
     ///
     /// Gathers running tasks, queue depths, progress estimates, and

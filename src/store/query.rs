@@ -268,6 +268,24 @@ impl TaskStore {
         Ok(records)
     }
 
+    /// Dead-lettered tasks from history (retries exhausted).
+    pub async fn dead_letter_tasks(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<TaskHistoryRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM task_history WHERE status = 'dead_letter' ORDER BY completed_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
+    }
+
     /// Failed tasks from history.
     pub async fn failed_tasks(&self, limit: i32) -> Result<Vec<TaskHistoryRecord>, StoreError> {
         let rows = sqlx::query(

@@ -21,6 +21,8 @@
 //! - `Completed` / `Failed` / `Cancelled` / `Superseded` / `Expired` — standard outcomes
 //! - [`DependencyFailed`](HistoryStatus::DependencyFailed) — task was cancelled
 //!   because a dependency failed, per its [`DependencyFailurePolicy`]
+//! - [`DeadLetter`](HistoryStatus::DeadLetter) — retries exhausted; task may
+//!   succeed if manually re-submitted
 //!
 //! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
 //! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
@@ -141,6 +143,13 @@ pub enum HistoryStatus {
     /// A dependency failed and this task was auto-cancelled per its
     /// [`DependencyFailurePolicy`](crate::DependencyFailurePolicy).
     DependencyFailed,
+    /// Retries exhausted — the task failed with a retryable error but has
+    /// reached its `max_retries` limit. Unlike `Failed` (permanent/non-retryable
+    /// error), dead-lettered tasks *might* succeed if retried later.
+    ///
+    /// Query with [`Scheduler::dead_letter_tasks`](crate::Scheduler::dead_letter_tasks)
+    /// and re-submit with [`Scheduler::retry_dead_letter`](crate::Scheduler::retry_dead_letter).
+    DeadLetter,
 }
 
 impl HistoryStatus {
@@ -152,6 +161,7 @@ impl HistoryStatus {
             Self::Superseded => "superseded",
             Self::Expired => "expired",
             Self::DependencyFailed => "dependency_failed",
+            Self::DeadLetter => "dead_letter",
         }
     }
 }
@@ -167,6 +177,7 @@ impl std::str::FromStr for HistoryStatus {
             "superseded" => Ok(Self::Superseded),
             "expired" => Ok(Self::Expired),
             "dependency_failed" => Ok(Self::DependencyFailed),
+            "dead_letter" => Ok(Self::DeadLetter),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }

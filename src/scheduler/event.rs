@@ -138,6 +138,16 @@ pub enum SchedulerEvent {
     },
     /// A blocked task became pending after all its dependencies completed.
     TaskUnblocked { task_id: i64 },
+    /// A task exhausted its retries and was moved to dead-letter state.
+    ///
+    /// The task failed with a retryable error but has reached its `max_retries`
+    /// limit. Use [`Scheduler::retry_dead_letter`](super::Scheduler::retry_dead_letter)
+    /// to re-submit.
+    DeadLettered {
+        header: TaskEventHeader,
+        error: String,
+        retry_count: i32,
+    },
     /// A blocked task was cancelled because a dependency failed.
     DependencyFailed {
         task_id: i64,
@@ -161,7 +171,8 @@ impl SchedulerEvent {
             | Self::Superseded { old: header, .. }
             | Self::TaskExpired { header, .. }
             | Self::RecurringSkipped { header, .. }
-            | Self::RecurringCompleted { header, .. } => Some(header),
+            | Self::RecurringCompleted { header, .. }
+            | Self::DeadLettered { header, .. } => Some(header),
             Self::Waiting { .. }
             | Self::BatchSubmitted { .. }
             | Self::TaskUnblocked { .. }

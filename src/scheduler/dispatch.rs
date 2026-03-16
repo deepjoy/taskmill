@@ -483,11 +483,20 @@ pub(crate) async fn spawn_task(
                 }
                 // Remove from active tracking AFTER the store write completes.
                 active.remove(task_id);
-                let _ = event_tx.send(SchedulerEvent::Failed {
-                    header: task.event_header(),
-                    error: te.message.clone(),
-                    will_retry,
-                });
+                let dead_lettered = te.retryable && !will_retry;
+                if dead_lettered {
+                    let _ = event_tx.send(SchedulerEvent::DeadLettered {
+                        header: task.event_header(),
+                        error: te.message.clone(),
+                        retry_count: task.retry_count + 1,
+                    });
+                } else {
+                    let _ = event_tx.send(SchedulerEvent::Failed {
+                        header: task.event_header(),
+                        error: te.message.clone(),
+                        will_retry,
+                    });
+                }
                 work_notify.notify_one();
 
                 // If permanent failure, propagate to dependency chain.

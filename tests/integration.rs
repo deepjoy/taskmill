@@ -325,16 +325,10 @@ async fn retryable_error_exhausts_retries() {
         sched_clone.run(token_clone).await;
     });
 
-    // Wait for permanent failure (will_retry = false).
+    // Wait for dead-letter event (retries exhausted).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let failed = wait_for_event(&mut rx, deadline, |evt| {
-        matches!(
-            evt,
-            SchedulerEvent::Failed {
-                will_retry: false,
-                ..
-            }
-        )
+    let dead_lettered = wait_for_event(&mut rx, deadline, |evt| {
+        matches!(evt, SchedulerEvent::DeadLettered { .. })
     })
     .await;
 
@@ -342,8 +336,8 @@ async fn retryable_error_exhausts_retries() {
     let _ = handle.await;
 
     assert!(
-        failed.is_some(),
-        "task should permanently fail after retries exhausted"
+        dead_lettered.is_some(),
+        "task should be dead-lettered after retries exhausted"
     );
 }
 
