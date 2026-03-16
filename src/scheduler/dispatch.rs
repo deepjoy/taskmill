@@ -266,6 +266,7 @@ pub(crate) struct SpawnContext {
     pub active: ActiveTaskMap,
     pub event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
     pub max_retries: i32,
+    pub registry: Arc<crate::registry::TaskTypeRegistry>,
     pub app_state: crate::registry::StateSnapshot,
     pub work_notify: Arc<tokio::sync::Notify>,
     pub scheduler: super::WeakScheduler,
@@ -288,6 +289,7 @@ pub(crate) async fn spawn_task(
         active,
         event_tx,
         max_retries,
+        registry,
         app_state,
         work_notify,
         scheduler,
@@ -455,7 +457,34 @@ pub(crate) async fn spawn_task(
                     active.remove(task_id);
                     return;
                 }
-                let will_retry = te.retryable && task.retry_count < max_retries;
+
+                // Resolve effective retry policy for this task type.
+                let policy = registry.type_retry_policy(&task.task_type);
+                let effective_max_retries = task
+                    .max_retries
+                    .unwrap_or(policy.map(|p| p.max_retries).unwrap_or(max_retries));
+                let backoff_strategy = policy.map(|p| &p.strategy);
+
+                let will_retry = te.retryable && task.retry_count < effective_max_retries;
+
+                // Compute retry delay for event reporting.
+                let retry_delay = if will_retry {
+                    if let Some(ms) = te.retry_after_ms {
+                        Some(std::time::Duration::from_millis(ms))
+                    } else if let Some(strategy) = backoff_strategy {
+                        let d = strategy.delay_for(task.retry_count);
+                        if d.is_zero() {
+                            None
+                        } else {
+                            Some(d)
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 tracing::warn!(
                     task_id,
                     task_type = task.task_type,
@@ -465,15 +494,15 @@ pub(crate) async fn spawn_task(
                     "task failed"
                 );
                 let fail_backoff = crate::store::FailBackoff {
+                    strategy: backoff_strategy,
                     executor_retry_after_ms: te.retry_after_ms,
-                    ..Default::default()
                 };
                 if let Err(e) = store
                     .fail_with_record(
                         &task,
                         &te.message,
                         te.retryable,
-                        max_retries,
+                        effective_max_retries,
                         &metrics,
                         &fail_backoff,
                     )
@@ -495,6 +524,7 @@ pub(crate) async fn spawn_task(
                         header: task.event_header(),
                         error: te.message.clone(),
                         will_retry,
+                        retry_after: retry_delay,
                     });
                 }
                 work_notify.notify_one();
@@ -561,6 +591,7 @@ pub(crate) async fn spawn_task(
                                     header: parent.event_header(),
                                     error: msg,
                                     will_retry: false,
+                                    retry_after: None,
                                 });
                             } else {
                                 // Not fail_fast — check if all children done.
@@ -622,6 +653,7 @@ async fn handle_parent_resolution(
                     header: parent.event_header(),
                     error: reason,
                     will_retry: false,
+                    retry_after: None,
                 });
             }
         }

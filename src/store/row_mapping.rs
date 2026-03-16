@@ -10,8 +10,11 @@ use crate::task::{
 };
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
-    // SQLite stores as "YYYY-MM-DD HH:MM:SS". Parse with chrono.
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+    // SQLite stores as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm"
+    // (the latter from backoff-computed run_after). Try with fractional seconds
+    // first, then fall back to whole-second precision.
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
         .map(|ndt| ndt.and_utc())
         .unwrap_or_default()
 }

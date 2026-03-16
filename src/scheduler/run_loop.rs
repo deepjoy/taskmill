@@ -22,6 +22,7 @@ impl Scheduler {
             active: self.inner.active.clone(),
             event_tx: self.inner.event_tx.clone(),
             max_retries: self.inner.max_retries,
+            registry: Arc::clone(&self.inner.registry),
             app_state: self.inner.app_state.snapshot().await,
             work_notify: Arc::clone(&self.inner.work_notify),
             scheduler: self.downgrade(),

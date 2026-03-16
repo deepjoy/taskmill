@@ -81,7 +81,7 @@ match event {
 ```rust
 match event {
     SchedulerEvent::Completed(header) => { /* header.task_id, header.label, ... */ }
-    SchedulerEvent::Failed { header, error, will_retry } => { ... }
+    SchedulerEvent::Failed { header, error, will_retry, retry_after } => { ... }
     SchedulerEvent::Progress { header, percent, message } => { ... }
 }
 

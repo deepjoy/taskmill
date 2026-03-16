@@ -62,7 +62,7 @@ tokio::spawn(async move {
             SchedulerEvent::Completed(header) => {
                 mark_done(header.task_id);
             }
-            SchedulerEvent::Failed { header, error, will_retry } => {
+            SchedulerEvent::Failed { header, error, will_retry, .. } => {
                 if !will_retry {
                     show_error(header.task_id, error);
                 }

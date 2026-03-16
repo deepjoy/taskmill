@@ -86,6 +86,9 @@ pub enum SchedulerEvent {
         header: TaskEventHeader,
         error: String,
         will_retry: bool,
+        /// How long until the next retry attempt. `None` if the task will not
+        /// be retried or if the retry is immediate (no backoff).
+        retry_after: Option<Duration>,
     },
     /// A task was preempted by higher-priority work.
     Preempted(TaskEventHeader),

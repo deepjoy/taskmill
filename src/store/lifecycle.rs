@@ -119,7 +119,7 @@ impl TaskStore {
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= datetime('now'))
+                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )",
@@ -185,7 +185,7 @@ impl TaskStore {
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= datetime('now'))
+                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )
@@ -540,6 +540,7 @@ impl TaskStore {
                 // Delayed retry — set run_after.
                 let run_after =
                     chrono::Utc::now() + chrono::Duration::milliseconds(delay.as_millis() as i64);
+                let run_after_str = run_after.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
                 sqlx::query(
                     "UPDATE tasks SET status = 'pending', started_at = NULL,
                         retry_count = retry_count + 1, last_error = ?,
@@ -547,7 +548,7 @@ impl TaskStore {
                      WHERE id = ?",
                 )
                 .bind(error)
-                .bind(run_after.format("%Y-%m-%d %H:%M:%S").to_string())
+                .bind(&run_after_str)
                 .bind(task.id)
                 .execute(&mut **conn)
                 .await?;
