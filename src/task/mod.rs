@@ -21,6 +21,8 @@
 //! - `Completed` / `Failed` / `Cancelled` / `Superseded` / `Expired` — standard outcomes
 //! - [`DependencyFailed`](HistoryStatus::DependencyFailed) — task was cancelled
 //!   because a dependency failed, per its [`DependencyFailurePolicy`]
+//! - [`DeadLetter`](HistoryStatus::DeadLetter) — retries exhausted; task may
+//!   succeed if manually re-submitted
 //!
 //! Submit tasks via [`Scheduler::submit`](crate::Scheduler::submit),
 //! [`Scheduler::submit_typed`](crate::Scheduler::submit_typed), or
@@ -30,6 +32,7 @@
 
 pub mod dedup;
 mod error;
+pub mod retry;
 mod submission;
 #[cfg(test)]
 mod tests;
@@ -44,6 +47,7 @@ use crate::priority::Priority;
 
 pub use dedup::{generate_dedup_key, MAX_PAYLOAD_BYTES};
 pub use error::TaskError;
+pub use retry::{BackoffStrategy, RetryPolicy};
 pub use submission::{
     BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy, RecurringSchedule,
     SubmitOutcome, TaskSubmission, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
@@ -137,8 +141,15 @@ pub enum HistoryStatus {
     Superseded,
     Expired,
     /// A dependency failed and this task was auto-cancelled per its
-    /// [`DependencyFailurePolicy`](crate::DependencyFailurePolicy).
+    /// [`DependencyFailurePolicy`].
     DependencyFailed,
+    /// Retries exhausted — the task failed with a retryable error but has
+    /// reached its `max_retries` limit. Unlike `Failed` (permanent/non-retryable
+    /// error), dead-lettered tasks *might* succeed if retried later.
+    ///
+    /// Query with [`Scheduler::dead_letter_tasks`](crate::Scheduler::dead_letter_tasks)
+    /// and re-submit with [`Scheduler::retry_dead_letter`](crate::Scheduler::retry_dead_letter).
+    DeadLetter,
 }
 
 impl HistoryStatus {
@@ -150,6 +161,7 @@ impl HistoryStatus {
             Self::Superseded => "superseded",
             Self::Expired => "expired",
             Self::DependencyFailed => "dependency_failed",
+            Self::DeadLetter => "dead_letter",
         }
     }
 }
@@ -165,6 +177,7 @@ impl std::str::FromStr for HistoryStatus {
             "superseded" => Ok(Self::Superseded),
             "expired" => Ok(Self::Expired),
             "dependency_failed" => Ok(Self::DependencyFailed),
+            "dead_letter" => Ok(Self::DeadLetter),
             other => Err(format!("unknown HistoryStatus: {other}")),
         }
     }
@@ -224,6 +237,10 @@ pub struct TaskRecord {
     pub on_dependency_failure: DependencyFailurePolicy,
     /// Key-value metadata tags for filtering, grouping, and display.
     pub tags: HashMap<String, String>,
+    /// Per-task retry limit. `None` means use global default (backward compat
+    /// with pre-migration tasks). Resolved at submit time from: per-type
+    /// retry policy → global `SchedulerConfig::max_retries`.
+    pub max_retries: Option<i32>,
 }
 
 impl TaskRecord {
@@ -288,6 +305,8 @@ pub struct TaskHistoryRecord {
     pub run_after: Option<DateTime<Utc>>,
     /// Key-value metadata tags for filtering, grouping, and display.
     pub tags: HashMap<String, String>,
+    /// Per-task retry limit. `None` means use global default.
+    pub max_retries: Option<i32>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.

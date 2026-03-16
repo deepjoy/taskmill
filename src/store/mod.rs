@@ -28,6 +28,8 @@ mod query;
 pub(crate) mod row_mapping;
 mod submit;
 
+pub use lifecycle::FailBackoff;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +58,10 @@ pub enum StoreError {
     CyclicDependency,
     #[error("invalid tag: {0}")]
     InvalidTag(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("invalid state: {0}")]
+    InvalidState(String),
 }
 
 impl From<sqlx::Error> for StoreError {
@@ -249,6 +255,11 @@ impl TaskStore {
         .await?;
         Self::run_alter_migration(&self.pool, include_str!("../../migrations/007_tags.sql"))
             .await?;
+        Self::run_alter_migration(
+            &self.pool,
+            include_str!("../../migrations/008_retry_backoff.sql"),
+        )
+        .await?;
         Ok(())
     }
 
@@ -419,6 +430,23 @@ impl TaskStore {
             tracing::warn!(error = %e, "WAL checkpoint failed during close");
         }
         self.pool.close().await;
+    }
+
+    /// Delete a history record by id. Returns true if a row was deleted.
+    ///
+    /// Also removes associated history tags.
+    pub async fn delete_history(&self, history_id: i64) -> Result<bool, StoreError> {
+        let mut conn = self.begin_write().await?;
+        sqlx::query("DELETE FROM task_history_tags WHERE history_rowid = ?")
+            .bind(history_id)
+            .execute(&mut *conn)
+            .await?;
+        let result = sqlx::query("DELETE FROM task_history WHERE id = ?")
+            .bind(history_id)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Delete a task from the active queue by id. Returns true if a row was deleted.

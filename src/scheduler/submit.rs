@@ -8,8 +8,8 @@ use crate::priority::Priority;
 use crate::registry::{IoTracker, TaskContext};
 use crate::store::StoreError;
 use crate::task::{
-    generate_dedup_key, BatchOutcome, BatchSubmission, SubmitOutcome, TaskLookup, TaskRecord,
-    TaskSubmission, TypedTask,
+    generate_dedup_key, BatchOutcome, BatchSubmission, HistoryStatus, SubmitOutcome, TaskLookup,
+    TaskRecord, TaskSubmission, TypedTask,
 };
 
 use super::progress::ProgressReporter;
@@ -298,7 +298,7 @@ impl Scheduler {
 
     /// Cancel all active tasks matching a tag key-value pair.
     ///
-    /// Finds tasks via [`TaskStore::tasks_by_tags`] and cancels each one.
+    /// Finds tasks via [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags) and cancels each one.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag(&self, key: &str, value: &str) -> Result<Vec<i64>, StoreError> {
         let tasks = self
@@ -394,6 +394,65 @@ impl Scheduler {
                 .event_tx
                 .send(SchedulerEvent::Cancelled(at.record.event_header()));
         }
+    }
+
+    /// Re-submit a dead-lettered task.
+    ///
+    /// Loads the history record, verifies it has `dead_letter` status, constructs
+    /// a new [`TaskSubmission`] from its fields, submits it (going through normal
+    /// dedup and validation), and removes the history row on success.
+    ///
+    /// The re-submitted task starts with `retry_count = 0`.
+    pub async fn retry_dead_letter(&self, history_id: i64) -> Result<SubmitOutcome, StoreError> {
+        let record = self
+            .inner
+            .store
+            .history_by_id(history_id)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("history record {history_id}")))?;
+
+        if record.status != HistoryStatus::DeadLetter {
+            return Err(StoreError::InvalidState(format!(
+                "history record {history_id} has status {:?}, expected DeadLetter",
+                record.status
+            )));
+        }
+
+        // Reconstruct a submission from the history record.
+        // If label != task_type, the original submission had an explicit dedup
+        // key (label preserves the original key string). Otherwise, the key
+        // was derived from the payload hash.
+        let mut sub = TaskSubmission::new(&record.task_type)
+            .priority(record.priority)
+            .expected_io(record.expected_io)
+            .tags(record.tags.clone());
+
+        if record.label != record.task_type {
+            sub = sub.key(&record.label);
+        }
+
+        if let Some(payload) = &record.payload {
+            sub = sub.payload_raw(payload.clone());
+        }
+        if let Some(parent_id) = record.parent_id {
+            sub.parent_id = Some(parent_id);
+        }
+        sub.fail_fast = record.fail_fast;
+        if let Some(ref gk) = record.group_key {
+            sub.group_key = Some(gk.clone());
+        }
+        if let Some(mr) = record.max_retries {
+            sub.max_retries = Some(mr);
+        }
+
+        let outcome = self.submit(&sub).await?;
+
+        // Remove the dead-letter history row on successful submission.
+        if outcome.is_inserted() {
+            self.inner.store.delete_history(history_id).await?;
+        }
+
+        Ok(outcome)
     }
 
     /// Fire the `on_cancel` hook for a task (fire-and-forget).

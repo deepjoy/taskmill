@@ -7,14 +7,14 @@
 //! integration. Use [`SchedulerBuilder`] for ergonomic construction.
 //!
 //! The `Scheduler` implementation is split across focused submodules:
-//! - [`submit`] — task submission, lookup, cancellation, and superseding
-//! - [`run_loop`] — the main event loop, dispatch, and shutdown
-//! - [`control`] — pause/resume, concurrency limits, and group limits
-//! - [`queries`] — read-only queries (active tasks, progress, snapshots)
-//! - [`builder`] — ergonomic construction via [`SchedulerBuilder`]
-//! - [`dispatch`] — task spawning, active-task tracking, and preemption
-//! - [`gate`] — admission control (IO budget, backpressure, group limits)
-//! - [`event`] — event types and scheduler configuration
+//! - `submit` — task submission, lookup, cancellation, and superseding
+//! - `run_loop` — the main event loop, dispatch, and shutdown
+//! - `control` — pause/resume, concurrency limits, and group limits
+//! - `queries` — read-only queries (active tasks, progress, snapshots)
+//! - `builder` — ergonomic construction via [`SchedulerBuilder`]
+//! - `dispatch` — task spawning, active-task tracking, and preemption
+//! - `gate` — admission control (IO budget, backpressure, group limits)
+//! - `event` — event types and scheduler configuration
 //! - [`progress`] — progress reporting, byte-level tracking, and extrapolation
 //!
 //! See the [crate-level docs](crate) for a full walkthrough of the task

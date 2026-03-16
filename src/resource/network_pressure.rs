@@ -1,4 +1,4 @@
-//! Built-in [`PressureSource`](crate::PressureSource) derived from network bandwidth utilization.
+//! Built-in [`PressureSource`] derived from network bandwidth utilization.
 //!
 //! [`NetworkPressure`] reads the latest [`ResourceSnapshot`](crate::ResourceSnapshot)
 //! and computes pressure as the ratio of observed network throughput to a

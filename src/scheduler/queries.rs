@@ -65,7 +65,7 @@ impl Scheduler {
 
     /// Find active tasks matching all specified tag filters (AND semantics).
     ///
-    /// Delegates to [`TaskStore::tasks_by_tags`].
+    /// Delegates to [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags).
     pub async fn tasks_by_tags(
         &self,
         filters: &[(&str, &str)],
@@ -76,7 +76,7 @@ impl Scheduler {
 
     /// Count active tasks grouped by a tag key's values.
     ///
-    /// Delegates to [`TaskStore::count_by_tag`].
+    /// Delegates to [`TaskStore::count_by_tag`](crate::TaskStore::count_by_tag).
     pub async fn count_by_tag(
         &self,
         key: &str,
@@ -87,9 +87,22 @@ impl Scheduler {
 
     /// List distinct values for a tag key across active tasks, with counts.
     ///
-    /// Delegates to [`TaskStore::tag_values`].
+    /// Delegates to [`TaskStore::tag_values`](crate::TaskStore::tag_values).
     pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
         self.inner.store.tag_values(key).await
+    }
+
+    /// Dead-lettered tasks (retries exhausted), newest first.
+    ///
+    /// These are tasks that failed with a retryable error but exhausted their
+    /// retry limit. Use [`retry_dead_letter`](Self::retry_dead_letter) to
+    /// re-submit them.
+    pub async fn dead_letter_tasks(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::task::TaskHistoryRecord>, StoreError> {
+        self.inner.store.dead_letter_tasks(limit, offset).await
     }
 
     /// Capture a single status snapshot for dashboard UIs.

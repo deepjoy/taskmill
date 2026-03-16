@@ -94,8 +94,8 @@ pub(crate) async fn submit_one(
     let on_dep_failure_str = sub.on_dependency_failure.as_str();
 
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at, run_after, recurring_interval_secs, recurring_max_executions, on_dep_failure)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at, run_after, recurring_interval_secs, recurring_max_executions, on_dep_failure, max_retries)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&sub.task_type)
     .bind(&key)
@@ -116,6 +116,7 @@ pub(crate) async fn submit_one(
     .bind(recurring_interval_secs)
     .bind(recurring_max_executions)
     .bind(on_dep_failure_str)
+    .bind(sub.max_retries)
     .execute(&mut **conn)
     .await?;
 
@@ -267,7 +268,7 @@ pub(crate) async fn supersede_existing(
                     expected_net_rx_bytes = ?, expected_net_tx_bytes = ?,
                     retry_count = 0, last_error = NULL, status = 'pending',
                     requeue = 0, requeue_priority = NULL, fail_fast = ?, group_key = ?,
-                    ttl_seconds = ?, ttl_from = ?, expires_at = ?
+                    ttl_seconds = ?, ttl_from = ?, expires_at = ?, max_retries = ?
                  WHERE id = ?",
             )
             .bind(&sub.label)
@@ -282,6 +283,7 @@ pub(crate) async fn supersede_existing(
             .bind(ttl_seconds)
             .bind(ttl_from_str)
             .bind(&expires_at)
+            .bind(sub.max_retries)
             .bind(replaced_id)
             .execute(&mut **conn)
             .await?;
@@ -307,8 +309,8 @@ pub(crate) async fn supersede_existing(
                 "INSERT INTO tasks (task_type, key, label, priority, payload,
                     expected_read_bytes, expected_write_bytes, expected_net_rx_bytes,
                     expected_net_tx_bytes, parent_id, fail_fast, group_key,
-                    ttl_seconds, ttl_from, expires_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ttl_seconds, ttl_from, expires_at, max_retries)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(key)
@@ -325,6 +327,7 @@ pub(crate) async fn supersede_existing(
             .bind(ttl_seconds)
             .bind(ttl_from_str)
             .bind(&expires_at)
+            .bind(sub.max_retries)
             .execute(&mut **conn)
             .await?;
 
@@ -677,7 +680,14 @@ mod tests {
         store.submit(&sub_high).await.unwrap();
 
         store
-            .fail(task.id, "boom", false, 0, &IoBudget::default())
+            .fail(
+                task.id,
+                "boom",
+                false,
+                0,
+                &IoBudget::default(),
+                &Default::default(),
+            )
             .await
             .unwrap();
 

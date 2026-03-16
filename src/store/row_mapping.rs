@@ -10,8 +10,11 @@ use crate::task::{
 };
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
-    // SQLite stores as "YYYY-MM-DD HH:MM:SS". Parse with chrono.
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+    // SQLite stores as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm"
+    // (the latter from backoff-computed run_after). Try with fractional seconds
+    // first, then fall back to whole-second precision.
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
         .map(|ndt| ndt.and_utc())
         .unwrap_or_default()
 }
@@ -71,6 +74,7 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
             .unwrap_or(DependencyFailurePolicy::Cancel),
         // Tags are populated separately from the task_tags table.
         tags: std::collections::HashMap::new(),
+        max_retries: row.get("max_retries"),
     }
 }
 
@@ -129,5 +133,6 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         run_after: run_after_str.map(|s| parse_datetime(&s)),
         // Tags are populated separately from the task_history_tags table.
         tags: std::collections::HashMap::new(),
+        max_retries: row.get("max_retries"),
     }
 }

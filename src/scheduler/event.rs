@@ -73,7 +73,7 @@ pub struct TaskEventHeader {
 /// Events emitted by the scheduler for UI integration and observability.
 ///
 /// Subscribe via the `tokio::sync::broadcast::Receiver` returned by
-/// [`Scheduler::subscribe`] or passed through the builder.
+/// [`Scheduler::subscribe`](super::Scheduler::subscribe) or passed through the builder.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum SchedulerEvent {
@@ -86,6 +86,9 @@ pub enum SchedulerEvent {
         header: TaskEventHeader,
         error: String,
         will_retry: bool,
+        /// How long until the next retry attempt. `None` if the task will not
+        /// be retried or if the retry is immediate (no backoff).
+        retry_after: Option<Duration>,
     },
     /// A task was preempted by higher-priority work.
     Preempted(TaskEventHeader),
@@ -138,14 +141,24 @@ pub enum SchedulerEvent {
     },
     /// A blocked task became pending after all its dependencies completed.
     TaskUnblocked { task_id: i64 },
+    /// A task exhausted its retries and was moved to dead-letter state.
+    ///
+    /// The task failed with a retryable error but has reached its `max_retries`
+    /// limit. Use [`Scheduler::retry_dead_letter`](super::Scheduler::retry_dead_letter)
+    /// to re-submit.
+    DeadLettered {
+        header: TaskEventHeader,
+        error: String,
+        retry_count: i32,
+    },
     /// A blocked task was cancelled because a dependency failed.
     DependencyFailed {
         task_id: i64,
         failed_dependency: i64,
     },
-    /// The scheduler was globally paused via [`Scheduler::pause_all`].
+    /// The scheduler was globally paused via [`Scheduler::pause_all`](super::Scheduler::pause_all).
     Paused,
-    /// The scheduler was resumed via [`Scheduler::resume_all`].
+    /// The scheduler was resumed via [`Scheduler::resume_all`](super::Scheduler::resume_all).
     Resumed,
 }
 
@@ -161,7 +174,8 @@ impl SchedulerEvent {
             | Self::Superseded { old: header, .. }
             | Self::TaskExpired { header, .. }
             | Self::RecurringSkipped { header, .. }
-            | Self::RecurringCompleted { header, .. } => Some(header),
+            | Self::RecurringCompleted { header, .. }
+            | Self::DeadLettered { header, .. } => Some(header),
             Self::Waiting { .. }
             | Self::BatchSubmitted { .. }
             | Self::TaskUnblocked { .. }

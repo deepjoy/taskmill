@@ -11,10 +11,19 @@ use crate::registry::TaskExecutor;
 use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
+use crate::task::retry::RetryPolicy;
 use crate::task::TypedTask;
 
 use super::event::{SchedulerConfig, ShutdownMode};
 use super::Scheduler;
+
+/// A registered executor with its optional per-type TTL and retry policy.
+type ExecutorEntry = (
+    String,
+    Arc<dyn crate::registry::ErasedExecutor>,
+    Option<Duration>,
+    Option<RetryPolicy>,
+);
 
 /// Ergonomic builder for constructing a [`Scheduler`] with all its dependencies.
 ///
@@ -41,11 +50,7 @@ pub struct SchedulerBuilder {
     store_path: Option<String>,
     store_config: StoreConfig,
     store: Option<TaskStore>,
-    executors: Vec<(
-        String,
-        Arc<dyn crate::registry::ErasedExecutor>,
-        Option<Duration>,
-    )>,
+    executors: Vec<ExecutorEntry>,
     config: SchedulerConfig,
     pressure_sources: Vec<Box<dyn crate::backpressure::PressureSource + 'static>>,
     policy: Option<ThrottlePolicy>,
@@ -103,6 +108,7 @@ impl SchedulerBuilder {
             name.to_string(),
             executor as Arc<dyn crate::registry::ErasedExecutor>,
             None,
+            None,
         ));
         self
     }
@@ -121,6 +127,43 @@ impl SchedulerBuilder {
             name.to_string(),
             executor as Arc<dyn crate::registry::ErasedExecutor>,
             Some(ttl),
+            None,
+        ));
+        self
+    }
+
+    /// Register a task executor with a per-type retry policy.
+    ///
+    /// Tasks of this type will use this policy's backoff strategy and
+    /// max_retries instead of the global default.
+    pub fn executor_with_retry_policy<E: TaskExecutor>(
+        mut self,
+        name: &str,
+        executor: Arc<E>,
+        policy: RetryPolicy,
+    ) -> Self {
+        self.executors.push((
+            name.to_string(),
+            executor as Arc<dyn crate::registry::ErasedExecutor>,
+            None,
+            Some(policy),
+        ));
+        self
+    }
+
+    /// Register an executor with both a TTL and a retry policy.
+    pub fn executor_with_options<E: TaskExecutor>(
+        mut self,
+        name: &str,
+        executor: Arc<E>,
+        ttl: Option<Duration>,
+        retry_policy: Option<RetryPolicy>,
+    ) -> Self {
+        self.executors.push((
+            name.to_string(),
+            executor as Arc<dyn crate::registry::ErasedExecutor>,
+            ttl,
+            retry_policy,
         ));
         self
     }
@@ -330,14 +373,24 @@ impl SchedulerBuilder {
 
         // Build registry.
         let mut registry = crate::registry::TaskTypeRegistry::new();
-        for (name, executor, ttl) in self.executors {
+        for (name, executor, ttl, retry_policy) in self.executors {
             if registry.get(&name).is_some() {
                 panic!("task type '{name}' already registered");
             }
-            if let Some(ttl) = ttl {
-                registry.register_erased_with_ttl(&name, executor, ttl);
-            } else {
-                registry.register_erased(&name, executor);
+            match (ttl, retry_policy) {
+                (Some(ttl), Some(policy)) => {
+                    registry.register_erased_with_ttl(&name, executor, ttl);
+                    registry.set_retry_policy(&name, policy);
+                }
+                (Some(ttl), None) => {
+                    registry.register_erased_with_ttl(&name, executor, ttl);
+                }
+                (None, Some(policy)) => {
+                    registry.register_erased_with_retry_policy(&name, executor, policy);
+                }
+                (None, None) => {
+                    registry.register_erased(&name, executor);
+                }
             }
         }
 

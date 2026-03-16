@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::task::retry::RetryPolicy;
 use crate::task::TaskError;
 
 pub(crate) use child_spawner::{ChildSpawner, ParentContext};
@@ -104,6 +105,7 @@ pub trait TaskExecutor: Send + Sync + 'static {
 pub struct TaskTypeRegistry {
     types: HashMap<String, Arc<dyn ErasedExecutor>>,
     type_ttls: HashMap<String, std::time::Duration>,
+    type_retry_policies: HashMap<String, RetryPolicy>,
 }
 
 /// Object-safe wrapper around [`TaskExecutor`] for dynamic dispatch in the registry.
@@ -157,6 +159,7 @@ impl TaskTypeRegistry {
         Self {
             types: HashMap::new(),
             type_ttls: HashMap::new(),
+            type_retry_policies: HashMap::new(),
         }
     }
 
@@ -183,9 +186,25 @@ impl TaskTypeRegistry {
         self.type_ttls.insert(name.to_string(), ttl);
     }
 
+    /// Register an executor with a per-type retry policy.
+    pub fn register_with_retry_policy<E: TaskExecutor>(
+        &mut self,
+        name: &str,
+        executor: Arc<E>,
+        policy: RetryPolicy,
+    ) {
+        self.register(name, executor);
+        self.type_retry_policies.insert(name.to_string(), policy);
+    }
+
     /// Look up the per-type default TTL for a task type.
     pub fn type_ttl(&self, name: &str) -> Option<&std::time::Duration> {
         self.type_ttls.get(name)
+    }
+
+    /// Look up the per-type retry policy for a task type.
+    pub fn type_retry_policy(&self, name: &str) -> Option<&RetryPolicy> {
+        self.type_retry_policies.get(name)
     }
 
     /// Look up the executor for a task type.
@@ -227,6 +246,22 @@ impl TaskTypeRegistry {
         self.register_erased(name, executor);
         self.type_ttls.insert(name.to_string(), ttl);
     }
+
+    /// Set a retry policy for an already-registered task type.
+    pub(crate) fn set_retry_policy(&mut self, name: &str, policy: RetryPolicy) {
+        self.type_retry_policies.insert(name.to_string(), policy);
+    }
+
+    /// Register a pre-erased executor with a per-type retry policy.
+    pub(crate) fn register_erased_with_retry_policy(
+        &mut self,
+        name: &str,
+        executor: Arc<dyn ErasedExecutor>,
+        policy: RetryPolicy,
+    ) {
+        self.register_erased(name, executor);
+        self.type_retry_policies.insert(name.to_string(), policy);
+    }
 }
 
 impl Default for TaskTypeRegistry {
@@ -238,6 +273,7 @@ impl Default for TaskTypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::retry::{BackoffStrategy, RetryPolicy};
 
     struct NoopExecutor;
 
@@ -263,5 +299,49 @@ mod tests {
         let mut reg = TaskTypeRegistry::new();
         reg.register("dup", Arc::new(NoopExecutor));
         reg.register("dup", Arc::new(NoopExecutor));
+    }
+
+    #[test]
+    fn register_with_retry_policy_stores_policy() {
+        let mut reg = TaskTypeRegistry::new();
+        let policy = RetryPolicy {
+            strategy: BackoffStrategy::Exponential {
+                initial: std::time::Duration::from_secs(1),
+                max: std::time::Duration::from_secs(60),
+                multiplier: 2.0,
+            },
+            max_retries: 5,
+        };
+        reg.register_with_retry_policy("api-call", Arc::new(NoopExecutor), policy);
+
+        assert!(reg.get("api-call").is_some());
+        let retrieved = reg.type_retry_policy("api-call").unwrap();
+        assert_eq!(retrieved.max_retries, 5);
+    }
+
+    #[test]
+    fn type_retry_policy_returns_none_for_missing() {
+        let mut reg = TaskTypeRegistry::new();
+        reg.register("plain", Arc::new(NoopExecutor));
+
+        assert!(reg.type_retry_policy("plain").is_none());
+        assert!(reg.type_retry_policy("nonexistent").is_none());
+    }
+
+    #[test]
+    fn register_erased_with_retry_policy_stores_policy() {
+        let mut reg = TaskTypeRegistry::new();
+        let policy = RetryPolicy {
+            strategy: BackoffStrategy::Constant {
+                delay: std::time::Duration::from_secs(10),
+            },
+            max_retries: 7,
+        };
+        let executor: Arc<dyn ErasedExecutor> = Arc::new(NoopExecutor);
+        reg.register_erased_with_retry_policy("erased-type", executor, policy);
+
+        assert!(reg.get("erased-type").is_some());
+        let retrieved = reg.type_retry_policy("erased-type").unwrap();
+        assert_eq!(retrieved.max_retries, 7);
     }
 }

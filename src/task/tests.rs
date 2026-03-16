@@ -240,6 +240,7 @@ fn event_header_includes_tags() {
         tags: HashMap::new(),
         dependencies: Vec::new(),
         on_dependency_failure: super::submission::DependencyFailurePolicy::Cancel,
+        max_retries: None,
     };
     record.tags.insert("env".into(), "prod".into());
     record.tags.insert("owner".into(), "alice".into());

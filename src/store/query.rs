@@ -268,6 +268,24 @@ impl TaskStore {
         Ok(records)
     }
 
+    /// Dead-lettered tasks from history (retries exhausted).
+    pub async fn dead_letter_tasks(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<TaskHistoryRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM task_history WHERE status = 'dead_letter' ORDER BY completed_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
+        self.populate_history_tags(&mut records).await?;
+        Ok(records)
+    }
+
     /// Failed tasks from history.
     pub async fn failed_tasks(&self, limit: i32) -> Result<Vec<TaskHistoryRecord>, StoreError> {
         let rows = sqlx::query(
@@ -339,7 +357,7 @@ impl TaskStore {
     /// This is the low-level building block for [`Scheduler::task_lookup`](crate::Scheduler::task_lookup).
     /// The `key` parameter is the pre-computed SHA-256 dedup key (as
     /// returned by [`generate_dedup_key`](crate::task::generate_dedup_key)
-    /// or [`TaskSubmission::effective_key`]).
+    /// or `TaskSubmission::effective_key`).
     pub async fn task_lookup(&self, key: &str) -> Result<TaskLookup, StoreError> {
         // Check active queue first (pending / running / paused).
         // task_by_key already populates tags.
