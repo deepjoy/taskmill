@@ -335,6 +335,9 @@ pub struct ModuleSnapshot {
 /// always forwarded.
 pub struct ModuleReceiver<E> {
     inner: tokio::sync::broadcast::Receiver<E>,
+    /// Module name, e.g. `"media"`. Used for event filtering on [`SchedulerEvent`].
+    name: Arc<str>,
+    /// Task-type prefix, e.g. `"media::"`. Used for progress event filtering.
     prefix: Arc<str>,
 }
 
@@ -351,7 +354,7 @@ impl ModuleReceiver<crate::scheduler::SchedulerEvent> {
             let event = self.inner.recv().await?;
             if event
                 .header()
-                .is_some_and(|h| h.task_type.starts_with(self.prefix.as_ref()))
+                .is_some_and(|h| h.module == self.name.as_ref())
             {
                 return Ok(event);
             }
@@ -839,6 +842,7 @@ impl ModuleHandle {
     pub fn subscribe(&self) -> ModuleReceiver<crate::scheduler::SchedulerEvent> {
         ModuleReceiver {
             inner: self.scheduler.inner.event_tx.subscribe(),
+            name: self.name.clone(),
             prefix: self.prefix.clone(),
         }
     }
@@ -849,6 +853,7 @@ impl ModuleHandle {
     pub fn subscribe_progress(&self) -> ModuleReceiver<TaskProgress> {
         ModuleReceiver {
             inner: self.scheduler.inner.progress_tx.subscribe(),
+            name: self.name.clone(),
             prefix: self.prefix.clone(),
         }
     }

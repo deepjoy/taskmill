@@ -3942,3 +3942,110 @@ async fn parent_method_inherits_ttl_and_tags() {
         "child's own tag should win over parent tag"
     );
 }
+
+// ── Step 11: Event Module Identity ──────────────────────────────────────────
+
+/// Events emitted for a `media::thumbnail` task carry `header.module == "media"`.
+#[tokio::test]
+async fn event_header_module_field_populated_from_task_type_prefix() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor("thumbnail", Arc::new(NoopExecutor)))
+        .max_concurrency(4)
+        .build()
+        .await
+        .unwrap();
+
+    let mut rx = sched.subscribe();
+
+    sched
+        .module("media")
+        .submit(TaskSubmission::new("thumbnail").key("thumb-1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let tok = token.clone();
+    tokio::spawn(async move { sched_clone.run(tok).await });
+
+    // Collect the Completed event and verify the module field.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut found = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            if let SchedulerEvent::Completed(ref h) = event {
+                assert_eq!(
+                    h.module, "media",
+                    "completed event for media::thumbnail should have module == 'media', got '{}'",
+                    h.module
+                );
+                assert_eq!(h.task_type, "media::thumbnail");
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "timed out waiting for Completed event");
+
+    token.cancel();
+}
+
+/// Events received via `ModuleHandle::subscribe()` have a `module` field that
+/// agrees with the module name — the filter and the field both identify the
+/// same module.
+#[tokio::test]
+async fn module_receiver_events_match_module_field() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor("thumbnail", Arc::new(NoopExecutor)))
+        .module(Module::new("sync").executor("push", Arc::new(NoopExecutor)))
+        .max_concurrency(8)
+        .build()
+        .await
+        .unwrap();
+
+    let mut media_rx = sched.module("media").subscribe();
+
+    // Submit tasks to both modules.
+    for i in 0..2 {
+        sched
+            .module("media")
+            .submit(TaskSubmission::new("thumbnail").key(format!("t{i}")))
+            .await
+            .unwrap();
+        sched
+            .module("sync")
+            .submit(TaskSubmission::new("push").key(format!("p{i}")))
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let tok = token.clone();
+    tokio::spawn(async move { sched_clone.run(tok).await });
+
+    // Collect 2 Completed events from media_rx and assert the module field.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completions = 0usize;
+    while completions < 2 && tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(100), media_rx.recv()).await
+        {
+            if let SchedulerEvent::Completed(ref h) = event {
+                assert_eq!(
+                    h.module, "media",
+                    "ModuleReceiver delivered event with wrong module field: '{}'",
+                    h.module
+                );
+                completions += 1;
+            }
+        }
+    }
+    assert_eq!(completions, 2, "should receive exactly 2 media completions");
+
+    token.cancel();
+}

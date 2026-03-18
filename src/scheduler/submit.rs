@@ -54,6 +54,11 @@ impl Scheduler {
             // submission info.
             let old_header = super::event::TaskEventHeader {
                 task_id: *replaced_task_id,
+                module: sub
+                    .task_type
+                    .split_once("::")
+                    .map(|(n, _)| n.to_string())
+                    .unwrap_or_default(),
                 task_type: sub.task_type.clone(),
                 key: sub.effective_key(),
                 label: sub.label.clone(),
@@ -108,6 +113,11 @@ impl Scheduler {
                 self.handle_superseded_active(*replaced_task_id).await;
                 let old_header = super::event::TaskEventHeader {
                     task_id: *replaced_task_id,
+                    module: sub
+                        .task_type
+                        .split_once("::")
+                        .map(|(n, _)| n.to_string())
+                        .unwrap_or_default(),
                     task_type: sub.task_type.clone(),
                     key: sub.effective_key(),
                     label: sub.label.clone(),

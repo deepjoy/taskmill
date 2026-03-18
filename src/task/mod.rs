@@ -262,6 +262,11 @@ impl TaskRecord {
     pub fn event_header(&self) -> crate::scheduler::event::TaskEventHeader {
         crate::scheduler::event::TaskEventHeader {
             task_id: self.id,
+            module: self
+                .task_type
+                .split_once("::")
+                .map(|(n, _)| n.to_string())
+                .unwrap_or_default(),
             task_type: self.task_type.clone(),
             key: self.key.clone(),
             label: self.label.clone(),
