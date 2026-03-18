@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use crate::priority::Priority;
 use crate::scheduler::Scheduler;
 use crate::store::StoreError;
-use crate::task::{SubmitOutcome, TaskSubmission};
+use crate::task::{SubmitOutcome, TaskSubmission, TtlFrom};
 
 /// Module-level defaults applied to every submission through a module handle.
 ///
@@ -326,7 +326,47 @@ impl SubmitBuilder {
     /// This is the method called by `IntoFuture`. You can also call it directly
     /// if you need to name the future type.
     pub async fn submit(self) -> Result<SubmitOutcome, StoreError> {
-        let (scheduler, resolved) = self.resolve();
+        let parent_id = self.override_parent_id;
+        let (scheduler, mut resolved) = self.resolve();
+
+        // When `.parent()` was set, inherit remaining TTL and tags from the
+        // parent record — matching `ChildSpawner` behaviour.
+        //
+        // - TTL: inherited only when no layer (builder override, module default,
+        //   TypedTask) has already set a TTL on the child.
+        // - Tags: parent tags fill in keys not already present on the child;
+        //   child-set tags always win on key conflicts.
+        if let Some(pid) = parent_id {
+            if let Ok(Some(parent)) = scheduler.store().task_by_id(pid).await {
+                // Inherit remaining parent TTL only if no layer set a child TTL.
+                if resolved.ttl.is_none() {
+                    if let Some(parent_ttl_secs) = parent.ttl_seconds {
+                        let parent_ttl = Duration::from_secs(parent_ttl_secs as u64);
+                        let ttl_start = match parent.ttl_from {
+                            TtlFrom::Submission => Some(parent.created_at),
+                            // If the parent hasn't started yet we can't compute
+                            // remaining TTL, so we skip inheritance.
+                            TtlFrom::FirstAttempt => parent.started_at,
+                        };
+                        if let Some(start) = ttl_start {
+                            let elapsed = Utc::now() - start;
+                            let elapsed_std = elapsed.to_std().unwrap_or_default();
+                            if let Some(remaining) = parent_ttl.checked_sub(elapsed_std) {
+                                if remaining > Duration::ZERO {
+                                    resolved.ttl = Some(remaining);
+                                    resolved.ttl_from = TtlFrom::Submission;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Merge parent tags: parent fills in keys the child doesn't have.
+                for (k, v) in &parent.tags {
+                    resolved.tags.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+
         scheduler.submit(&resolved).await
     }
 }

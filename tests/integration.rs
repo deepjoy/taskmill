@@ -3549,3 +3549,231 @@ async fn spawn_child_routes_through_current_module() {
         "child spawned via spawn_child should run with auto-prefixed task type"
     );
 }
+
+// ── Step 9: Cross-Module Child Spawning ───────────────────────────────────
+
+/// Executor in module "media" that submits a cross-module child to "analytics"
+/// using `SubmitBuilder::parent()`.
+struct CrossModuleParentExec {
+    child_submitted: Arc<AtomicBool>,
+}
+
+impl TaskExecutor for CrossModuleParentExec {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        ctx.module("analytics")
+            .submit(TaskSubmission::new("work").key("cross-child"))
+            .parent(ctx.record().id)
+            .await
+            .map_err(|e| TaskError::new(format!("{e}")))?;
+        self.child_submitted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Cross-module parent-child: parent in "media", child in "analytics".
+/// Parent should enter Waiting, then complete once the analytics child completes.
+#[tokio::test]
+async fn cross_module_parent_child_lifecycle() {
+    let child_submitted = Arc::new(AtomicBool::new(false));
+    let analytics_ran = Arc::new(AtomicBool::new(false));
+    let child_submitted_clone = child_submitted.clone();
+    let analytics_ran_clone = analytics_ran.clone();
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor(
+            "parent",
+            Arc::new(CrossModuleParentExec {
+                child_submitted: child_submitted_clone,
+            }),
+        ))
+        .module(Module::new("analytics").executor(
+            "work",
+            Arc::new({
+                struct AnalyticsExec(Arc<AtomicBool>);
+                impl TaskExecutor for AnalyticsExec {
+                    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+                        self.0.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                }
+                AnalyticsExec(analytics_ran_clone)
+            }),
+        ))
+        .max_concurrency(4)
+        .max_retries(0)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    let mut rx = sched.subscribe();
+
+    sched
+        .module("media")
+        .submit(TaskSubmission::new("parent").key("media-parent-1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    // Wait for the media parent to complete (after its analytics child completes).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let parent_completed = wait_for_event(
+        &mut rx,
+        deadline,
+        |evt| matches!(evt, SchedulerEvent::Completed(ref h) if h.task_type == "media::parent"),
+    )
+    .await;
+
+    token.cancel();
+
+    assert!(
+        child_submitted.load(Ordering::SeqCst),
+        "media executor should have submitted the analytics child"
+    );
+    assert!(
+        analytics_ran.load(Ordering::SeqCst),
+        "analytics::work child should have run"
+    );
+    assert!(
+        parent_completed.is_some(),
+        "media::parent should complete once its cross-module child completes"
+    );
+}
+
+/// Cross-module failure cascade: child in "analytics" fails permanently →
+/// parent in "media" is failed (fail_fast = true, the default).
+#[tokio::test]
+async fn cross_module_failure_cascade() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor(
+            "parent",
+            Arc::new(CrossModuleParentExec {
+                child_submitted: Arc::new(AtomicBool::new(false)),
+            }),
+        ))
+        .module(Module::new("analytics").executor("work", Arc::new(AlwaysFailExecutor)))
+        .max_concurrency(4)
+        .max_retries(0)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    let mut rx = sched.subscribe();
+
+    sched
+        .module("media")
+        .submit(
+            TaskSubmission::new("parent")
+                .key("media-parent-cascade")
+                .fail_fast(true),
+        )
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let parent_failed = wait_for_event(
+        &mut rx,
+        deadline,
+        |evt| {
+            matches!(evt, SchedulerEvent::Failed { ref header, .. } if header.task_type == "media::parent")
+        },
+    )
+    .await;
+
+    token.cancel();
+
+    assert!(
+        parent_failed.is_some(),
+        "media::parent should be failed when cross-module analytics::work child fails"
+    );
+}
+
+/// `.parent()` on `SubmitBuilder` inherits remaining parent TTL and tags.
+/// No scheduler run needed — just verify the stored child record.
+#[tokio::test]
+async fn parent_method_inherits_ttl_and_tags() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(
+            Module::new("media")
+                .executor("parent", Arc::new(NoopExecutor))
+                .executor("child", Arc::new(NoopExecutor)),
+        )
+        .max_concurrency(2)
+        .build()
+        .await
+        .unwrap();
+
+    // Submit parent with a 60-second TTL and a custom tag.
+    let parent_outcome = sched
+        .module("media")
+        .submit(
+            TaskSubmission::new("parent")
+                .key("ttl-parent")
+                .ttl(Duration::from_secs(60))
+                .tag("job", "pipeline-42"),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent_outcome.id().unwrap();
+
+    // Submit child with .parent() — no explicit TTL or tags on the child.
+    let child_outcome = sched
+        .module("media")
+        .submit(TaskSubmission::new("child").key("ttl-child"))
+        .parent(parent_id)
+        .await
+        .unwrap();
+    let child_id = child_outcome.id().unwrap();
+
+    let child = sched.store().task_by_id(child_id).await.unwrap().unwrap();
+
+    assert!(
+        child.ttl_seconds.is_some(),
+        "child should inherit parent TTL"
+    );
+    assert!(
+        child.ttl_seconds.unwrap() > 0,
+        "inherited TTL should be positive"
+    );
+    assert_eq!(
+        child.tags.get("job").map(String::as_str),
+        Some("pipeline-42"),
+        "child should inherit parent tag 'job'"
+    );
+    // Child's own tags take precedence — a tag set directly on the child
+    // should not be overwritten by the parent tag with the same key.
+    let child2_outcome = sched
+        .module("media")
+        .submit(
+            TaskSubmission::new("child")
+                .key("ttl-child-2")
+                .tag("job", "child-override"),
+        )
+        .parent(parent_id)
+        .await
+        .unwrap();
+    let child2 = sched
+        .store()
+        .task_by_id(child2_outcome.id().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child2.tags.get("job").map(String::as_str),
+        Some("child-override"),
+        "child's own tag should win over parent tag"
+    );
+}
