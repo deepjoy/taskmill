@@ -1,135 +1,137 @@
 # Multi-Module Applications
 
-Most production applications need more than one module. An upload service has ingestion, processing, and notification stages. A media app has transcoding, thumbnail generation, and CDN sync. This guide covers how to assemble multiple modules on a single `Scheduler` and the interactions you need to understand.
+Most production applications need more than one domain. An upload service has ingestion, processing, and notification stages. A media app has transcoding, thumbnail generation, and CDN sync. This guide covers how to assemble multiple domains on a single `Scheduler` and the interactions you need to understand.
 
 ## When you need multiple modules
 
-A single module is fine when all your task types share the same defaults (priority, retry policy, concurrency cap, state). Once you have task types with different operational characteristics — or you're pulling in library crates that bring their own modules — you need multiple modules.
+A single domain is fine when all your task types share the same defaults (priority, retry policy, concurrency cap, state). Once you have task types with different operational characteristics — or you're pulling in library crates that bring their own domains — you need multiple domains.
 
 Common reasons:
 
 - **Different concurrency budgets.** Uploads should run 4-wide; thumbnail generation can run 16-wide.
 - **Different retry policies.** API calls need exponential backoff; local file operations retry immediately.
-- **Scoped state.** Each module carries its own configuration without polluting a global namespace.
-- **Library integration.** Third-party crates register their own modules — you compose them alongside your own.
+- **Scoped state.** Each domain carries its own configuration without polluting a global namespace.
+- **Library integration.** Third-party crates register their own domains — you compose them alongside your own.
 
-## App layout: one module function per feature
+## App layout: one domain function per feature
 
-Define each module as a standalone function. This keeps registration clean and makes modules testable in isolation.
+Define each domain as a standalone function that returns a `Domain<D>`. This keeps registration clean and makes domains testable in isolation. Each domain is anchored to a zero-sized `DomainKey` struct that gives it a compile-time identity.
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Module, Priority, RetryPolicy, BackoffStrategy};
+use taskmill::{Domain, DomainKey, Priority, RetryPolicy};
 
-pub fn ingest_module(config: IngestConfig) -> Module {
-    Module::new("ingest")
-        .typed_executor::<FetchTask, _>(Arc::new(FetchExecutor))
-        .typed_executor::<ValidateTask, _>(Arc::new(ValidateExecutor))
-        .app_state(config)
+// Domain identity types — one per feature.
+pub struct Ingest;
+impl DomainKey for Ingest { const NAME: &'static str = "ingest"; }
+
+pub struct Process;
+impl DomainKey for Process { const NAME: &'static str = "process"; }
+
+pub struct Notify;
+impl DomainKey for Notify { const NAME: &'static str = "notify"; }
+
+pub fn ingest_domain(config: IngestConfig) -> Domain<Ingest> {
+    Domain::<Ingest>::new()
+        .task::<FetchTask>(FetchExecutor)
+        .task::<ValidateTask>(ValidateExecutor)
+        .state(config)
         .max_concurrency(4)
         .default_priority(Priority::NORMAL)
 }
 
-pub fn process_module() -> Module {
-    Module::new("process")
-        .typed_executor::<TranscodeTask, _>(Arc::new(TranscodeExecutor))
-        .typed_executor::<ThumbnailTask, _>(Arc::new(ThumbnailExecutor))
+pub fn process_domain() -> Domain<Process> {
+    Domain::<Process>::new()
+        .task::<TranscodeTask>(TranscodeExecutor)
+        .task::<ThumbnailTask>(ThumbnailExecutor)
         .max_concurrency(8)
         .default_priority(Priority::BACKGROUND)
 }
 
-pub fn notify_module(config: NotifyConfig) -> Module {
-    Module::new("notify")
-        .typed_executor::<SendEmailTask, _>(Arc::new(EmailExecutor))
-        .app_state(config)
-        .default_retry_policy(RetryPolicy {
-            strategy: BackoffStrategy::Exponential {
-                initial: Duration::from_secs(5),
-                max: Duration::from_secs(300),
-                multiplier: 2.0,
-            },
-            max_retries: 5,
-        })
+pub fn notify_domain(config: NotifyConfig) -> Domain<Notify> {
+    Domain::<Notify>::new()
+        .task::<SendEmailTask>(EmailExecutor)
+        .state(config)
+        .default_retry(RetryPolicy::exponential(5, Duration::from_secs(5), Duration::from_secs(300)))
 }
 ```
 
-Register all modules at build time:
+Register all domains at build time:
 
 ```rust
 let scheduler = Scheduler::builder()
     .store_path("app.db")
-    .module(ingest_module(ingest_config))
-    .module(process_module())
-    .module(notify_module(notify_config))
-    .app_state(SharedDb::new())     // global state visible to all modules
+    .domain(ingest_domain(ingest_config))
+    .domain(process_domain())
+    .domain(notify_domain(notify_config))
+    .app_state(SharedDb::new())     // global state visible to all domains
     .max_concurrency(16)            // global cap
     .build()
     .await?;
 ```
 
-`build()` returns an error if two modules share the same name. Use distinct, descriptive names — see [Writing a Reusable Module](library-modules.md#naming-avoid-conflicts-export-a-constant) for naming guidance.
+`build()` returns an error if two domains share the same name. Use distinct, descriptive names — see [Writing a Reusable Module](library-modules.md#naming-avoid-conflicts-export-a-constant) for naming guidance.
 
 ## Global state vs. module state — what goes where
 
-State registered on `SchedulerBuilder::app_state()` is **global** — visible to executors in every module. State registered on `Module::app_state()` is **module-scoped** — visible only to executors in that module.
+State registered on `SchedulerBuilder::app_state()` is **global** — visible to executors in every domain. State registered on `Domain::state()` is **domain-scoped** — visible only to executors in that domain.
 
-`TaskContext::state::<T>()` checks module-scoped state first, then falls back to global state.
+`TaskContext::state::<T>()` checks domain-scoped state first, then falls back to global state.
 
 | What | Where to register | Why |
 |------|-------------------|-----|
-| Database pool, HTTP client | Global (`builder.app_state()`) | Shared infrastructure used by many modules |
-| Module-specific config (API keys, bucket names) | Module (`Module::app_state()`) | Only relevant to one module's executors |
+| Database pool, HTTP client | Global (`builder.app_state()`) | Shared infrastructure used by many domains |
+| Domain-specific config (API keys, bucket names) | Domain (`Domain::state()`) | Only relevant to one domain's executors |
 | Feature flags, metrics collector | Global | Cross-cutting concerns |
 
 ```rust
 // In an executor:
 let db = ctx.state::<SharedDb>().expect("SharedDb not registered");       // global
-let cfg = ctx.state::<IngestConfig>().expect("IngestConfig not registered"); // module-scoped
+let cfg = ctx.state::<IngestConfig>().expect("IngestConfig not registered"); // domain-scoped
 ```
 
-If two modules register the same type `T` as module state, each module's executors see their own instance. The global instance (if any) is shadowed within each module.
+If two domains register the same type `T` as domain state, each domain's executors see their own instance. The global instance (if any) is shadowed within each domain.
 
-## Sharing the scheduler: Clone and ModuleHandle
+## Sharing the scheduler: Clone and DomainHandle
 
-`Scheduler` is `Clone` (via `Arc`) — pass it freely to async tasks, Tauri commands, or API handlers. Grab module handles at startup for convenient access:
+`Scheduler` is `Clone` (via `Arc`) — pass it freely to async tasks, Tauri commands, or API handlers. Grab typed domain handles at startup for convenient access:
 
 ```rust
 let scheduler = build_scheduler().await?;
 
 // Grab handles once — they're Clone too.
-let ingest = scheduler.module("ingest");
-let process = scheduler.module("process");
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
 
 // Use from anywhere.
 tokio::spawn(async move {
-    ingest.submit_typed(&FetchTask { url: "...".into() }).await.unwrap();
+    ingest.submit(FetchTask { url: "...".into() }).await.unwrap();
 });
 ```
 
-`scheduler.module("name")` panics if the module isn't registered — use it at well-known call sites where a typo is a programming error. For dynamic lookups (e.g., plugin systems), use `scheduler.try_module("name")` which returns `Option<ModuleHandle>`.
+`scheduler.domain::<D>()` panics if the domain isn't registered — use it at well-known call sites where a missing registration is a programming error. For dynamic lookups (e.g., plugin systems), use `scheduler.try_domain::<D>()` which returns `Option<DomainHandle<D>>`.
 
 ## Cross-module task dependencies
 
-A task in one module can depend on a task in another module. Cross-module dependencies work identically to same-module dependencies — the module boundary does not affect dependency resolution or failure propagation.
+A task in one domain can depend on a task in another domain. Cross-domain dependencies work identically to same-domain dependencies — the domain boundary does not affect dependency resolution or failure propagation.
 
 ### The pattern
 
-Submit a task in module A, capture its ID, then use that ID as a dependency in module B:
+Submit a task in domain A, capture its ID, then use that ID as a dependency in domain B:
 
 ```rust
-let ingest = scheduler.module("ingest");
-let process = scheduler.module("process");
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
 
-// Submit in the ingest module.
-let outcome = ingest.submit_typed(&FetchTask {
+// Submit in the ingest domain.
+let outcome = ingest.submit(FetchTask {
     url: source_url.clone(),
 }).await?;
 
 let fetch_id = outcome.id().expect("not a duplicate");
 
-// This task in the process module won't start until the fetch completes.
-process.submit_typed(&TranscodeTask {
+// This task in the process domain won't start until the fetch completes.
+process.submit_with(TranscodeTask {
     source: source_url,
 })
     .depends_on(fetch_id)
@@ -138,13 +140,13 @@ process.submit_typed(&TranscodeTask {
 
 ### Failure cascade across modules
 
-If the ingest task fails permanently, its dependents in the process module follow the `DependencyFailurePolicy` — the module boundary is irrelevant. The default policy (`Cancel`) moves the dependent to history as `DependencyFailed` and cascades to further dependents.
+If the ingest task fails permanently, its dependents in the process domain follow the `DependencyFailurePolicy` — the domain boundary is irrelevant. The default policy (`Cancel`) moves the dependent to history as `DependencyFailed` and cascades to further dependents.
 
 ```rust
 use taskmill::DependencyFailurePolicy;
 
 // Run the transcode anyway, even if the fetch failed.
-process.submit_typed(&TranscodeTask { source })
+process.submit_with(TranscodeTask { source })
     .depends_on(fetch_id)
     .on_dependency_failure(DependencyFailurePolicy::Ignore)
     .await?;
@@ -152,15 +154,15 @@ process.submit_typed(&TranscodeTask { source })
 
 ### From within an executor
 
-Executors can submit to other modules via `ctx.module("name")`:
+Executors can submit to other domains via `ctx.domain::<D>()`:
 
 ```rust
-impl TaskExecutor for FetchExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-        let data = fetch_remote(&ctx.payload::<FetchTask>()?).await?;
+impl TypedExecutor<FetchTask> for FetchExecutor {
+    async fn execute(&self, task: FetchTask, ctx: &TaskContext) -> Result<(), TaskError> {
+        let data = fetch_remote(&task).await?;
 
-        // Submit a follow-up in a different module.
-        ctx.module("process").submit_typed(&TranscodeTask {
+        // Submit a follow-up in a different domain.
+        ctx.domain::<Process>().submit(TranscodeTask {
             source: data.path,
         }).await.map_err(|e| TaskError::permanent(e.to_string()))?;
 
@@ -169,13 +171,13 @@ impl TaskExecutor for FetchExecutor {
 }
 ```
 
-Use `ctx.try_module("analytics")` if the target module is optional (e.g., an analytics plugin that may not be registered).
+Use `ctx.try_domain::<Analytics>()` if the target domain is optional (e.g., an analytics plugin that may not be registered).
 
 ## Concurrency budgets across modules
 
 ### Global cap and per-module cap as AND-gates
 
-Both the global `max_concurrency` and per-module `max_concurrency` must have headroom for a task to be dispatched. They are **caps, not reservations** — setting a module's cap to 4 does not guarantee it gets 4 slots.
+Both the global `max_concurrency` and per-domain `max_concurrency` must have headroom for a task to be dispatched. They are **caps, not reservations** — setting a domain's cap to 4 does not guarantee it gets 4 slots.
 
 ```
 Global max_concurrency: 16
@@ -186,26 +188,29 @@ Global max_concurrency: 16
 
 A task is dispatched when **all** of these pass:
 1. `active_count < global max_concurrency`
-2. `module_running_count < module max_concurrency` (if set)
+2. `domain_running_count < domain max_concurrency` (if set)
 3. `group_running_count < group concurrency limit` (if the task has a group)
 4. Backpressure / IO budget check passes
 
 ### Module starvation: understanding priority competition
 
-A module with only `BACKGROUND`-priority tasks can be indefinitely deferred when other modules continuously submit `NORMAL` work. This is by design — priority ordering is global across all modules.
+A domain with only `BACKGROUND`-priority tasks can be indefinitely deferred when other domains continuously submit `NORMAL` work. This is by design — priority ordering is global across all domains.
 
-If you need guaranteed throughput for a module:
+If you need guaranteed throughput for a domain:
 - **Raise the priority** of its most important tasks to `NORMAL` or `HIGH`.
 - **Use task groups** with a dedicated concurrency reservation. A group limit acts as a soft floor: tasks in the group bypass the global priority queue as long as the group has available slots.
 
 ### Using group concurrency as a soft floor
 
 ```rust
+pub struct Sync;
+impl DomainKey for Sync { const NAME: &'static str = "sync"; }
+
 // Reserve 2 concurrent slots for background sync, even under load.
 let scheduler = Scheduler::builder()
-    .module(
-        Module::new("sync")
-            .typed_executor::<SyncTask, _>(Arc::new(SyncExecutor))
+    .domain(
+        Domain::<Sync>::new()
+            .task::<SyncTask>(SyncExecutor)
             .default_group("sync-reserved")
             .default_priority(Priority::BACKGROUND)
     )
@@ -217,61 +222,68 @@ let scheduler = Scheduler::builder()
 
 ## Coordinating with tags: logical jobs across modules
 
-Tags let you group tasks that belong to the same logical "job" across multiple modules. This is the idiomatic way to cancel, query, or monitor a pipeline that spans modules.
+Tags let you group tasks that belong to the same logical "job" across multiple domains. This is the idiomatic way to cancel, query, or monitor a pipeline that spans domains.
 
 ### Tagging tasks at submit time
 
 ```rust
 let job_id = generate_job_id();
 
-scheduler.module("ingest")
-    .submit_typed(&FetchTask { url: source.clone() })
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
+
+ingest.submit_with(FetchTask { url: source.clone() })
     .tag("job_id", &job_id)
     .await?;
 
-scheduler.module("process")
-    .submit_typed(&TranscodeTask { source })
+process.submit_with(TranscodeTask { source })
     .tag("job_id", &job_id)
     .await?;
 ```
 
 ### Querying job progress across modules
 
-Use `scheduler.modules()` to iterate over all modules and aggregate:
+Use typed domain handles to query individual domains and aggregate:
 
 ```rust
-let mut total_pending = 0i64;
-let mut total_running = 0;
-for handle in scheduler.modules() {
-    let snap = handle.snapshot().await?;
-    total_pending += snap.pending_count;
-    total_running += snap.running.len();
-}
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
+
+let ingest_snap = ingest.snapshot().await?;
+let process_snap = process.snapshot().await?;
+
+let total_pending = ingest_snap.pending_count + process_snap.pending_count;
+let total_running = ingest_snap.running.len() + process_snap.running.len();
 ```
 
-### Bulk-cancelling a job via scheduler.modules()
+### Bulk-cancelling a job across domains
 
 ```rust
-for handle in scheduler.modules() {
-    handle.cancel_where(|task| {
-        task.tags.get("job_id").map(String::as_str) == Some(&job_id)
-    }).await?;
-}
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
+
+ingest.cancel_where(|task| {
+    task.tags.get("job_id").map(String::as_str) == Some(&job_id)
+}).await?;
+
+process.cancel_where(|task| {
+    task.tags.get("job_id").map(String::as_str) == Some(&job_id)
+}).await?;
 ```
 
 ## Module-level pause and resume
 
-Each module can be independently paused and resumed without affecting other modules.
+Each domain can be independently paused and resumed without affecting other domains.
 
 ```rust
-let ingest = scheduler.module("ingest");
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
 
-// Pause — stops new task dispatch for this module. Running tasks are
+// Pause — stops new task dispatch for this domain. Running tasks are
 // interrupted (cancellation token triggered) and moved to paused status.
 // Pending tasks are also moved to paused.
 ingest.pause().await?;
 
-// Resume — clears the module pause flag and moves paused tasks back to pending.
+// Resume — clears the domain pause flag and moves paused tasks back to pending.
 ingest.resume().await?;
 
 // Check state.
@@ -280,7 +292,7 @@ assert!(ingest.is_paused()); // after pause()
 
 ### Interaction with global pause
 
-The scheduler must be globally **unpaused** AND the module must be **unpaused** for dispatch to proceed. Module pause is additive:
+The scheduler must be globally **unpaused** AND the domain must be **unpaused** for dispatch to proceed. Domain pause is additive:
 
 | `scheduler.pause_all()` | `handle.pause()` | Dispatch? |
 |--------------------------|-------------------|-----------|
@@ -289,52 +301,59 @@ The scheduler must be globally **unpaused** AND the module must be **unpaused** 
 | Yes | No | No |
 | Yes | Yes | No |
 
-`handle.resume()` clears the module flag but does **not** override a global pause — database tasks stay `paused` until the global scheduler is also resumed.
+`handle.resume()` clears the domain flag but does **not** override a global pause — database tasks stay `paused` until the global scheduler is also resumed.
 
 ### Use case
 
-A library module with a background sync feature that the user can toggle from settings:
+A library domain with a background sync feature that the user can toggle from settings:
 
 ```rust
 // User toggles sync off in the UI.
-scheduler.module("sync").pause().await?;
+scheduler.domain::<Sync>().pause().await?;
 
-// Other modules continue running normally.
-scheduler.module("ingest").submit_typed(&task).await?; // still works
+// Other domains continue running normally.
+scheduler.domain::<Ingest>().submit(task).await?; // still works
 
 // User turns sync back on.
-scheduler.module("sync").resume().await?;
+scheduler.domain::<Sync>().resume().await?;
 ```
 
 ## Building a cross-module dashboard
 
 ### scheduler.snapshot() vs. per-module snapshot()
 
-`scheduler.snapshot()` returns a `SchedulerSnapshot` with global aggregates — total running, pending, pressure, and progress across all modules.
+`scheduler.snapshot()` returns a `SchedulerSnapshot` with global aggregates — total running, pending, pressure, and progress across all domains.
 
-`handle.snapshot()` returns a `ModuleSnapshot` with per-module detail — running tasks, pending count, paused count, progress, and byte-level tracking for that module only.
+`handle.snapshot()` returns a `ModuleSnapshot` with per-domain detail — running tasks, pending count, paused count, progress, and byte-level tracking for that domain only.
 
-For a per-module dashboard, iterate:
+For a per-domain dashboard, query each domain handle:
 
 ```rust
-for handle in scheduler.modules() {
-    let snap = handle.snapshot().await?;
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
+let notify: DomainHandle<Notify> = scheduler.domain::<Notify>();
+
+async fn print_snap(name: &str, snap: ModuleSnapshot) {
     println!(
         "{}: {} running, {} pending, {} paused",
-        handle.name(),
+        name,
         snap.running.len(),
         snap.pending_count,
         snap.paused_count,
     );
 }
+
+print_snap(ingest.name(), ingest.snapshot().await?);
+print_snap(process.name(), process.snapshot().await?);
+print_snap(notify.name(), notify.snapshot().await?);
 ```
 
 ### scheduler.active_tasks() for a unified running view
 
-`scheduler.active_tasks()` returns all running tasks from all modules in a single `Vec<TaskRecord>`. Equivalent to aggregating each module's `active_tasks()`, but more convenient for global views.
+`scheduler.active_tasks()` returns all running tasks from all domains in a single `Vec<TaskRecord>`. Equivalent to aggregating each domain's `active_tasks()`, but more convenient for global views.
 
 ```rust
-let running = scheduler.active_tasks().await?;
+let running = scheduler.active_tasks().await;
 for task in &running {
     println!("[{}] {} (priority {})", task.task_type, task.label, task.priority.value());
 }
@@ -342,14 +361,15 @@ for task in &running {
 
 ## Error isolation between modules
 
-Modules share a scheduler but their errors don't interact (beyond explicit dependencies).
+Domains share a scheduler but their errors don't interact (beyond explicit dependencies).
 
 ### Per-module dead-letter monitoring
 
-Each module has its own dead-letter view:
+Each domain has its own dead-letter view:
 
 ```rust
-let failed = scheduler.module("ingest").dead_letter_tasks(10, 0).await?;
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let failed = ingest.dead_letter_tasks(10, 0).await?;
 for task in &failed {
     println!("[ingest] {} failed: {}", task.label, task.last_error.as_deref().unwrap_or("unknown"));
 }
@@ -357,34 +377,31 @@ for task in &failed {
 
 ### Different retry policies per module
 
-Set retry policies at the module level so each module handles failures appropriately:
+Set retry policies at the domain level so each domain handles failures appropriately:
 
 ```rust
+pub struct Api;
+impl DomainKey for Api { const NAME: &'static str = "api"; }
+
+pub struct Files;
+impl DomainKey for Files { const NAME: &'static str = "files"; }
+
 // API calls: exponential backoff, 5 retries.
-Module::new("api")
-    .default_retry_policy(RetryPolicy {
-        strategy: BackoffStrategy::Exponential {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(120),
-            multiplier: 2.0,
-        },
-        max_retries: 5,
-    })
+Domain::<Api>::new()
+    .default_retry(RetryPolicy::exponential(5, Duration::from_secs(1), Duration::from_secs(120)))
 
 // Local file operations: immediate retry, 3 attempts.
-Module::new("files")
-    .default_retry_policy(RetryPolicy {
-        strategy: BackoffStrategy::Fixed(Duration::ZERO),
-        max_retries: 3,
-    })
+Domain::<Files>::new()
+    .default_retry(RetryPolicy::constant(3, Duration::ZERO))
 ```
 
 ### Module-filtered events
 
-Subscribe to events for a single module without filtering the global stream:
+Subscribe to events for a single domain without filtering the global stream:
 
 ```rust
-let mut rx = scheduler.module("ingest").subscribe();
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let mut rx = ingest.events();
 tokio::spawn(async move {
     while let Ok(event) = rx.recv().await {
         // Only ingest:: events arrive here.
@@ -398,15 +415,15 @@ tokio::spawn(async move {
 Use `TaskStore::open_memory()` for fast, isolated tests that don't touch the filesystem:
 
 ```rust
-use taskmill::{Scheduler, TaskStore, Module};
+use taskmill::{Scheduler, TaskStore, Domain, DomainKey};
 
 #[tokio::test]
-async fn test_cross_module_pipeline() {
+async fn test_cross_domain_pipeline() {
     let store = TaskStore::open_memory().await.unwrap();
     let scheduler = Scheduler::builder()
         .store(store)
-        .module(ingest_module(test_config()))
-        .module(process_module())
+        .domain(ingest_domain(test_config()))
+        .domain(process_domain())
         .max_concurrency(4)
         .build()
         .await

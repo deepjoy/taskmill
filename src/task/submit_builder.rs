@@ -1,13 +1,16 @@
 //! [`SubmitBuilder`] — ergonomic task submission with module defaults and
 //! per-call field overrides.
 //!
-//! Returned by `ModuleHandle::submit` and `ModuleHandle::submit_typed`.
+//! Returned by `ModuleHandle::submit` / `ModuleHandle::submit_typed` and by
+//! `DomainHandle::submit` / `DomainHandle::submit_with`. The typed submission
+//! path (accepting a [`TypedTask`](crate::TypedTask) value) now goes through
+//! the domain API — `DomainHandle::submit` is the primary entry point.
 //! Implements [`IntoFuture`] so bare `.await` works for the common case.
 //! Chain override methods before `.await` to override individual fields.
 //!
 //! # Resolution order (highest → lowest priority)
 //!
-//! ## `submit_typed()` path
+//! ## `submit_typed()` / `DomainHandle::submit` path
 //!
 //! 1. [`SubmitBuilder`] per-call override (chained methods)
 //! 2. Module defaults — override TypedTask values when the module has an
@@ -61,8 +64,9 @@ pub(crate) struct TypedTaskDefaults {
     pub tags: HashMap<String, String>,
 }
 
-/// Ergonomic task submission builder returned by `ModuleHandle::submit` and
-/// `ModuleHandle::submit_typed`.
+/// Ergonomic task submission builder returned by `ModuleHandle::submit` /
+/// `ModuleHandle::submit_typed` and by `DomainHandle::submit` /
+/// `DomainHandle::submit_with`.
 ///
 /// Implements [`IntoFuture`] so bare `.await` submits with all defaults
 /// applied. Chain override methods before `.await` to override individual
@@ -70,10 +74,10 @@ pub(crate) struct TypedTaskDefaults {
 ///
 /// ```ignore
 /// // Common case — zero ceremony
-/// handle.submit_typed(&thumb).await?;
+/// media.submit(thumb).await?;
 ///
 /// // Override one field
-/// handle.submit_typed(&thumb)
+/// media.submit_with(thumb)
 ///     .priority(Priority::CRITICAL)
 ///     .run_after(Duration::from_secs(30))
 ///     .await?;

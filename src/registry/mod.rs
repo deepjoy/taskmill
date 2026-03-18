@@ -1,12 +1,12 @@
 //! Executor registration, shared state, and the [`TaskContext`] passed to each task.
 //!
-//! Register one [`TaskExecutor`] per task type via
-//! [`SchedulerBuilder::executor`](crate::SchedulerBuilder::executor) or
-//! [`typed_executor`](crate::SchedulerBuilder::typed_executor). At dispatch
-//! time the scheduler looks up the executor by name and calls
-//! [`execute`](TaskExecutor::execute) with a [`TaskContext`] containing the
-//! persisted record, a cancellation token, a progress reporter, and any
-//! shared application state registered via
+//! Register a [`TypedExecutor<T>`](crate::TypedExecutor) per task type via
+//! [`Domain::task::<T>(executor)`](crate::Domain::task). At dispatch time the
+//! scheduler looks up the executor by name and calls the typed
+//! [`execute`](crate::TypedExecutor::execute) method with the deserialized
+//! payload and a [`TaskContext`] containing the persisted record, a
+//! cancellation token, a progress reporter, and any shared application state
+//! registered via [`Domain::state`](crate::Domain::state) or
 //! [`SchedulerBuilder::app_state`](crate::SchedulerBuilder::app_state).
 
 pub(crate) mod child_spawner;

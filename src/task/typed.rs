@@ -1,99 +1,88 @@
 //! The [`TypedTask`] trait for strongly-typed task payloads.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::priority::Priority;
+use crate::domain::{DomainKey, TaskTypeConfig};
 
-use super::submission::{DuplicateStrategy, RecurringSchedule};
-use super::{IoBudget, TtlFrom};
-
-/// A strongly-typed task that bundles serialization, task type name, and default
-/// IO estimates.
+/// A strongly-typed task that bundles serialization, domain identity,
+/// task type name, and static configuration defaults.
 ///
-/// Implementing this trait collapses the fields of [`TaskSubmission`](super::TaskSubmission) into a
-/// derive-friendly pattern. Use [`Scheduler::submit_typed`](crate::Scheduler::submit_typed)
-/// to submit and [`TaskContext::payload`](crate::TaskContext::payload) on the
-/// executor side to deserialize. Each `TypedTask` must have a corresponding
-/// [`TaskExecutor`](crate::TaskExecutor) registered under the same
-/// [`TASK_TYPE`](Self::TASK_TYPE) name.
+/// Each `TypedTask` declares which [`Domain`](crate::Domain) it belongs to
+/// and provides static configuration via [`config()`](Self::config).
+/// Per-instance overrides (key, label, tags) remain as instance methods.
+///
+/// Register a [`TypedExecutor<T>`](crate::TypedExecutor) for this task type
+/// via [`Domain::task::<T>(executor)`](crate::Domain::task).
 ///
 /// # Example
 ///
 /// ```ignore
 /// use std::collections::HashMap;
+/// use std::time::Duration;
 /// use serde::{Serialize, Deserialize};
-/// use taskmill::{TypedTask, IoBudget, Priority};
+/// use taskmill::{TypedTask, TaskTypeConfig, IoBudget, Priority, DomainKey, DuplicateStrategy, RetryPolicy};
+///
+/// pub struct Media;
+/// impl DomainKey for Media { const NAME: &'static str = "media"; }
 ///
 /// #[derive(Serialize, Deserialize)]
 /// struct Thumbnail { path: String, size: u32, profile: String }
 ///
 /// impl TypedTask for Thumbnail {
+///     type Domain = Media;
 ///     const TASK_TYPE: &'static str = "thumbnail";
-///     fn expected_io(&self) -> IoBudget { IoBudget::disk(4096, 1024) }
+///
+///     fn config() -> TaskTypeConfig {
+///         TaskTypeConfig::new()
+///             .priority(Priority::NORMAL)
+///             .expected_io(IoBudget::disk(4096, 1024))
+///             .ttl(Duration::from_secs(3600))
+///             .retry(RetryPolicy::exponential(3, Duration::from_secs(1), Duration::from_secs(60)))
+///             .on_duplicate(DuplicateStrategy::Supersede)
+///     }
+///
+///     fn key(&self) -> Option<String> {
+///         Some(format!("thumb:{}:{}", self.path, self.size))
+///     }
+///
 ///     fn tags(&self) -> HashMap<String, String> {
 ///         HashMap::from([("profile".into(), self.profile.clone())])
 ///     }
 /// }
 /// ```
 pub trait TypedTask: Serialize + DeserializeOwned + Send + 'static {
-    /// Unique name used to register and look up the executor.
+    /// Domain this task belongs to. Required.
+    type Domain: DomainKey;
+
+    /// Unique task type name within the domain (without the domain prefix).
     const TASK_TYPE: &'static str;
 
-    /// Expected IO budget for this task. Default: zero.
-    fn expected_io(&self) -> IoBudget {
-        IoBudget::default()
+    /// Static defaults applied to every submission of this task type.
+    ///
+    /// Replaces the old `TypedTask` instance methods (`priority`, `expected_io`,
+    /// etc.) and `Domain::task_with` overrides.
+    /// Domain-level defaults still win over this; per-call `submit_with` overrides
+    /// win over everything.
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::default()
     }
 
-    /// Scheduling priority. Default: [`Priority::NORMAL`].
-    fn priority(&self) -> Priority {
-        Priority::NORMAL
-    }
+    // Instance methods for values that depend on payload content:
 
-    /// Optional dedup key. Default: `None` (payload hash used).
+    /// Dedup key. Default: SHA-256 of the serialized payload.
     fn key(&self) -> Option<String> {
         None
     }
 
-    /// Optional human-readable label. Default: `None` (derived from key or task type).
+    /// Human-readable label. Default: derived from key or task type.
     fn label(&self) -> Option<String> {
         None
     }
 
-    /// Optional group key for per-group concurrency limiting. Default: `None`.
-    fn group_key(&self) -> Option<String> {
-        None
-    }
-
-    /// Duplicate-handling strategy. Default: [`DuplicateStrategy::Skip`].
-    fn on_duplicate(&self) -> DuplicateStrategy {
-        DuplicateStrategy::default()
-    }
-
-    /// Optional time-to-live. Default: `None` (no TTL).
-    fn ttl(&self) -> Option<Duration> {
-        None
-    }
-
-    /// When the TTL clock starts. Default: [`TtlFrom::Submission`].
-    fn ttl_from(&self) -> TtlFrom {
-        TtlFrom::default()
-    }
-
-    /// Optional initial delay before first dispatch. Default: `None`.
-    fn run_after(&self) -> Option<Duration> {
-        None
-    }
-
-    /// Optional recurring schedule. Default: `None` (one-shot).
-    fn recurring(&self) -> Option<RecurringSchedule> {
-        None
-    }
-
-    /// Metadata tags for filtering and grouping. Default: empty.
+    /// Metadata tags (payload-derived values). Default: empty.
     fn tags(&self) -> HashMap<String, String> {
         HashMap::new()
     }

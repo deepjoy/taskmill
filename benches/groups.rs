@@ -2,16 +2,20 @@
 //!
 //! Run with: `cargo bench --bench groups`
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
-    Module, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
+    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
     TaskSubmission,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+
+struct BenchDomain;
+impl DomainKey for BenchDomain {
+    const NAME: &'static str = "bench";
+}
 
 struct NoopExecutor;
 
@@ -50,7 +54,7 @@ fn bench_dispatch_no_groups(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let sched = Scheduler::builder()
                 .store(TaskStore::open_memory().await.unwrap())
-                .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+                .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                 .max_concurrency(8)
                 .poll_interval(Duration::from_millis(10))
                 .build()
@@ -78,7 +82,7 @@ fn bench_dispatch_one_group(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let sched = Scheduler::builder()
                 .store(TaskStore::open_memory().await.unwrap())
-                .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+                .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                 .max_concurrency(8)
                 .group_concurrency("g0", 500) // high limit — no artificial throttling
                 .poll_interval(Duration::from_millis(10))
@@ -120,7 +124,7 @@ fn bench_dispatch_group_scaling(c: &mut Criterion) {
 
                     let mut builder = Scheduler::builder()
                         .store(TaskStore::open_memory().await.unwrap())
-                        .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+                        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                         .max_concurrency(8)
                         .poll_interval(Duration::from_millis(10));
 

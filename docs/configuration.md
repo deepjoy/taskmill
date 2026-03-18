@@ -5,14 +5,19 @@
 For most Tauri desktop apps, the defaults work well. Here's what you might want to change:
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Module, Scheduler, ShutdownMode, StoreConfig, RetentionPolicy};
+use taskmill::{
+    Domain, DomainKey, Scheduler, ShutdownMode, StoreConfig, RetentionPolicy,
+    TypedExecutor, TypedTask, TaskTypeConfig,
+};
+
+struct App;
+impl DomainKey for App { const NAME: &'static str = "app"; }
 
 let scheduler = Scheduler::builder()
     .store_path("tasks.db")
-    .module(Module::new("app")
-        .executor("my-task", Arc::new(MyExecutor))
+    .domain(Domain::<App>::new()
+        .task::<MyTask>(MyExecutor)
         .default_ttl(Duration::from_secs(3600)))
     .max_concurrency(8)                  // match your IO parallelism
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
@@ -43,12 +48,14 @@ Controls scheduling behavior. Set via builder methods or pass directly to `Sched
 ### Builder methods
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Module, Scheduler, Priority, ShutdownMode};
+use taskmill::{Domain, DomainKey, Scheduler, Priority, ShutdownMode, TypedExecutor, TypedTask};
+
+struct App;
+impl DomainKey for App { const NAME: &'static str = "app"; }
 
 let scheduler = Scheduler::builder()
-    .module(Module::new("app").executor("my-task", Arc::new(MyExecutor)))
+    .domain(Domain::<App>::new().task::<MyTask>(MyExecutor))
     .max_concurrency(8)
     .max_retries(5)
     .preempt_priority(Priority::HIGH)
@@ -142,7 +149,7 @@ Both modes stop the resource sampler. **For desktop apps, always use `Graceful` 
 
 ## Task TTL (time-to-live)
 
-Tasks can expire automatically if they haven't started running within a configurable duration. TTL is resolved with a priority chain: **per-task > per-type > global default > none**.
+Tasks can expire automatically if they haven't started running within a configurable duration. TTL is resolved with a priority chain: **per-task > per-type > domain default > global default > none**.
 
 ### Per-task TTL
 
@@ -162,28 +169,41 @@ let sub = TaskSubmission::new("sync")
 
 ### Per-type TTL
 
-Register a default TTL for all tasks of a given type via the module:
+Set a default TTL for all tasks of a given type via `TypedTask::config()`:
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
+use taskmill::{TypedTask, TaskTypeConfig, DomainKey};
 
-let scheduler = Scheduler::builder()
-    .module(Module::new("media")
-        .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600)))
-    .build()
-    .await?;
+struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+impl TypedTask for Thumbnail {
+    type Domain = Media;
+    const TASK_TYPE: &'static str = "thumbnail";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .ttl(Duration::from_secs(600))
+    }
+}
 ```
 
-Or set a module-wide default TTL that applies to all types in the module:
+Or set a domain-wide default TTL that applies to all types in the domain:
 
 ```rust
-Module::new("media")
-    .executor("thumbnail", Arc::new(ThumbExec))
+use std::time::Duration;
+use taskmill::{Domain, DomainKey};
+
+struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+Domain::<Media>::new()
+    .task::<Thumbnail>(ThumbExec)
     .default_ttl(Duration::from_secs(600))
 ```
 
-Tasks submitted with an explicit `.ttl()` override the module default.
+Tasks submitted with an explicit `.ttl()` override the domain default.
 
 ### Global default TTL
 
@@ -211,16 +231,24 @@ Children spawned via `ctx.spawn_child()` without an explicit TTL inherit the **r
 
 ### Typed tasks
 
-Implement `ttl()` and `ttl_from()` on your `TypedTask`:
+Set TTL and TTL origin in your `TypedTask::config()` implementation:
 
 ```rust
 use std::time::Duration;
-use taskmill::{TypedTask, TtlFrom};
+use taskmill::{TypedTask, TaskTypeConfig, TtlFrom, DomainKey};
+
+struct Sync;
+impl DomainKey for Sync { const NAME: &'static str = "sync"; }
 
 impl TypedTask for SyncTask {
+    type Domain = Sync;
     const TASK_TYPE: &'static str = "sync";
-    fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(300)) }
-    fn ttl_from(&self) -> TtlFrom { TtlFrom::FirstAttempt }
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .ttl(Duration::from_secs(300))
+            .ttl_from(TtlFrom::FirstAttempt)
+    }
 }
 ```
 
@@ -238,41 +266,49 @@ Set per-submission with `.on_dependency_failure(DependencyFailurePolicy::Ignore)
 
 ## Application state
 
-Executors often need shared services (HTTP clients, database connections, caches). Register state either globally on the builder or scoped to a specific module.
+Executors often need shared services (HTTP clients, database connections, caches). Register state either globally on the builder or scoped to a specific domain.
 
-### Module-scoped state
+### Domain-scoped state
 
-Module state is visible only to executors within that module:
+Domain state is visible only to executors within that domain:
 
 ```rust
+use taskmill::{Domain, DomainKey, Scheduler};
+
+struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+struct Sync;
+impl DomainKey for Sync { const NAME: &'static str = "sync"; }
+
 let scheduler = Scheduler::builder()
-    .module(Module::new("media")
-        .executor("thumbnail", Arc::new(ThumbExec))
-        .app_state(MediaConfig { cdn_url: "...".into() }))
-    .module(Module::new("sync")
-        .executor("remote-sync", Arc::new(SyncExec))
-        .app_state(SyncConfig { endpoint: "...".into() }))
+    .domain(Domain::<Media>::new()
+        .task::<Thumbnail>(ThumbExec)
+        .state(MediaConfig { cdn_url: "...".into() }))
+    .domain(Domain::<Sync>::new()
+        .task::<RemoteSync>(SyncExec)
+        .state(SyncConfig { endpoint: "...".into() }))
     .build()
     .await?;
 
-// Inside a media executor — checks module state first, then global:
+// Inside a media executor — checks domain state first, then global:
 let cfg = ctx.state::<MediaConfig>().expect("MediaConfig not registered");
 ```
 
 ### Global state
 
-Registered on the builder, visible to all modules as a fallback:
+Registered on the builder, visible to all domains as a fallback:
 
 ```rust
 let scheduler = Scheduler::builder()
-    .app_state(SharedDb::new())          // all modules can access this
+    .app_state(SharedDb::new())          // all domains can access this
     .app_state(FeatureFlags { dark_mode: true })
-    .module(...)
+    .domain(...)
     .build()
     .await?;
 ```
 
-State is keyed by `TypeId` — `ctx.state::<T>()` checks module state first, then falls back to global. Libraries that receive a pre-built scheduler can inject global state after construction:
+State is keyed by `TypeId` — `ctx.state::<T>()` checks domain state first, then falls back to global. Libraries that receive a pre-built scheduler can inject global state after construction:
 
 ```rust
 scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
@@ -291,21 +327,26 @@ taskmill = { version = "0.4", default-features = false }
 
 When disabled, you can still provide a custom `ResourceSampler` via `.resource_sampler()`.
 
-## Module-level concurrency
+## Domain-level concurrency
 
-Each module can have its own concurrency cap, independent of the global limit. Both caps must have headroom for a task to dispatch.
+Each domain can have its own concurrency cap, independent of the global limit. Both caps must have headroom for a task to dispatch.
 
 ```rust
-Module::new("media")
-    .executor("thumbnail", Arc::new(ThumbExec))
+use taskmill::{Domain, DomainKey};
+
+struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+Domain::<Media>::new()
+    .task::<Thumbnail>(ThumbExec)
     .max_concurrency(4)   // at most 4 media tasks running at once
 ```
 
-Adjust at runtime via the module handle:
+Adjust at runtime via the domain handle:
 
 ```rust
-scheduler.module("media").set_max_concurrency(8);
-let current = scheduler.module("media").max_concurrency();
+scheduler.domain::<Media>().set_max_concurrency(8);
+let current = scheduler.domain::<Media>().max_concurrency();
 ```
 
 ## Tuning for specific workloads
@@ -313,9 +354,14 @@ let current = scheduler.module("media").max_concurrency();
 ### Desktop app with file processing
 
 ```rust
+use taskmill::{Domain, DomainKey, Scheduler, ShutdownMode, StoreConfig, RetentionPolicy};
+
+struct Files;
+impl DomainKey for Files { const NAME: &'static str = "files"; }
+
 Scheduler::builder()
-    .module(Module::new("files")
-        .executor("thumbnail", Arc::new(ThumbExec))
+    .domain(Domain::<Files>::new()
+        .task::<Thumbnail>(ThumbExec)
         .max_concurrency(4))     // don't overwhelm the disk
     .with_resource_monitoring()  // auto-defer when disk is busy
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
@@ -328,9 +374,14 @@ Scheduler::builder()
 ### Upload/download service
 
 ```rust
+use taskmill::{Domain, DomainKey, Scheduler, ShutdownMode};
+
+struct Uploads;
+impl DomainKey for Uploads { const NAME: &'static str = "uploads"; }
+
 Scheduler::builder()
-    .module(Module::new("uploads")
-        .executor("upload", Arc::new(UploadExec))
+    .domain(Domain::<Uploads>::new()
+        .task::<Upload>(UploadExec)
         .max_concurrency(16))    // network tasks can run in parallel
     .with_resource_monitoring()
     .bandwidth_limit(50_000_000.0)  // 50 MB/s cap
@@ -341,9 +392,14 @@ Scheduler::builder()
 ### Background indexer
 
 ```rust
+use taskmill::{Domain, DomainKey, Scheduler, ShutdownMode, SamplerConfig};
+
+struct Indexer;
+impl DomainKey for Indexer { const NAME: &'static str = "indexer"; }
+
 Scheduler::builder()
-    .module(Module::new("indexer")
-        .executor("index", Arc::new(IndexExec))
+    .domain(Domain::<Indexer>::new()
+        .task::<Index>(IndexExec)
         .max_concurrency(2))     // stay out of the way
     .with_resource_monitoring()
     .sampler_config(SamplerConfig {
@@ -362,13 +418,13 @@ Scheduler::builder()
 | `store_path(path)` | Path to the SQLite database file. |
 | `store(store)` | Use a pre-opened `TaskStore`. |
 | `store_config(config)` | Pool size and retention settings. |
-| `module(module)` | Register a `Module` (required; at least one must be registered). |
+| `domain(domain)` | Register a `Domain<D>` (required; at least one must be registered). |
 | `max_concurrency(n)` | Set initial global max concurrent tasks. |
 | `max_retries(n)` | Set global retry limit. |
 | `preempt_priority(p)` | Set preemption threshold. |
 | `poll_interval(d)` | Set dispatch cycle interval. |
 | `shutdown_mode(mode)` | Set shutdown behavior. |
-| `default_ttl(d)` | Global TTL for tasks without a per-task or module-level TTL. |
+| `default_ttl(d)` | Global TTL for tasks without a per-task or domain-level TTL. |
 | `expiry_sweep_interval(opt_d)` | How often to sweep for expired tasks (`None` to disable). |
 | `cancel_hook_timeout(d)` | Timeout for `on_cancel` hooks. |
 | `pressure_source(source)` | Add a `PressureSource` to the composite. |
@@ -379,25 +435,23 @@ Scheduler::builder()
 | `bandwidth_limit(bytes_per_sec)` | Set a network bandwidth cap; registers a built-in `NetworkPressure` source. |
 | `default_group_concurrency(n)` | Default concurrency limit for grouped tasks (0 = unlimited). |
 | `group_concurrency(group, n)` | Per-group concurrency limit override. |
-| `app_state(state)` | Register global state visible to all modules. |
+| `app_state(state)` | Register global state visible to all domains. |
 | `app_state_arc(arc)` | Register global state from a pre-existing `Arc`. |
 | `build()` | Build and return the `Scheduler`. |
 
-### `Module` builder methods
+### `Domain<D>` builder methods
 
 | Method | Description |
 |--------|-------------|
-| `Module::new(name)` | Create a module with the given name. Task types are prefixed `"{name}::"`. |
-| `executor(name, executor)` | Register a `TaskExecutor` by type name. |
-| `typed_executor::<T>(executor)` | Register using `T::TASK_TYPE` as the name. |
-| `executor_with_ttl(name, executor, ttl)` | Register with a per-type default TTL. |
-| `executor_with_retry_policy(name, executor, policy)` | Register with a per-type retry policy. |
-| `executor_with_options(name, executor, ttl, policy)` | Register with both TTL and retry policy. |
-| `default_priority(p)` | Module-wide priority for all submissions. |
-| `default_retry_policy(policy)` | Module-wide retry policy. |
-| `default_group(group)` | Module-wide group key. |
-| `default_ttl(d)` | Module-wide TTL (overridden by per-task TTL). |
-| `default_tag(key, value)` | Tag applied to all submissions through this module's handle. |
-| `max_concurrency(n)` | Module-level concurrency cap (independent of global). |
-| `app_state(state)` | Register module-scoped state (checked before global state). |
-| `app_state_arc(arc)` | Register module-scoped state from a pre-existing `Arc`. |
+| `Domain::<D>::new()` | Create a domain. The domain name is taken from `D::NAME`. Task types are prefixed `"{name}::"`. |
+| `task::<T>(executor)` | Register a `TypedExecutor<T>` using `T::TASK_TYPE` as the name. TTL and retry policy from `T::config()` are used automatically. |
+| `task_with::<T>(executor, options)` | Register with per-type option overrides (for executor-instance-dependent config). |
+| `raw_executor(name, executor)` | Escape hatch: register an untyped `TaskExecutor` by type name. |
+| `default_priority(p)` | Domain-wide priority for all submissions. |
+| `default_retry(policy)` | Domain-wide retry policy. |
+| `default_group(group)` | Domain-wide group key. |
+| `default_ttl(d)` | Domain-wide TTL (overridden by per-task or per-type TTL). |
+| `default_tag(key, value)` | Tag applied to all submissions through this domain's handle. |
+| `max_concurrency(n)` | Domain-level concurrency cap (independent of global). |
+| `state(value)` | Register domain-scoped state (checked before global state). |
+| `state_arc(arc)` | Register domain-scoped state from a pre-existing `Arc`. |

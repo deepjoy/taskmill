@@ -29,7 +29,11 @@ Use `TypedTask` to define the upload payload with its IO budget and priority:
 
 ```rust
 use serde::{Serialize, Deserialize};
-use taskmill::{TypedTask, IoBudget, Priority};
+use taskmill::{TypedTask, TaskTypeConfig, IoBudget, Priority, DomainKey};
+
+// Define the domain identity
+pub struct Uploads;
+impl DomainKey for Uploads { const NAME: &'static str = "uploads"; }
 
 #[derive(Serialize, Deserialize)]
 struct UploadTask {
@@ -39,30 +43,19 @@ struct UploadTask {
 }
 
 impl TypedTask for UploadTask {
+    type Domain = Uploads;
     const TASK_TYPE: &'static str = "upload";
 
-    fn expected_io(&self) -> IoBudget {
-        // Read from disk, write to network
-        IoBudget::new(self.file_size as i64, 0, 0, self.file_size as i64)
-    }
-
-    fn priority(&self) -> Priority {
-        Priority::NORMAL
-    }
-
-    fn group_key(&self) -> Option<String> {
-        // Limit concurrent uploads per bucket
-        Some(self.bucket.clone())
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .priority(Priority::NORMAL)
+            .expected_io(IoBudget::net(0, 50_000_000))  // network-heavy
+            .ttl(std::time::Duration::from_secs(30 * 60))  // expire after 30 min
     }
 
     fn key(&self) -> Option<String> {
         // Dedup by file path — uploading the same file twice is a no-op
         Some(self.file_path.clone())
-    }
-
-    fn ttl(&self) -> Option<std::time::Duration> {
-        // Expire uploads that haven't started within 30 minutes
-        Some(std::time::Duration::from_secs(30 * 60))
     }
 
     fn label(&self) -> Option<String> {
@@ -81,17 +74,12 @@ impl TypedTask for UploadTask {
 The executor does the actual upload work. It reports progress and checks for preemption between chunks.
 
 ```rust
-use std::sync::Arc;
-use taskmill::{TaskExecutor, TaskContext, TaskError};
+use taskmill::{TypedExecutor, TaskContext, TaskError};
 
 struct UploadExecutor;
 
-impl TaskExecutor for UploadExecutor {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
-    ) -> Result<(), TaskError> {
-        let task: UploadTask = ctx.payload()?;
-
+impl TypedExecutor<UploadTask> for UploadExecutor {
+    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
         let file = tokio::fs::read(&task.file_path).await
             .map_err(|e| TaskError::permanent(format!("can't read file: {e}")))?;
 
@@ -119,18 +107,16 @@ impl TaskExecutor for UploadExecutor {
 }
 ```
 
-## Define the upload module
+## Define the upload domain
 
-Bundle the executor into a `Module` with bandwidth-aware defaults:
+Bundle the executor into a `Domain` with bandwidth-aware defaults:
 
 ```rust
-use std::sync::Arc;
-use std::time::Duration;
-use taskmill::{Module, Priority};
+use taskmill::{Domain, Priority};
 
-pub fn uploads_module() -> Module {
-    Module::new("uploads")
-        .typed_executor::<UploadTask, _>(Arc::new(UploadExecutor))
+pub fn uploads_domain() -> Domain<Uploads> {
+    Domain::<Uploads>::new()
+        .task::<UploadTask>(UploadExecutor)
         .default_priority(Priority::NORMAL)
         .max_concurrency(8)
 }
@@ -141,7 +127,6 @@ pub fn uploads_module() -> Module {
 Build the scheduler in your Tauri setup with bandwidth limiting and per-bucket concurrency:
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
 use tokio_util::sync::CancellationToken;
@@ -156,7 +141,7 @@ fn main() {
             let scheduler = tauri::async_runtime::block_on(async {
                 Scheduler::builder()
                     .store_path(db_path.to_str().unwrap())
-                    .module(uploads_module())
+                    .domain(uploads_domain())
                     .group_concurrency("my-bucket", 3)  // max 3 uploads to this bucket
                     .bandwidth_limit(50_000_000.0)       // 50 MB/s cap
                     .with_resource_monitoring()
@@ -201,7 +186,7 @@ fn main() {
 ## Expose commands to the frontend
 
 ```rust
-use taskmill::{Scheduler, SchedulerSnapshot, StoreError, Priority, TaskSubmission};
+use taskmill::{Scheduler, SchedulerSnapshot, StoreError, Priority};
 
 #[tauri::command]
 async fn submit_upload(
@@ -211,7 +196,7 @@ async fn submit_upload(
     bucket: String,
 ) -> Result<String, StoreError> {
     let task = UploadTask { file_path, file_size, bucket };
-    let outcome = scheduler.module("uploads").submit_typed(&task).await?;
+    let outcome = scheduler.domain::<Uploads>().submit(task).await?;
     Ok(format!("{:?}", outcome))
 }
 
@@ -223,8 +208,8 @@ async fn prioritize_upload(
     bucket: String,
 ) -> Result<String, StoreError> {
     // Re-submit at HIGH priority — dedup will upgrade the existing task
-    let outcome = scheduler.module("uploads")
-        .submit_typed(&UploadTask { file_path, file_size, bucket })
+    let outcome = scheduler.domain::<Uploads>()
+        .submit_with(UploadTask { file_path, file_size, bucket })
         .priority(Priority::HIGH)
         .await?;
     Ok(format!("{:?}", outcome))
@@ -235,7 +220,7 @@ async fn cancel_upload(
     scheduler: tauri::State<'_, Scheduler>,
     task_id: i64,
 ) -> Result<bool, StoreError> {
-    scheduler.module("uploads").cancel(task_id).await
+    scheduler.domain::<Uploads>().cancel(task_id).await
 }
 
 #[tauri::command]
@@ -264,7 +249,8 @@ async fn resume_all(scheduler: tauri::State<'_, Scheduler>) -> Result<(), StoreE
 use taskmill::SchedulerEvent;
 
 fn setup_events(app: &tauri::App, scheduler: &Scheduler) {
-    let mut events = scheduler.subscribe();
+    // Use handle.events() to filter to one domain, or scheduler.subscribe() for all
+    let mut events = scheduler.domain::<Uploads>().events();
     let handle = app.handle().clone();
     tokio::spawn(async move {
         while let Ok(event) = events.recv().await {

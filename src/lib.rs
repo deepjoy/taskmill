@@ -41,23 +41,23 @@
 //!    blocked ─(dep failed)─→ dep_failed (history)
 //! ```
 //!
-//! 1. **Submit** — [`ModuleHandle::submit`] (or [`submit_typed`](ModuleHandle::submit_typed),
-//!    [`submit_batch`](ModuleHandle::submit_batch))
-//!    enqueues a [`TaskSubmission`] into the SQLite store. The module handle
-//!    auto-prefixes the task type with the module name and applies module defaults.
+//! 1. **Submit** — [`DomainHandle::submit`] (or [`submit_with`](DomainHandle::submit_with),
+//!    [`submit_batch`](DomainHandle::submit_batch))
+//!    enqueues a typed task into the SQLite store. The domain handle
+//!    auto-prefixes the task type with the domain name and applies defaults.
 //! 2. **Pending** — the task waits in a priority queue. The scheduler's run loop
 //!    pops the highest-priority pending task on each tick.
-//! 3. **Running** — the scheduler calls [`TaskExecutor::execute`] with a
-//!    [`TaskContext`] containing the task record, a cancellation token, and a
-//!    progress reporter.
+//! 3. **Running** — the scheduler calls the [`TypedExecutor::execute`] method with the
+//!    deserialized payload and a [`TaskContext`] containing the task record,
+//!    a cancellation token, and a progress reporter.
 //! 4. **Terminal** — on success the task moves to the history table. On failure,
 //!    a [`retryable`](TaskError::retryable) error requeues it (up to
 //!    [`SchedulerBuilder::max_retries`] or per-type [`RetryPolicy::max_retries`])
 //!    with a configurable [`BackoffStrategy`] delay; a non-retryable
 //!    ([`permanent`](TaskError::permanent)) error moves it to history as failed.
 //!    Tasks that exhaust all retries enter [`dead_letter`](HistoryStatus::DeadLetter)
-//!    state — queryable via [`ModuleHandle::dead_letter_tasks`] and manually
-//!    re-submittable via [`ModuleHandle::retry_dead_letter`].
+//!    state — queryable via [`DomainHandle::dead_letter_tasks`] and manually
+//!    re-submittable via [`DomainHandle::retry_dead_letter`].
 //!
 //! ## Deduplication & duplicate strategies
 //!
@@ -94,7 +94,7 @@
 //! ## IO budgeting
 //!
 //! Each task declares an [`IoBudget`] covering expected disk and network
-//! bytes (via [`TypedTask::expected_io`] or [`TaskSubmission::expected_io`]).
+//! bytes (via [`TypedTask::config()`] or [`TaskSubmission::expected_io`]).
 //! The scheduler tracks running IO totals and, when
 //! [resource monitoring](SchedulerBuilder::with_resource_monitoring) is enabled,
 //! compares them against observed system throughput to avoid over-saturating
@@ -112,7 +112,7 @@
 //! ## Task groups
 //!
 //! Tasks can be assigned to a named group via [`TaskSubmission::group`] (or
-//! [`TypedTask::group_key`]). The scheduler enforces per-group concurrency
+//! [`TypedTask::config()`]). The scheduler enforces per-group concurrency
 //! limits — for example, limiting uploads to any single S3 bucket to 4
 //! concurrent tasks. Configure limits at build time with
 //! [`SchedulerBuilder::group_concurrency`] and
@@ -170,9 +170,8 @@
 //! Tags are copied to history on all terminal transitions and are included in
 //! [`TaskEventHeader`] for event subscribers.
 //!
-//! Query by tags via the module handle with [`ModuleHandle::tasks_by_tags`]
-//! (AND semantics), [`ModuleHandle::count_by_tag`] (grouped counts), or
-//! [`ModuleHandle::tag_values`] (distinct values).
+//! Query by tags via the domain handle with [`DomainHandle::tasks_by_tags`]
+//! (AND semantics).
 //!
 //! ## Delayed & scheduled tasks
 //!
@@ -198,8 +197,8 @@
 //! - **Parent/Child**: Recurring tasks cannot be children (enforced at submit).
 //!
 //! Recurring schedules can be paused, resumed, or cancelled via
-//! [`ModuleHandle::pause_recurring`], [`ModuleHandle::resume_recurring`], and
-//! [`ModuleHandle::cancel_recurring`]. Pausing stops new instances from being
+//! [`DomainHandle::pause_recurring`], [`DomainHandle::resume_recurring`], and
+//! [`DomainHandle::cancel_recurring`]. Pausing stops new instances from being
 //! created without affecting any currently running instance.
 //!
 //! The scheduler optimizes idle wakeups: when the next scheduled task is far
@@ -269,14 +268,14 @@
 //!
 //! ## Cancellation
 //!
-//! Tasks can be cancelled via the [`ModuleHandle`] — individually with
-//! [`ModuleHandle::cancel`], all at once with [`ModuleHandle::cancel_all`],
-//! or by predicate with [`ModuleHandle::cancel_where`]. Cancelled tasks are
+//! Tasks can be cancelled via the [`DomainHandle`] — individually with
+//! [`DomainHandle::cancel`], all at once with [`DomainHandle::cancel_all`],
+//! or by predicate with [`DomainHandle::cancel_where`]. Cancelled tasks are
 //! recorded in the history table as [`HistoryStatus::Cancelled`] rather than
 //! silently deleted.
 //!
 //! For running tasks, cancellation fires the
-//! [`on_cancel`](TaskExecutor::on_cancel) hook (with a configurable
+//! [`on_cancel`](TypedExecutor::on_cancel) hook (with a configurable
 //! [`cancel_hook_timeout`](SchedulerBuilder::cancel_hook_timeout)) so
 //! executors can clean up external resources — for example, aborting an S3
 //! multipart upload. Executors can check for cancellation cooperatively via
@@ -303,32 +302,37 @@
 //!
 //! # Quick start
 //!
-//! ```no_run
-//! use std::sync::Arc;
+//! ```ignore
 //! use taskmill::{
-//!     Module, Scheduler, TaskExecutor, TaskContext, TaskError,
-//!     TypedTask, IoBudget, Priority, TaskSubmission,
+//!     Domain, DomainKey, DomainHandle, Scheduler, TypedExecutor,
+//!     TaskContext, TaskError, TypedTask, TaskTypeConfig, IoBudget, Priority,
 //! };
 //! use serde::{Serialize, Deserialize};
 //! use tokio_util::sync::CancellationToken;
 //!
-//! // 1. Define a task payload.
+//! // 1. Define a domain (typed module identity).
+//! struct Media;
+//! impl DomainKey for Media { const NAME: &'static str = "media"; }
+//!
+//! // 2. Define a typed task payload.
 //! #[derive(Serialize, Deserialize)]
 //! struct Thumbnail { path: String, size: u32 }
 //!
 //! impl TypedTask for Thumbnail {
+//!     type Domain = Media;
 //!     const TASK_TYPE: &'static str = "thumbnail";
-//!     fn expected_io(&self) -> IoBudget { IoBudget::disk(4_096, 1_024) }
+//!
+//!     fn config() -> TaskTypeConfig {
+//!         TaskTypeConfig::new()
+//!             .expected_io(IoBudget::disk(4_096, 1_024))
+//!     }
 //! }
 //!
-//! // 2. Implement the executor.
+//! // 3. Implement the typed executor.
 //! struct ThumbnailExecutor;
 //!
-//! impl TaskExecutor for ThumbnailExecutor {
-//!     async fn execute<'a>(
-//!         &'a self, ctx: &'a TaskContext,
-//!     ) -> Result<(), TaskError> {
-//!         let thumb: Thumbnail = ctx.payload()?;
+//! impl TypedExecutor<Thumbnail> for ThumbnailExecutor {
+//!     async fn execute(&self, thumb: Thumbnail, ctx: &TaskContext) -> Result<(), TaskError> {
 //!         ctx.progress().report(0.5, Some("resizing".into()));
 //!         // ... do work, check ctx.token().is_cancelled() ...
 //!         ctx.record_read_bytes(4_096);
@@ -338,20 +342,20 @@
 //! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! // 3. Build and run the scheduler.
+//! // 4. Build and run the scheduler.
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .module(Module::new("media").typed_executor::<Thumbnail, _>(Arc::new(ThumbnailExecutor)))
+//!     .domain(Domain::<Media>::new().task::<Thumbnail>(ThumbnailExecutor))
 //!     .max_concurrency(4)
 //!     .with_resource_monitoring()
 //!     .build()
 //!     .await?;
 //!
-//! // 4. Submit work (task type is prefixed with the module name).
-//! let task = Thumbnail { path: "/photos/a.jpg".into(), size: 256 };
-//! scheduler.submit(&TaskSubmission::new("media::thumbnail").payload_json(&task)).await?;
+//! // 5. Submit work via a typed domain handle.
+//! let media: DomainHandle<Media> = scheduler.domain::<Media>();
+//! media.submit(Thumbnail { path: "/photos/a.jpg".into(), size: 256 }).await?;
 //!
-//! // 5. Run until cancelled.
+//! // 6. Run until cancelled.
 //! let token = CancellationToken::new();
 //! scheduler.run(token).await;
 //! # Ok(())
@@ -364,23 +368,26 @@
 //!
 //! Register shared services (database pools, HTTP clients, etc.) at build time
 //! and retrieve them from any executor via [`TaskContext::state`]. State can be
-//! module-scoped (checked first) or global (fallback):
+//! domain-scoped (checked first) or global (fallback):
 //!
 //! ```ignore
 //! struct AppServices { db: DatabasePool, http: reqwest::Client }
 //! struct IngestConfig { bucket: String }
 //!
+//! struct Ingest;
+//! impl DomainKey for Ingest { const NAME: &'static str = "ingest"; }
+//!
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .app_state(AppServices { /* ... */ })            // global — all modules
-//!     .module(Module::new("ingest")
-//!         .executor("ingest", Arc::new(IngestExecutor))
-//!         .app_state(IngestConfig { bucket: "...".into() }))  // module-scoped
+//!     .app_state(AppServices { /* ... */ })             // global — all domains
+//!     .domain(Domain::<Ingest>::new()
+//!         .task::<FetchTask>(FetchExecutor)
+//!         .state(IngestConfig { bucket: "...".into() }))  // domain-scoped
 //!     .build()
 //!     .await?;
 //!
-//! // Inside an ingest executor — module state checked first, then global:
-//! async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//! // Inside an ingest executor — domain state checked first, then global:
+//! async fn execute(&self, task: FetchTask, ctx: &TaskContext) -> Result<(), TaskError> {
 //!     let cfg = ctx.state::<IngestConfig>().expect("IngestConfig not registered");
 //!     let svc = ctx.state::<AppServices>().expect("AppServices not registered");
 //!     svc.db.query("...").await?;
@@ -466,20 +473,23 @@
 //! per S3 bucket:
 //!
 //! ```ignore
+//! struct Uploads;
+//! impl DomainKey for Uploads { const NAME: &'static str = "uploads"; }
+//!
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .module(Module::new("uploads")
-//!         .executor("upload-part", Arc::new(UploadPartExecutor)))
+//!     .domain(Domain::<Uploads>::new()
+//!         .task::<UploadPart>(UploadPartExecutor))
 //!     .default_group_concurrency(4)               // default for all groups
 //!     .group_concurrency("s3://hot-bucket", 8)    // override for one group
 //!     .build()
 //!     .await?;
 //!
-//! // Tasks declare their group via the submission (or TypedTask::group_key):
-//! let sub = TaskSubmission::new("upload-part")
+//! // Tasks declare their group via TypedTask::config() or per-call override:
+//! let uploads: DomainHandle<Uploads> = scheduler.domain::<Uploads>();
+//! uploads.submit_with(UploadPart { etag: "abc".into() })
 //!     .group("s3://my-bucket")
-//!     .payload_json(&part);
-//! scheduler.module("uploads").submit(sub).await?;
+//!     .await?;
 //!
 //! // Adjust at runtime:
 //! scheduler.set_group_limit("s3://my-bucket", 2);
@@ -488,27 +498,19 @@
 //!
 //! ## Batch submission
 //!
-//! Submit many tasks at once for better throughput (single SQLite transaction
-//! instead of N). Use [`BatchSubmission`] to set batch-wide defaults and
-//! [`BatchOutcome`] to inspect results. Submit via the module handle:
+//! Submit many tasks at once via [`DomainHandle::submit_batch`]:
 //!
 //! ```ignore
-//! use taskmill::{BatchSubmission, TaskSubmission, Priority};
-//!
-//! let batch = BatchSubmission::new()
-//!     .default_group("s3://my-bucket")
-//!     .default_priority(Priority::HIGH)
-//!     .task(TaskSubmission::new("upload").key("file-1").payload_json(&p1))
-//!     .task(TaskSubmission::new("upload").key("file-2").payload_json(&p2));
-//!
-//! let outcome = scheduler.module("uploads").submit_batch(batch).await?;
-//! println!("inserted: {:?}, dupes: {}", outcome.inserted(), outcome.duplicated_count());
+//! let uploads: DomainHandle<Uploads> = scheduler.domain::<Uploads>();
+//! let tasks = vec![
+//!     UploadPart { etag: "file-1".into() },
+//!     UploadPart { etag: "file-2".into() },
+//! ];
+//! let outcomes = uploads.submit_batch(tasks).await?;
 //! ```
 //!
-//! Batches with duplicate dedup keys use a **last-wins** policy — only the
-//! final occurrence is submitted. Batches larger than 10,000 tasks are
-//! automatically chunked into sub-transactions to avoid holding the SQLite
-//! write lock for too long.
+//! For untyped batch submission with batch-wide defaults, use [`BatchSubmission`]
+//! and [`DomainHandle::submit_raw`].
 //!
 //! A [`SchedulerEvent::BatchSubmitted`] event is emitted for observability
 //! whenever at least one task in the batch was inserted.
@@ -516,16 +518,15 @@
 //! ## Child tasks
 //!
 //! Spawn child tasks from an executor to model fan-out work. The parent
-//! automatically waits for all children before its [`finalize`](TaskExecutor::finalize)
-//! method is called. `spawn_child` is module-aware: the task type is
-//! auto-prefixed with the owning module's namespace.
+//! automatically waits for all children before its [`finalize`](TypedExecutor::finalize)
+//! method is called. `spawn_child` is domain-aware: the task type is
+//! auto-prefixed with the owning domain's namespace.
 //!
 //! ```ignore
-//! impl TaskExecutor for MultipartUploadExecutor {
-//!     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-//!         let upload: MultipartUpload = ctx.payload()?;
+//! impl TypedExecutor<MultipartUpload> for MultipartUploadExecutor {
+//!     async fn execute(&self, upload: MultipartUpload, ctx: &TaskContext) -> Result<(), TaskError> {
 //!         for part in &upload.parts {
-//!             // "upload-part" is prefixed with the owning module name automatically.
+//!             // "upload-part" is prefixed with the owning domain name automatically.
 //!             ctx.spawn_child(
 //!                 TaskSubmission::new("upload-part")
 //!                     .key(&part.etag)
@@ -537,20 +538,19 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn finalize<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//!     async fn finalize(&self, upload: MultipartUpload, ctx: &TaskContext) -> Result<(), TaskError> {
 //!         // All parts uploaded — complete the multipart upload.
-//!         let upload: MultipartUpload = ctx.payload()?;
 //!         complete_multipart(&upload).await?;
 //!         Ok(())
 //!     }
 //! }
 //! ```
 //!
-//! For cross-module children, use [`SubmitBuilder::parent`] via `ctx.module()`:
+//! For cross-domain children, use [`DomainSubmitBuilder::parent`] via `ctx.domain()`:
 //!
 //! ```ignore
-//! ctx.module("storage")
-//!     .submit_typed(&Upload { ... })
+//! let storage = ctx.domain::<Storage>();
+//! storage.submit_with(Upload { ... })
 //!     .parent(ctx.record().id)
 //!     .await?;
 //! ```
@@ -558,78 +558,69 @@
 //! ## Cancellation & cleanup hooks
 //!
 //! Cancel tasks individually or in bulk. Implement
-//! [`on_cancel`](TaskExecutor::on_cancel) to clean up external resources:
+//! [`on_cancel`](TypedExecutor::on_cancel) to clean up external resources:
 //!
 //! ```ignore
-//! impl TaskExecutor for UploadExecutor {
-//!     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//! impl TypedExecutor<Upload> for UploadExecutor {
+//!     async fn execute(&self, upload: Upload, ctx: &TaskContext) -> Result<(), TaskError> {
 //!         // Cooperatively check for cancellation in long loops.
-//!         for chunk in chunks {
+//!         for chunk in upload.chunks() {
 //!             ctx.check_cancelled()?;
 //!             upload_chunk(chunk).await?;
 //!         }
 //!         Ok(())
 //!     }
 //!
-//!     async fn on_cancel<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//!     async fn on_cancel(&self, upload: Upload, ctx: &TaskContext) -> Result<(), TaskError> {
 //!         // Abort the in-progress multipart upload.
-//!         let upload: Upload = ctx.payload()?;
 //!         abort_multipart(&upload.upload_id).await?;
 //!         Ok(())
 //!     }
 //! }
 //!
-//! // Cancel by ID through the module handle (scoped to that module):
-//! scheduler.module("uploads").cancel(task_id).await?;
+//! // Cancel by ID through the domain handle:
+//! let uploads: DomainHandle<Uploads> = scheduler.domain::<Uploads>();
+//! uploads.cancel(task_id).await?;
 //!
-//! // Bulk cancel all tasks in a module:
-//! scheduler.module("uploads").cancel_all().await?;
+//! // Bulk cancel all tasks in a domain:
+//! uploads.cancel_all().await?;
 //!
 //! // Cancel by predicate:
-//! scheduler.module("uploads")
-//!     .cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
+//! uploads.cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
 //! ```
 //!
 //! ## Task TTL
 //!
-//! Set a TTL on individual submissions, on a task type, or as a global default:
+//! Set a TTL on a task type via [`TypedTask::config()`], per-call via
+//! [`DomainSubmitBuilder::ttl`], or as a global default:
 //!
 //! ```ignore
 //! use std::time::Duration;
-//! use taskmill::{Scheduler, TaskSubmission, TtlFrom};
+//! use taskmill::{TypedTask, TaskTypeConfig, TtlFrom};
 //!
-//! // Per-task TTL — expire if not started within 5 minutes.
-//! let sub = TaskSubmission::new("sync")
-//!     .payload_json(&data)
+//! // Per-type TTL — every Thumbnail task gets a 10-minute TTL.
+//! impl TypedTask for Thumbnail {
+//!     type Domain = Media;
+//!     const TASK_TYPE: &'static str = "thumbnail";
+//!
+//!     fn config() -> TaskTypeConfig {
+//!         TaskTypeConfig::new()
+//!             .ttl(Duration::from_secs(600))
+//!             .ttl_from(TtlFrom::Submission)
+//!     }
+//! }
+//!
+//! // Per-call override:
+//! media.submit_with(Thumbnail { path: "/img.jpg".into(), size: 256 })
 //!     .ttl(Duration::from_secs(300))
-//!     .ttl_from(TtlFrom::Submission);
-//! scheduler.submit(&sub).await?;
-//!
-//! // Per-type default — every "thumbnail" task gets a 10-minute TTL
-//! // unless overridden per-task.
-//! let scheduler = Scheduler::builder()
-//!     .store_path("tasks.db")
-//!     .module(Module::new("media")
-//!         .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600)))
-//!     .build()
 //!     .await?;
 //!
-//! // Global default — catch-all for any task without a per-task or per-type TTL.
+//! // Global default — catch-all for any task without a per-type TTL.
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
 //!     .default_ttl(Duration::from_secs(3600)) // 1 hour
 //!     .build()
 //!     .await?;
-//! ```
-//!
-//! For typed tasks, implement [`TypedTask::ttl`] and [`TypedTask::ttl_from`]:
-//!
-//! ```ignore
-//! impl TypedTask for SyncTask {
-//!     const TASK_TYPE: &'static str = "sync";
-//!     fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(300)) }
-//!     fn ttl_from(&self) -> TtlFrom { TtlFrom::FirstAttempt }
-//! }
 //! ```
 //!
 //! ## Scheduled tasks
@@ -640,36 +631,27 @@
 //! use std::time::Duration;
 //! use taskmill::{TaskSubmission, RecurringSchedule};
 //!
-//! let handle = scheduler.module("app");
+//! let media: DomainHandle<Media> = scheduler.domain::<Media>();
 //!
 //! // One-shot delay — dispatch after 30 seconds.
-//! handle.submit(TaskSubmission::new("cleanup")
-//!     .key("stale-uploads")
-//!     .run_after(Duration::from_secs(30))).await?;
+//! media.submit_with(Cleanup { target: "stale-uploads".into() })
+//!     .run_after(Duration::from_secs(30))
+//!     .await?;
 //!
-//! // Recurring — abort stale uploads every 6 hours.
-//! handle.submit(TaskSubmission::new("cleanup")
+//! // For recurring or complex scheduling, use `submit_raw` with TaskSubmission:
+//! media.submit_raw(TaskSubmission::new("cleanup")
 //!     .key("stale-uploads")
 //!     .recurring(Duration::from_secs(6 * 3600))).await?;
 //!
-//! // Full schedule control — initial delay, max executions.
-//! handle.submit(TaskSubmission::new("sync")
-//!     .key("daily-sync")
-//!     .recurring_schedule(RecurringSchedule {
-//!         interval: Duration::from_secs(86400),
-//!         initial_delay: Some(Duration::from_secs(60)),
-//!         max_executions: Some(30),
-//!     })).await?;
-//!
-//! // Pause/resume/cancel recurring schedules via the module handle.
-//! handle.pause_recurring(task_id).await?;
-//! handle.resume_recurring(task_id).await?;
-//! handle.cancel_recurring(task_id).await?;
+//! // Pause/resume/cancel recurring schedules via the domain handle.
+//! media.pause_recurring(task_id).await?;
+//! media.resume_recurring(task_id).await?;
+//! media.cancel_recurring(task_id).await?;
 //! ```
 //!
 //! ## Task chains
 //!
-//! Use [`TaskSubmission::depends_on`] to build dependency chains between
+//! Use [`DomainSubmitBuilder::depends_on`] to build dependency chains between
 //! independent tasks. Unlike parent-child relationships (which model
 //! fan-out from a single executor), chains connect separately submitted
 //! tasks into ordered workflows.
@@ -679,25 +661,17 @@
 //! Upload a file, verify its checksum, then delete the local copy:
 //!
 //! ```ignore
-//! let handle = scheduler.module("pipeline");
+//! let pipeline: DomainHandle<Pipeline> = scheduler.domain::<Pipeline>();
 //!
-//! let upload = handle.submit(
-//!     TaskSubmission::new("upload").key("file-a").payload_json(&upload_plan)
-//! ).await?;
+//! let upload = pipeline.submit(UploadFile { key: "file-a".into() }).await?;
 //!
-//! let verify = handle.submit(
-//!     TaskSubmission::new("verify")
-//!         .key("file-a-verify")
-//!         .depends_on(upload.id().unwrap())
-//!         .payload_json(&verify_plan)
-//! ).await?;
+//! let verify = pipeline.submit_with(VerifyChecksum { key: "file-a".into() })
+//!     .depends_on(upload.id().unwrap())
+//!     .await?;
 //!
-//! handle.submit(
-//!     TaskSubmission::new("delete-local")
-//!         .key("file-a-delete")
-//!         .depends_on(verify.id().unwrap())
-//!         .payload_json(&delete_plan)
-//! ).await?;
+//! pipeline.submit_with(DeleteLocal { key: "file-a".into() })
+//!     .depends_on(verify.id().unwrap())
+//!     .await?;
 //! ```
 //!
 //! ### Fan-in
@@ -705,23 +679,16 @@
 //! Multiple uploads converging on a single finalize step:
 //!
 //! ```ignore
-//! let handle = scheduler.module("pipeline");
+//! let pipeline: DomainHandle<Pipeline> = scheduler.domain::<Pipeline>();
 //! let mut upload_ids = Vec::new();
 //! for part in &parts {
-//!     let outcome = handle.submit(
-//!         TaskSubmission::new("upload-part")
-//!             .key(&part.key)
-//!             .payload_json(part)
-//!     ).await?;
+//!     let outcome = pipeline.submit(part.clone()).await?;
 //!     upload_ids.push(outcome.id().unwrap());
 //! }
 //!
-//! handle.submit(
-//!     TaskSubmission::new("finalize")
-//!         .key("finalize-upload")
-//!         .depends_on_all(upload_ids)
-//!         .payload_json(&finalize_plan)
-//! ).await?;
+//! pipeline.submit_with(FinalizeUpload { key: "finalize".into() })
+//!     .depends_on_all(upload_ids)
+//!     .await?;
 //! ```
 //!
 //! ### Diamond dependency
@@ -729,46 +696,45 @@
 //! Task A fans out to B and C, which both converge on D:
 //!
 //! ```ignore
-//! let handle = scheduler.module("pipeline");
+//! let pipeline: DomainHandle<Pipeline> = scheduler.domain::<Pipeline>();
 //!
-//! let a = handle.submit(
-//!     TaskSubmission::new("extract").key("a").payload_json(&extract)
-//! ).await?;
+//! let a = pipeline.submit(Extract { key: "a".into() }).await?;
 //! let a_id = a.id().unwrap();
 //!
-//! let b = handle.submit(
-//!     TaskSubmission::new("transform-x")
-//!         .key("b").depends_on(a_id).payload_json(&tx)
-//! ).await?;
+//! let b = pipeline.submit_with(TransformX { key: "b".into() })
+//!     .depends_on(a_id)
+//!     .await?;
 //!
-//! let c = handle.submit(
-//!     TaskSubmission::new("transform-y")
-//!         .key("c").depends_on(a_id).payload_json(&ty)
-//! ).await?;
+//! let c = pipeline.submit_with(TransformY { key: "c".into() })
+//!     .depends_on(a_id)
+//!     .await?;
 //!
-//! handle.submit(
-//!     TaskSubmission::new("load")
-//!         .key("d")
-//!         .depends_on_all([b.id().unwrap(), c.id().unwrap()])
-//!         .payload_json(&load)
-//! ).await?;
+//! pipeline.submit_with(Load { key: "d".into() })
+//!     .depends_on_all([b.id().unwrap(), c.id().unwrap()])
+//!     .await?;
 //! ```
 //!
 //! ## Task superseding
 //!
 //! Use [`DuplicateStrategy::Supersede`] for "latest-value-wins" scenarios
 //! like continuous file sync, where re-submitting an already-queued task
-//! should atomically cancel the old one and replace it:
+//! should atomically cancel the old one and replace it. Set it via
+//! [`TypedTask::config()`]:
 //!
 //! ```ignore
-//! use taskmill::{TaskSubmission, DuplicateStrategy};
+//! impl TypedTask for SyncFile {
+//!     type Domain = Sync;
+//!     const TASK_TYPE: &'static str = "sync-file";
 //!
-//! let sub = TaskSubmission::new("sync-file")
-//!     .key("path/to/file.txt")
-//!     .payload_json(&new_content)
-//!     .on_duplicate(DuplicateStrategy::Supersede);
+//!     fn config() -> TaskTypeConfig {
+//!         TaskTypeConfig::new().on_duplicate(DuplicateStrategy::Supersede)
+//!     }
 //!
-//! let outcome = scheduler.module("sync").submit(sub).await?;
+//!     fn key(&self) -> Option<String> { Some(self.path.clone()) }
+//! }
+//!
+//! let sync: DomainHandle<Sync> = scheduler.domain::<Sync>();
+//! let outcome = sync.submit(SyncFile { path: "path/to/file.txt".into() }).await?;
 //! // outcome is Superseded { new_task_id, replaced_task_id } if a duplicate existed,
 //! // or Inserted(id) if this was the first submission.
 //! ```
@@ -804,7 +770,8 @@
 //!   via [`resource_sampler()`](SchedulerBuilder::resource_sampler).
 
 pub mod backpressure;
-pub mod module;
+pub mod domain;
+pub(crate) mod module;
 pub mod priority;
 pub mod registry;
 pub mod resource;
@@ -812,9 +779,14 @@ pub mod scheduler;
 pub mod store;
 pub mod task;
 
-// Convenience re-exports.
+// ── Domain-centric API ───────────────────────────────────────────────
+pub use domain::{
+    Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskEvent, TaskTypeConfig,
+    TaskTypeOptions, TypedEventStream, TypedExecutor,
+};
+
+// ── Core re-exports ──────────────────────────────────────────────────
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
-pub use module::{Module, ModuleHandle, ModuleReceiver, ModuleRegistry, ModuleSnapshot};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
@@ -827,10 +799,10 @@ pub use scheduler::{
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BackoffStrategy, BatchOutcome, BatchSubmission, DependencyFailurePolicy,
-    DuplicateStrategy, HistoryStatus, IoBudget, ModuleSubmitDefaults, ParentResolution,
-    RecurringSchedule, RecurringScheduleInfo, RetryPolicy, SubmitBuilder, SubmitOutcome, TaskError,
-    TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats,
-    TypedTask, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
+    DuplicateStrategy, HistoryStatus, IoBudget, ParentResolution, RecurringSchedule,
+    RecurringScheduleInfo, RetryPolicy, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup,
+    TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK,
+    MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

@@ -55,6 +55,28 @@ impl TaskStore {
         Ok(records)
     }
 
+    /// Most recent history record for a specific key.
+    ///
+    /// Used by [`TypedEventStream`](crate::domain::TypedEventStream) to
+    /// attach the `TaskHistoryRecord` to terminal events without modifying
+    /// the internal broadcast channel.
+    pub async fn latest_history_by_key(
+        &self,
+        key: &str,
+    ) -> Result<Option<TaskHistoryRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT * FROM task_history WHERE key = ? ORDER BY completed_at DESC LIMIT 1",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        let mut record = row.as_ref().map(row_to_history_record);
+        if let Some(ref mut r) = record {
+            self.populate_history_tags(std::slice::from_mut(r)).await?;
+        }
+        Ok(record)
+    }
+
     /// History for a specific key (all past runs of that key).
     pub async fn history_by_key(&self, key: &str) -> Result<Vec<TaskHistoryRecord>, StoreError> {
         let rows =

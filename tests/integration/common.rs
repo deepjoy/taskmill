@@ -7,8 +7,55 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    PressureSource, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskSubmission,
+    DomainKey, PressureSource, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskSubmission,
 };
+
+// ── Domain Keys ────────────────────────────────────────────────────
+
+pub struct TestDomain;
+impl DomainKey for TestDomain {
+    const NAME: &'static str = "test";
+}
+
+pub struct MediaDomain;
+impl DomainKey for MediaDomain {
+    const NAME: &'static str = "media";
+}
+
+pub struct SyncDomain;
+impl DomainKey for SyncDomain {
+    const NAME: &'static str = "sync";
+}
+
+pub struct AnalyticsDomain;
+impl DomainKey for AnalyticsDomain {
+    const NAME: &'static str = "analytics";
+}
+
+pub struct DomainA;
+impl DomainKey for DomainA {
+    const NAME: &'static str = "a";
+}
+
+pub struct DomainB;
+impl DomainKey for DomainB {
+    const NAME: &'static str = "b";
+}
+
+pub struct AlphaDomain;
+impl DomainKey for AlphaDomain {
+    const NAME: &'static str = "alpha";
+}
+
+pub struct BetaDomain;
+impl DomainKey for BetaDomain {
+    const NAME: &'static str = "beta";
+}
+
+pub struct GammaDomain;
+impl DomainKey for GammaDomain {
+    const NAME: &'static str = "gamma";
+}
 
 // ── Test Executors ──────────────────────────────────────────────────
 

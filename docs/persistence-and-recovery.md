@@ -2,7 +2,7 @@
 
 Taskmill persists all task state to SQLite. Work survives process restarts, crashes, and power loss — no manual recovery needed.
 
-> **0.4.0 note: databases from 0.3.x are not compatible.** Task type strings stored by 0.3.x use bare names (e.g. `"thumbnail"`); 0.4.0 stores qualified names (e.g. `"media::thumbnail"`). Delete the database file before first run after upgrading — there is no in-place migration path.
+> **0.4.0+ note: databases from 0.3.x are not compatible.** Task type strings stored by 0.3.x use bare names (e.g. `"thumbnail"`); 0.4.0+ stores qualified names (e.g. `"media::thumbnail"`). Delete the database file before first run after upgrading — there is no in-place migration path.
 
 ## What survives a crash
 
@@ -51,7 +51,7 @@ let sub = TaskSubmission::new("upload")
     .key("/photos/img.jpg");  // dedup on file path, not full payload
 ```
 
-> **Dedup keys include the module prefix.** The key is derived from the *qualified* task type (e.g., `"media::thumbnail"`, not `"thumbnail"`), so `"media::thumbnail"` and `"cdn::thumbnail"` have separate key spaces. A `Supersede` submission in module A will never supersede a task in module B, even if both tasks have the same logical payload.
+> **Dedup keys include the domain prefix.** The key is derived from the *qualified* task type (e.g., `"media::thumbnail"`, not `"thumbnail"`), so `"media::thumbnail"` and `"cdn::thumbnail"` have separate key spaces. A `Supersede` submission in domain A will never supersede a task in domain B, even if both tasks have the same logical payload.
 
 ### Key lifecycle
 
@@ -62,7 +62,7 @@ A key is "occupied" while the task is active — pending, running, paused, waiti
 ```rust
 use taskmill::SubmitOutcome;
 
-let outcome = scheduler.module("app").submit(submission).await?;
+let outcome = scheduler.domain::<App>().submit(task).await?;
 match outcome {
     SubmitOutcome::Inserted(id) => println!("new task: {id}"),
     SubmitOutcome::Duplicate => println!("already queued"),
@@ -74,17 +74,14 @@ match outcome {
 `submit_batch()` applies the same dedup within a single transaction:
 
 ```rust
-use taskmill::BatchSubmission;
-
-let batch = BatchSubmission::new()
-    .task(sub1).task(sub2).task(sub3);
-let outcome = scheduler.module("app").submit_batch(batch).await?;
-// outcome.duplicated_count() — how many were Duplicate
+let tasks = vec![task1, task2, task3];
+let outcomes = scheduler.domain::<App>().submit_batch(tasks).await?;
+// outcomes — Vec<SubmitOutcome>, one per task
 ```
 
 ### Looking up tasks by dedup key
 
-Check whether a task has been submitted (or has already completed). In 0.4 the task type in the database is the qualified name including the module prefix:
+Check whether a task has been submitted (or has already completed). The task type in the database is the qualified name including the domain prefix:
 
 ```rust
 use taskmill::TaskLookup;

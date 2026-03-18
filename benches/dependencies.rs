@@ -2,16 +2,20 @@
 //!
 //! Run with: `cargo bench --bench dependencies`
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
-    Module, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
+    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
     TaskSubmission,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+
+struct BenchDomain;
+impl DomainKey for BenchDomain {
+    const NAME: &'static str = "bench";
+}
 
 struct NoopExecutor;
 
@@ -24,7 +28,7 @@ impl TaskExecutor for NoopExecutor {
 async fn build_scheduler(max_concurrency: usize) -> Scheduler {
     Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
         .max_concurrency(max_concurrency)
         .poll_interval(Duration::from_millis(10))
         .build()

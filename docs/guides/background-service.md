@@ -15,7 +15,11 @@ A service that:
 
 ```rust
 use serde::{Serialize, Deserialize};
-use taskmill::{TypedTask, IoBudget, Priority};
+use taskmill::{TypedTask, TaskTypeConfig, IoBudget, Priority, DomainKey};
+
+// Define the domain identity
+pub struct Images;
+impl DomainKey for Images { const NAME: &'static str = "images"; }
 
 #[derive(Serialize, Deserialize)]
 struct ProcessImageTask {
@@ -25,20 +29,13 @@ struct ProcessImageTask {
 }
 
 impl TypedTask for ProcessImageTask {
+    type Domain = Images;
     const TASK_TYPE: &'static str = "process-image";
 
-    fn expected_io(&self) -> IoBudget {
-        // RAW files are much larger
-        let write_estimate = if self.is_raw { self.file_size / 10 } else { self.file_size / 4 };
-        IoBudget::disk(self.file_size as i64, write_estimate as i64)
-    }
-
-    fn priority(&self) -> Priority {
-        if self.is_raw {
-            Priority::BACKGROUND  // RAW processing is slow; don't block JPEGs
-        } else {
-            Priority::NORMAL
-        }
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .priority(Priority::NORMAL)
+            .expected_io(IoBudget::disk(50_000, 10_000))
     }
 
     fn key(&self) -> Option<String> {
@@ -50,17 +47,12 @@ impl TypedTask for ProcessImageTask {
 ## Implement the executor
 
 ```rust
-use std::sync::Arc;
-use taskmill::{TaskExecutor, TaskContext, TaskError};
+use taskmill::{TypedExecutor, TaskContext, TaskError};
 
 struct ImageProcessor;
 
-impl TaskExecutor for ImageProcessor {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
-    ) -> Result<(), TaskError> {
-        let task: ProcessImageTask = ctx.payload()?;
-
+impl TypedExecutor<ProcessImageTask> for ImageProcessor {
+    async fn execute(&self, task: ProcessImageTask, ctx: &TaskContext) -> Result<(), TaskError> {
         // Read the source image
         let data = tokio::fs::read(&task.path).await
             .map_err(|e| TaskError::permanent(format!("can't read: {e}")))?;
@@ -85,15 +77,14 @@ impl TaskExecutor for ImageProcessor {
 }
 ```
 
-## Define the module
+## Define the domain
 
 ```rust
-use std::sync::Arc;
-use taskmill::{Module, Priority};
+use taskmill::Domain;
 
-pub fn images_module() -> Module {
-    Module::new("images")
-        .typed_executor::<ProcessImageTask, _>(Arc::new(ImageProcessor))
+pub fn images_domain() -> Domain<Images> {
+    Domain::<Images>::new()
+        .task::<ProcessImageTask>(ImageProcessor)
         .max_concurrency(4)
 }
 ```
@@ -101,7 +92,6 @@ pub fn images_module() -> Module {
 ## Set up the service
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use taskmill::{Scheduler, ShutdownMode, StoreConfig, RetentionPolicy, SamplerConfig};
@@ -112,7 +102,7 @@ async fn main() {
 
     let scheduler = Scheduler::builder()
         .store_path("/var/lib/myservice/tasks.db")
-        .module(images_module())
+        .domain(images_domain())
         .max_concurrency(4)
         .max_retries(5)
         .with_resource_monitoring()
@@ -138,7 +128,7 @@ async fn main() {
     });
 
     // Watch for new files and submit tasks
-    let images = scheduler.module("images");
+    let images = scheduler.domain::<Images>();
     tokio::spawn(async move {
         watch_directory("/data/incoming", images).await;
     });
@@ -157,13 +147,13 @@ async fn main() {
 }
 ```
 
-The watcher submits tasks through the `ModuleHandle`:
+The watcher submits tasks through the `DomainHandle`:
 
 ```rust
-async fn watch_directory(path: &str, handle: ModuleHandle) {
+async fn watch_directory(path: &str, handle: DomainHandle<Images>) {
     // ... watch for new files ...
     let task = ProcessImageTask { path: file_path, file_size, is_raw };
-    handle.submit_typed(&task).await.unwrap();
+    handle.submit(task).await.unwrap();
 }
 ```
 
