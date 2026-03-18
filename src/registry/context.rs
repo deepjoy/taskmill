@@ -210,7 +210,7 @@ impl TaskContext {
     /// Panics if `name` is not a registered module or the scheduler has shut down.
     pub fn module(&self, name: &str) -> ModuleHandle {
         self.try_module(name)
-            .unwrap_or_else(|| panic!("module '{name}' is not registered"))
+            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .module(...) to the SchedulerBuilder?"))
     }
 
     /// Returns a scoped handle for the named module, or `None` if the module is

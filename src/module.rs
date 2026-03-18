@@ -534,8 +534,20 @@ impl ModuleHandle {
 
     /// Cancel all tasks belonging to this module.
     ///
-    /// Queries with `task_type LIKE '{prefix}%'` and cancels each task.
-    /// Returns the IDs that were successfully cancelled.
+    /// Queries all active tasks with `task_type LIKE '{prefix}%'` and cancels
+    /// each one. Returns the IDs that were successfully cancelled.
+    ///
+    /// **Behavior by task status:**
+    /// - **Pending** — moved to history as `Cancelled`.
+    /// - **Running** — cancellation token is triggered; the task is moved to
+    ///   history as `Cancelled` (the executor should check `ctx.token()` and
+    ///   exit cleanly).
+    /// - **Paused** — cancelled immediately (no executor is running).
+    /// - **Waiting** (parent with live children) — parent is cancelled, and
+    ///   its children are cascade-cancelled regardless of which module owns them.
+    ///
+    /// Children in other modules are cancelled if they were linked via
+    /// `.parent()` from a task in this module.
     pub async fn cancel_all(&self) -> Result<Vec<i64>, StoreError> {
         let tasks = self
             .scheduler

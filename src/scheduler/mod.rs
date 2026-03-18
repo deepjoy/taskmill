@@ -269,7 +269,7 @@ impl Scheduler {
     /// For dynamic / runtime lookup, use [`try_module`](Self::try_module) instead.
     pub fn module(&self, name: &str) -> crate::module::ModuleHandle {
         self.try_module(name)
-            .unwrap_or_else(|| panic!("module '{name}' is not registered"))
+            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .module(...) to the SchedulerBuilder?"))
     }
 
     /// Get a scoped handle for the named module, returning `None` if it is not registered.

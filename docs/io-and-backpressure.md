@@ -63,11 +63,12 @@ Use store queries to see how your tasks actually perform and refine future estim
 ```rust
 let store = scheduler.store();
 
-// Average throughput for a task type (from recent completions)
-let (avg_read_bps, avg_write_bps) = store.avg_throughput("thumbnail", 20).await?;
+// Average throughput for a task type (from recent completions).
+// Note: use the qualified name including the module prefix.
+let (avg_read_bps, avg_write_bps) = store.avg_throughput("media::thumbnail", 20).await?;
 
 // Aggregate stats: count, avg duration, avg IO, failure rate
-let stats = store.history_stats("thumbnail").await?;
+let stats = store.history_stats("media::thumbnail").await?;
 ```
 
 ## Resource monitoring
