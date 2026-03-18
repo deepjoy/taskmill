@@ -211,6 +211,12 @@ impl SubmitBuilder {
         self
     }
 
+    fn merge_module_tags(sub: &mut TaskSubmission, module_tags: &HashMap<String, String>) {
+        for (k, v) in module_tags {
+            sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+
     /// Apply all default layers and per-call overrides, returning the
     /// scheduler and the fully resolved [`TaskSubmission`].
     ///
@@ -255,9 +261,7 @@ impl SubmitBuilder {
             sub.ttl = td.ttl;
             // TypedTask tags are the base; module tags add new keys only.
             sub.tags = td.tags;
-            for (k, v) in &self.module_defaults.tags {
-                sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
-            }
+            Self::merge_module_tags(&mut sub, &self.module_defaults.tags);
             if let Some(p) = self.module_defaults.priority {
                 sub.priority = p;
             }
@@ -290,9 +294,7 @@ impl SubmitBuilder {
                 }
             }
             // Module tags: add keys not already on the submission (submission wins).
-            for (k, v) in &self.module_defaults.tags {
-                sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
-            }
+            Self::merge_module_tags(&mut sub, &self.module_defaults.tags);
         }
 
         // ── 4. Apply per-call overrides (layer 1 — always highest priority) ──

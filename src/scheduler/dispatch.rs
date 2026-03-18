@@ -86,39 +86,42 @@ impl ActiveTaskMap {
         self.inner.lock().unwrap().remove(&id)
     }
 
-    /// Snapshot of all active task records.
-    pub fn records(&self) -> Vec<TaskRecord> {
-        self.inner
-            .lock()
-            .unwrap()
-            .values()
+    /// Snapshot of active task records, optionally filtered to those whose
+    /// `task_type` starts with `prefix`.
+    pub fn records(&self, prefix: Option<&str>) -> Vec<TaskRecord> {
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .filter(|at| prefix.map_or(true, |p| at.record.task_type.starts_with(p)))
             .map(|at| at.record.clone())
             .collect()
     }
 
-    /// Snapshot of progress data for all active tasks.
+    /// Snapshot of progress data for active tasks, optionally filtered to
+    /// those whose `task_type` starts with `prefix`.
     pub fn progress_snapshots(
         &self,
+        prefix: Option<&str>,
     ) -> Vec<(
         TaskRecord,
         Option<f32>,
         Option<chrono::DateTime<chrono::Utc>>,
     )> {
-        self.inner
-            .lock()
-            .unwrap()
-            .values()
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .filter(|at| prefix.map_or(true, |p| at.record.task_type.starts_with(p)))
             .map(|at| (at.record.clone(), at.reported_progress, at.reported_at))
             .collect()
     }
 
-    /// Snapshot of byte-level progress for all active tasks.
+    /// Snapshot of byte-level progress for active tasks, optionally filtered
+    /// to those whose `task_type` starts with `prefix`.
     ///
     /// Returns `(task_id, task_type, key, label, bytes_completed, bytes_total, parent_id, started_at)`.
     /// Single lock acquisition — reads atomic counters and copies scalar fields only.
-    pub fn byte_progress_snapshots(&self) -> Vec<ByteProgressSnapshot> {
+    pub fn byte_progress_snapshots(&self, prefix: Option<&str>) -> Vec<ByteProgressSnapshot> {
         let map = self.inner.lock().unwrap();
         map.values()
+            .filter(|at| prefix.map_or(true, |p| at.record.task_type.starts_with(p)))
             .map(|at| {
                 let (completed, total) = at.io.progress_snapshot();
                 (
@@ -229,52 +232,6 @@ impl ActiveTaskMap {
         handles
     }
 
-    /// Snapshot of all active task records whose `task_type` starts with `prefix`.
-    pub fn records_with_prefix(&self, prefix: &str) -> Vec<TaskRecord> {
-        let map = self.inner.lock().unwrap();
-        map.values()
-            .filter(|at| at.record.task_type.starts_with(prefix))
-            .map(|at| at.record.clone())
-            .collect()
-    }
-
-    /// Snapshot of progress data for active tasks matching `prefix`.
-    pub fn progress_snapshots_with_prefix(
-        &self,
-        prefix: &str,
-    ) -> Vec<(
-        TaskRecord,
-        Option<f32>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    )> {
-        let map = self.inner.lock().unwrap();
-        map.values()
-            .filter(|at| at.record.task_type.starts_with(prefix))
-            .map(|at| (at.record.clone(), at.reported_progress, at.reported_at))
-            .collect()
-    }
-
-    /// Snapshot of byte-level progress for active tasks matching `prefix`.
-    pub fn byte_progress_snapshots_with_prefix(&self, prefix: &str) -> Vec<ByteProgressSnapshot> {
-        let map = self.inner.lock().unwrap();
-        map.values()
-            .filter(|at| at.record.task_type.starts_with(prefix))
-            .map(|at| {
-                let (completed, total) = at.io.progress_snapshot();
-                (
-                    at.record.id,
-                    at.record.task_type.clone(),
-                    at.record.key.clone(),
-                    at.record.label.clone(),
-                    completed,
-                    total,
-                    at.record.parent_id,
-                    at.started_at,
-                )
-            })
-            .collect()
-    }
-
     /// Pause active tasks whose `task_type` starts with `prefix`: cancel their
     /// tokens and move them to paused state in the store. Returns count paused.
     pub async fn pause_module(
@@ -382,17 +339,12 @@ pub(crate) async fn spawn_task(
     } = ctx;
 
     // Extract the owning module name from the task type prefix (e.g. "media" from "media::thumb").
-    let owning_module: String = task
-        .task_type
-        .split_once("::")
-        .map(|(n, _)| n.to_string())
-        .unwrap_or_default();
+    let owning_module: String = task.module_name().unwrap_or_default().to_string();
 
     // Clone the pre-snapshotted module state — no lock needed, already lock-free.
     let module_state_snapshot: StateSnapshot = task
-        .task_type
-        .split_once("::")
-        .and_then(|(name, _)| module_state.get(name).cloned())
+        .module_name()
+        .and_then(|name| module_state.get(name).cloned())
         .unwrap_or_default();
     let child_token = CancellationToken::new();
 
@@ -426,7 +378,7 @@ pub(crate) async fn spawn_task(
     );
 
     // Increment the module running counter for this task.
-    if let Some(module_name) = task.task_type.split_once("::").map(|(n, _)| n) {
+    if let Some(module_name) = task.module_name() {
         if let Some(counter) = module_running.get(module_name) {
             counter.fetch_add(1, AtomicOrdering::Relaxed);
         }
@@ -462,7 +414,7 @@ pub(crate) async fn spawn_task(
         let task_id = task.id;
         // Helper: decrement the module running counter when this task leaves "running".
         let decrement_module = || {
-            if let Some(name) = task.task_type.split_once("::").map(|(n, _)| n) {
+            if let Some(name) = task.module_name() {
                 if let Some(counter) = module_running_for_task.get(name) {
                     counter.fetch_sub(1, AtomicOrdering::Relaxed);
                 }

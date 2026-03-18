@@ -8,7 +8,7 @@ use super::{EstimatedProgress, Scheduler, SchedulerSnapshot};
 impl Scheduler {
     /// Snapshot of currently active (in-memory) tasks.
     pub async fn active_tasks(&self) -> Vec<crate::task::TaskRecord> {
-        self.inner.active.records()
+        self.inner.active.records(None)
     }
 
     /// Get estimated progress for all running tasks.
@@ -16,7 +16,7 @@ impl Scheduler {
     /// Combines executor-reported progress with throughput-based extrapolation
     /// using historical average duration for each task type.
     pub async fn estimated_progress(&self) -> Vec<EstimatedProgress> {
-        let snapshots: Vec<_> = self.inner.active.progress_snapshots();
+        let snapshots: Vec<_> = self.inner.active.progress_snapshots(None);
         let mut results = Vec::with_capacity(snapshots.len());
         for (record, reported, reported_at) in snapshots {
             results.push(
@@ -32,7 +32,7 @@ impl Scheduler {
     /// Returns instantaneous values (throughput = 0) — for smoothed throughput
     /// and ETA, use [`subscribe_progress`](Self::subscribe_progress).
     pub fn byte_progress(&self) -> Vec<TaskProgress> {
-        let snapshots = self.inner.active.byte_progress_snapshots();
+        let snapshots = self.inner.active.byte_progress_snapshots(None);
         snapshots
             .into_iter()
             .filter(|(_, _, _, _, completed, _, _, _)| *completed > 0)
@@ -111,7 +111,7 @@ impl Scheduler {
     /// backpressure in one call — exactly what a Tauri command would
     /// return to the frontend.
     pub async fn snapshot(&self) -> Result<SchedulerSnapshot, StoreError> {
-        let running = self.inner.active.records();
+        let running = self.inner.active.records(None);
         let pending_count = self.inner.store.pending_count().await?;
         let paused_count = self.inner.store.paused_count().await?;
         let waiting_count = self.inner.store.waiting_count().await?;

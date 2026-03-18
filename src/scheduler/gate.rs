@@ -169,7 +169,7 @@ impl DispatchGate for DefaultDispatchGate {
             }
 
             // Module concurrency check.
-            if let Some(module_name) = task.task_type.split_once("::").map(|(n, _)| n) {
+            if let Some(module_name) = task.module_name() {
                 let cap = ctx.module_caps.read().unwrap().get(module_name).copied();
                 if let Some(cap) = cap {
                     let running = ctx
