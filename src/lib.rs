@@ -779,6 +779,7 @@
 //!   via [`resource_sampler()`](SchedulerBuilder::resource_sampler).
 
 pub mod backpressure;
+pub mod module;
 pub mod priority;
 pub mod registry;
 pub mod resource;
@@ -788,6 +789,7 @@ pub mod task;
 
 // Convenience re-exports.
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
+pub use module::Module;
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
