@@ -1,6 +1,7 @@
 //! Task spawning, active-task tracking, preemption, and parent-child resolution.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
@@ -346,6 +347,8 @@ pub(crate) struct SpawnContext {
     pub scheduler: super::WeakScheduler,
     #[allow(dead_code)]
     pub cancel_hook_timeout: tokio::time::Duration,
+    /// Per-module live running counts. Incremented on dispatch; decremented on terminal.
+    pub module_running: Arc<HashMap<String, AtomicUsize>>,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -368,6 +371,7 @@ pub(crate) async fn spawn_task(
         work_notify,
         scheduler,
         cancel_hook_timeout: _,
+        module_running,
     } = ctx;
     let child_token = CancellationToken::new();
 
@@ -400,6 +404,13 @@ pub(crate) async fn spawn_task(
         },
     );
 
+    // Increment the module running counter for this task.
+    if let Some(module_name) = task.task_type.split_once("::").map(|(n, _)| n) {
+        if let Some(counter) = module_running.get(module_name) {
+            counter.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+    }
+
     let ctx = TaskContext {
         record: task.clone(),
         token: child_token.clone(),
@@ -422,8 +433,17 @@ pub(crate) async fn spawn_task(
     let task_id_for_handle = task.id;
     let active_for_handle = active.clone();
     let token_for_spawn = child_token.clone();
+    let module_running_for_task = module_running;
     let handle = tokio::spawn(async move {
         let task_id = task.id;
+        // Helper: decrement the module running counter when this task leaves "running".
+        let decrement_module = || {
+            if let Some(name) = task.task_type.split_once("::").map(|(n, _)| n) {
+                if let Some(counter) = module_running_for_task.get(name) {
+                    counter.fetch_sub(1, AtomicOrdering::Relaxed);
+                }
+            }
+        };
         let result = match phase {
             ExecutionPhase::Execute => executor.execute_erased(&ctx).await,
             ExecutionPhase::Finalize => executor.finalize_erased(&ctx).await,
@@ -445,6 +465,7 @@ pub(crate) async fn spawn_task(
                             if let Err(e) = store.set_waiting(task_id).await {
                                 tracing::error!(task_id, error = %e, "failed to set task to waiting");
                             }
+                            decrement_module();
                             active.remove(task_id);
                             let _ = event_tx.send(SchedulerEvent::Waiting {
                                 task_id,
@@ -495,6 +516,7 @@ pub(crate) async fn spawn_task(
                     }
                 }
                 // Remove from active tracking AFTER the store write completes.
+                decrement_module();
                 active.remove(task_id);
                 let _ = event_tx.send(SchedulerEvent::Completed(task.event_header()));
 
@@ -528,6 +550,7 @@ pub(crate) async fn spawn_task(
             Err(te) => {
                 // If cancelled (preempted), the scheduler already paused it.
                 if token_for_spawn.is_cancelled() {
+                    decrement_module();
                     active.remove(task_id);
                     return;
                 }
@@ -585,6 +608,7 @@ pub(crate) async fn spawn_task(
                     tracing::error!(task_id, error = %e, "failed to record task failure");
                 }
                 // Remove from active tracking AFTER the store write completes.
+                decrement_module();
                 active.remove(task_id);
                 let dead_lettered = te.retryable && !will_retry;
                 if dead_lettered {

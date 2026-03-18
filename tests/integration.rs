@@ -2715,3 +2715,345 @@ async fn submit_typed_five_layer_precedence_chain() {
     // task_type is prefixed by the module name.
     assert_eq!(task.task_type, "media::layered");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Q. Module Concurrency (Step 6)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Module cap=2, submit 5 tasks — only 2 run concurrently.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_cap_limits_concurrency_to_2() {
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .max_concurrency(10) // global cap high — module cap should bind
+        .poll_interval(Duration::from_millis(20))
+        .module(
+            Module::new("media")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: current.clone(),
+                        max_seen: max_seen.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(2),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+    for i in 0..5 {
+        media
+            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 5 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert_eq!(completed, 5, "all 5 tasks should complete");
+    assert!(
+        max_seen.load(Ordering::SeqCst) <= 2,
+        "module cap 2 should be enforced, got {}",
+        max_seen.load(Ordering::SeqCst)
+    );
+}
+
+/// Module cap=4, group cap=2 — grouped tasks are limited to 2, module cap
+/// acts as an independent broader ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_cap_and_group_cap_are_independent() {
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .max_concurrency(10)
+        .poll_interval(Duration::from_millis(20))
+        .group_concurrency("gpu", 2) // group cap = 2
+        .module(
+            Module::new("media")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: current.clone(),
+                        max_seen: max_seen.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(4), // module cap = 4
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+    // Submit 6 tasks all in the "gpu" group — group cap is the binding constraint.
+    for i in 0..6 {
+        media
+            .submit(
+                TaskSubmission::new("work")
+                    .key(format!("t{i}"))
+                    .group("gpu"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 6 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert_eq!(completed, 6, "all 6 tasks should complete");
+    assert!(
+        max_seen.load(Ordering::SeqCst) <= 2,
+        "group cap 2 should limit concurrency, got {}",
+        max_seen.load(Ordering::SeqCst)
+    );
+}
+
+/// Ungrouped tasks with module cap=3 — only the module cap is enforced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ungrouped_task_respects_module_cap() {
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .max_concurrency(10)
+        .poll_interval(Duration::from_millis(20))
+        .module(
+            Module::new("media")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: current.clone(),
+                        max_seen: max_seen.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(3),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+    for i in 0..7 {
+        media
+            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 7 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert_eq!(completed, 7, "all 7 tasks should complete");
+    assert!(
+        max_seen.load(Ordering::SeqCst) <= 3,
+        "module cap 3 should be enforced, got {}",
+        max_seen.load(Ordering::SeqCst)
+    );
+}
+
+/// Global cap=4, two modules each cap=3 — global cap is the hard ceiling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_cap_is_hard_ceiling_over_module_caps() {
+    // Shared counter across both modules' executors to measure total concurrency.
+    let total_current = Arc::new(AtomicUsize::new(0));
+    let total_max = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .max_concurrency(4) // global ceiling — should bind at 4 even though 3+3=6
+        .poll_interval(Duration::from_millis(20))
+        .module(
+            Module::new("media")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: total_current.clone(),
+                        max_seen: total_max.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(3),
+        )
+        .module(
+            Module::new("sync")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: total_current.clone(),
+                        max_seen: total_max.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(3),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+    let sync = sched.module("sync");
+    for i in 0..5 {
+        media
+            .submit(TaskSubmission::new("work").key(format!("m{i}")))
+            .await
+            .unwrap();
+        sync.submit(TaskSubmission::new("work").key(format!("s{i}")))
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 10 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert_eq!(completed, 10, "all 10 tasks should complete");
+    assert!(
+        total_max.load(Ordering::SeqCst) <= 4,
+        "global cap 4 should be the hard ceiling, got {}",
+        total_max.load(Ordering::SeqCst)
+    );
+}
+
+/// `set_max_concurrency` at runtime takes effect on subsequent dispatches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_max_concurrency_changes_dispatch_behavior() {
+    let current = Arc::new(AtomicUsize::new(0));
+    let max_seen = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .max_concurrency(10)
+        .poll_interval(Duration::from_millis(20))
+        .module(
+            Module::new("media")
+                .executor(
+                    "work",
+                    Arc::new(ConcurrencyTrackingExecutor {
+                        current: current.clone(),
+                        max_seen: max_seen.clone(),
+                        delay: Duration::from_millis(100),
+                    }),
+                )
+                .max_concurrency(4), // initial cap — will be narrowed at runtime
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+
+    // Narrow the cap to 2 before dispatching anything.
+    media.set_max_concurrency(2);
+    assert_eq!(
+        media.max_concurrency(),
+        2,
+        "cap should reflect the runtime update"
+    );
+
+    for i in 0..6 {
+        media
+            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .await
+            .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 6 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+
+    token.cancel();
+    let _ = handle.await;
+
+    assert_eq!(completed, 6, "all 6 tasks should complete");
+    assert!(
+        max_seen.load(Ordering::SeqCst) <= 2,
+        "runtime cap 2 should be enforced, got {}",
+        max_seen.load(Ordering::SeqCst)
+    );
+}

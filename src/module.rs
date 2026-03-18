@@ -655,6 +655,36 @@ impl ModuleHandle {
             .is_some_and(|f| f.load(AtomicOrdering::Acquire))
     }
 
+    // ── Module concurrency ────────────────────────────────────────
+
+    /// Set the maximum number of tasks from this module that may run concurrently.
+    ///
+    /// Overwrites any cap set at build time. A value of `0` removes the cap
+    /// (unlimited concurrency for this module). Takes effect on the next
+    /// dispatch cycle.
+    pub fn set_max_concurrency(&self, n: usize) {
+        let mut caps = self.scheduler.inner.module_caps.write().unwrap();
+        if n == 0 {
+            caps.remove(self.name.as_ref());
+        } else {
+            caps.insert(self.name.to_string(), n);
+        }
+    }
+
+    /// Read the current concurrency cap for this module.
+    ///
+    /// Returns `0` if no cap is configured (unlimited).
+    pub fn max_concurrency(&self) -> usize {
+        self.scheduler
+            .inner
+            .module_caps
+            .read()
+            .unwrap()
+            .get(self.name.as_ref())
+            .copied()
+            .unwrap_or(0)
+    }
+
     // ── Scoped queries ────────────────────────────────────────────
 
     /// All active tasks in this module (any status).

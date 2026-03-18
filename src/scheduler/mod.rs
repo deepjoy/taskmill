@@ -34,7 +34,7 @@ mod tests;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
@@ -104,6 +104,14 @@ pub(crate) struct SchedulerInner {
     /// module has been explicitly paused via [`ModuleHandle::pause`].
     /// Initialized to `false` for every module at build time.
     pub(crate) module_paused: HashMap<String, AtomicBool>,
+    /// Per-module concurrency caps (module name → cap).
+    /// Initialized from `Module::max_concurrency` at build time.
+    /// Updated at runtime by `ModuleHandle::set_max_concurrency`.
+    pub(crate) module_caps: RwLock<HashMap<String, usize>>,
+    /// Per-module live running counts (module name → count).
+    /// Incremented when a task is dispatched; decremented on every terminal transition.
+    /// Shared with spawned tasks via `Arc` so they can decrement on completion.
+    pub(crate) module_running: Arc<HashMap<String, AtomicUsize>>,
 }
 
 /// IO-aware priority scheduler.
@@ -183,6 +191,18 @@ impl Scheduler {
             .iter()
             .map(|e| (e.name.clone(), AtomicBool::new(false)))
             .collect();
+        let module_caps: HashMap<String, usize> = module_registry
+            .entries()
+            .iter()
+            .filter_map(|e| e.max_concurrency.map(|cap| (e.name.clone(), cap)))
+            .collect();
+        let module_running: Arc<HashMap<String, AtomicUsize>> = Arc::new(
+            module_registry
+                .entries()
+                .iter()
+                .map(|e| (e.name.clone(), AtomicUsize::new(0)))
+                .collect(),
+        );
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
@@ -213,6 +233,8 @@ impl Scheduler {
                 last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
                 module_registry,
                 module_paused,
+                module_caps: RwLock::new(module_caps),
+                module_running,
             }),
         }
     }
