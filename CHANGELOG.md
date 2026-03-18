@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/deepjoy/taskmill/compare/v0.4.0...v0.5.0) - 2026-03-18
+
+### Added
+
+- [**breaking**] domain-centric API with typed event streams ([#48](https://github.com/deepjoy/taskmill/pull/48))
+
+### Fixed
+
+- *(ci)* capture benchmark output from stderr in workflow ([#47](https://github.com/deepjoy/taskmill/pull/47))
+
+### Other
+
+- add multi-module guides, benchmarks, and CI benchmark workflow ([#45](https://github.com/deepjoy/taskmill/pull/45))
+
 ## [0.4.0](https://github.com/deepjoy/taskmill/compare/v0.3.1...v0.4.0) - 2026-03-18
 
 ### Added
