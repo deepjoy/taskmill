@@ -590,6 +590,35 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.subscribe()
     }
 
+    /// Subscribe to events for a specific task type within this domain.
+    ///
+    /// Returns a [`TypedEventStream<T>`] that filters the global event
+    /// broadcast to only events matching `T::TASK_TYPE` within this domain.
+    /// Terminal events include the [`TaskHistoryRecord`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut stream = media.task_events::<Thumbnail>();
+    /// while let Ok(event) = stream.recv().await {
+    ///     if let TaskEvent::Completed { record, .. } = event {
+    ///         let thumb: Thumbnail = serde_json::from_slice(
+    ///             record.payload.as_deref().unwrap(),
+    ///         ).unwrap();
+    ///         println!("done: {}", thumb.path);
+    ///     }
+    /// }
+    /// ```
+    pub fn task_events<T: TypedTask<Domain = D>>(&self) -> TypedEventStream<T> {
+        let qualified_type = format!("{}::{}", D::NAME, T::TASK_TYPE);
+        TypedEventStream {
+            rx: self.inner.scheduler.inner.event_tx.subscribe(),
+            qualified_type,
+            scheduler: self.inner.scheduler.clone(),
+            _marker: PhantomData,
+        }
+    }
+
     /// Subscribe to byte-level progress events for this domain.
     pub fn subscribe_progress(&self) -> crate::module::ModuleReceiver<TaskProgress> {
         self.inner.subscribe_progress()
@@ -748,6 +777,217 @@ impl<D: DomainKey> IntoFuture for DomainSubmitBuilder<D> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(self.submit())
+    }
+}
+
+// ── TaskEvent<T> ─────────────────────────────────────────────────────
+
+/// Typed lifecycle event for a specific task type within a domain.
+///
+/// Obtained via [`TypedEventStream`], which is created by
+/// [`DomainHandle::task_events::<T>()`](DomainHandle::task_events).
+///
+/// Terminal variants ([`Completed`](Self::Completed),
+/// [`Failed`](Self::Failed) with `will_retry == false`,
+/// [`DeadLettered`](Self::DeadLettered)) include an
+/// `Arc<TaskHistoryRecord>` so subscribers can inspect the payload
+/// and metadata without an extra DB round-trip in the common case.
+///
+/// Non-terminal variants are thin — they carry only the task ID and
+/// relevant metadata from the event header.
+#[derive(Debug, Clone)]
+pub enum TaskEvent<T: TypedTask> {
+    /// The task was dispatched and is now running.
+    Dispatched { id: i64 },
+    /// Progress update from the running task.
+    Progress {
+        id: i64,
+        percent: f32,
+        message: Option<String>,
+    },
+    /// The task entered the waiting state (parent waiting for children).
+    Waiting { id: i64 },
+    /// The task was cancelled.
+    Cancelled { id: i64 },
+    /// The task completed successfully.
+    Completed {
+        id: i64,
+        record: Arc<TaskHistoryRecord>,
+    },
+    /// The task failed.
+    ///
+    /// When `will_retry == true`, the task is requeued and `record` is `None`.
+    /// When `will_retry == false`, the task is moved to history and `record`
+    /// contains the terminal history entry.
+    Failed {
+        id: i64,
+        error: String,
+        will_retry: bool,
+        retry_after: Option<Duration>,
+        /// Present only when `will_retry == false` (permanent failure).
+        record: Option<Arc<TaskHistoryRecord>>,
+    },
+    /// The task exhausted retries and was moved to dead-letter state.
+    DeadLettered {
+        id: i64,
+        error: String,
+        record: Arc<TaskHistoryRecord>,
+    },
+    /// Variant that carries the type parameter. Never constructed.
+    #[doc(hidden)]
+    _Phantom(std::convert::Infallible, PhantomData<T>),
+}
+
+// ── TypedEventStream<T> ──────────────────────────────────────────────
+
+/// Per-task-type event subscription.
+///
+/// Wraps the global scheduler event broadcast and filters events to a
+/// single task type. Terminal events include the [`TaskHistoryRecord`]
+/// fetched from the store.
+///
+/// Created via [`DomainHandle::task_events::<T>()`](DomainHandle::task_events).
+///
+/// # Example
+///
+/// ```ignore
+/// let mut stream = media.task_events::<Thumbnail>();
+/// while let Ok(event) = stream.recv().await {
+///     match event {
+///         TaskEvent::Completed { id, record, .. } => {
+///             let thumb: Thumbnail = serde_json::from_slice(
+///                 record.payload.as_deref().unwrap(),
+///             ).unwrap();
+///             println!("thumbnail {id} done: {}", thumb.path);
+///         }
+///         TaskEvent::Failed { id, error, .. } => {
+///             eprintln!("thumbnail {id} failed: {error}");
+///         }
+///         _ => {}
+///     }
+/// }
+/// ```
+pub struct TypedEventStream<T: TypedTask> {
+    rx: tokio::sync::broadcast::Receiver<SchedulerEvent>,
+    /// Full prefixed task type, e.g. `"media::thumbnail"`.
+    qualified_type: String,
+    /// Scheduler reference for fetching `TaskHistoryRecord` on terminal events.
+    scheduler: crate::scheduler::Scheduler,
+    _marker: PhantomData<T>,
+}
+
+impl<T: TypedTask> TypedEventStream<T> {
+    /// Receive the next event for this task type, blocking until one arrives.
+    ///
+    /// Events for other task types and other modules are silently discarded.
+    /// Terminal events (`Completed`, `Failed` with `will_retry == false`,
+    /// `DeadLettered`) include the `TaskHistoryRecord` fetched from the store.
+    pub async fn recv(&mut self) -> Result<TaskEvent<T>, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.rx.recv().await?;
+            if let Some(task_event) = self.try_convert(event).await {
+                return Ok(task_event);
+            }
+        }
+    }
+
+    /// Attempt to convert a raw [`SchedulerEvent`] into a typed [`TaskEvent<T>`].
+    ///
+    /// Returns `None` if the event is not for our task type.
+    async fn try_convert(&self, event: SchedulerEvent) -> Option<TaskEvent<T>> {
+        match event {
+            SchedulerEvent::Dispatched(ref h) if h.task_type == self.qualified_type => {
+                Some(TaskEvent::Dispatched { id: h.task_id })
+            }
+            SchedulerEvent::Completed(ref h) if h.task_type == self.qualified_type => {
+                let record = self.fetch_record(&h.key).await;
+                match record {
+                    Some(r) => Some(TaskEvent::Completed {
+                        id: h.task_id,
+                        record: Arc::new(r),
+                    }),
+                    None => {
+                        // Record was just written — should not happen.
+                        tracing::warn!(
+                            task_id = h.task_id,
+                            "TypedEventStream: history record not found for completed task"
+                        );
+                        None
+                    }
+                }
+            }
+            SchedulerEvent::Failed {
+                ref header,
+                ref error,
+                will_retry,
+                retry_after,
+            } if header.task_type == self.qualified_type => {
+                let record = if !will_retry {
+                    self.fetch_record(&header.key).await.map(Arc::new)
+                } else {
+                    None
+                };
+                Some(TaskEvent::Failed {
+                    id: header.task_id,
+                    error: error.clone(),
+                    will_retry,
+                    retry_after,
+                    record,
+                })
+            }
+            SchedulerEvent::Cancelled(ref h) if h.task_type == self.qualified_type => {
+                Some(TaskEvent::Cancelled { id: h.task_id })
+            }
+            SchedulerEvent::Progress {
+                ref header,
+                percent,
+                ref message,
+            } if header.task_type == self.qualified_type => Some(TaskEvent::Progress {
+                id: header.task_id,
+                percent,
+                message: message.clone(),
+            }),
+            SchedulerEvent::Waiting { task_id, .. } => {
+                // Waiting events don't carry a task_type, so we can't filter
+                // by type. Skip them unless we can verify ownership.
+                // In practice, the caller should use `events()` for Waiting.
+                let _ = task_id;
+                None
+            }
+            SchedulerEvent::DeadLettered {
+                ref header,
+                ref error,
+                ..
+            } if header.task_type == self.qualified_type => {
+                let record = self.fetch_record(&header.key).await;
+                match record {
+                    Some(r) => Some(TaskEvent::DeadLettered {
+                        id: header.task_id,
+                        error: error.clone(),
+                        record: Arc::new(r),
+                    }),
+                    None => {
+                        tracing::warn!(
+                            task_id = header.task_id,
+                            "TypedEventStream: history record not found for dead-lettered task"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Fetch the most recent history record by dedup key.
+    async fn fetch_record(&self, key: &str) -> Option<TaskHistoryRecord> {
+        self.scheduler
+            .inner
+            .store
+            .latest_history_by_key(key)
+            .await
+            .ok()
+            .flatten()
     }
 }
 

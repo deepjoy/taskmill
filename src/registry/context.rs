@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::{DomainHandle, DomainKey};
 use crate::module::{ModuleHandle, ModuleRegistry};
 use crate::scheduler::{ProgressReporter, WeakScheduler};
 use crate::store::StoreError;
@@ -17,13 +18,13 @@ use super::state::StateSnapshot;
 /// Execution context passed to a [`TaskExecutor`](super::TaskExecutor).
 ///
 /// Provides access to the task record, cancellation token, progress reporter,
-/// shared application state, and module-scoped task submission. Use the accessor
+/// shared application state, and domain-scoped task submission. Use the accessor
 /// methods rather than accessing fields directly:
 ///
 /// - [`record()`](Self::record) — the full [`TaskRecord`] with payload, priority, etc.
 /// - [`token()`](Self::token) — [`CancellationToken`] for preemption support
 /// - [`progress()`](Self::progress) — [`ProgressReporter`] for reporting progress
-/// - [`current_module()`](Self::current_module) / [`module()`](Self::module) — submit tasks via module handles
+/// - [`domain()`](Self::domain) — type-safe cross-domain task submission
 /// - [`spawn_child()`](Self::spawn_child) — spawn hierarchical child tasks
 pub struct TaskContext {
     pub(crate) record: TaskRecord,
@@ -128,6 +129,23 @@ impl TaskContext {
             .or_else(|| self.app_state.get::<T>())
     }
 
+    /// Retrieve domain-scoped state.
+    ///
+    /// Semantically equivalent to [`state::<S>()`](Self::state) but
+    /// documents that `S` was registered via [`Domain::state()`](crate::Domain::state)
+    /// for domain `D`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cfg = ctx.domain_state::<Media, MediaConfig>()
+    ///     .ok_or_else(|| TaskError::permanent("missing config"))?;
+    /// ```
+    pub fn domain_state<D: DomainKey, S: Send + Sync + 'static>(&self) -> Option<&S> {
+        let _ = std::marker::PhantomData::<D>;
+        self.state::<S>()
+    }
+
     // ── IO tracking ──────────────────────────────────────────────────
 
     /// Record actual bytes read during this task's execution.
@@ -183,21 +201,61 @@ impl TaskContext {
         self.progress.report_bytes(completed, total);
     }
 
-    // ── Module access ─────────────────────────────────────────────────
+    // ── Domain access ────────────────────────────────────────────────
+
+    /// Returns a typed [`DomainHandle`] for cross-domain task submission.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `D` was not registered with the scheduler. For a fallible
+    /// variant, use [`try_domain`](Self::try_domain).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// impl TypedExecutor<VideoUploaded> for VideoProcessor {
+    ///     async fn execute(&self, event: VideoUploaded, ctx: &TaskContext) -> Result<(), TaskError> {
+    ///         let media = ctx.domain::<Media>();
+    ///         media.submit(Thumbnail { path: event.path.clone(), size: 256 })
+    ///             .await
+    ///             .map_err(TaskError::retryable)?;
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    pub fn domain<D: DomainKey>(&self) -> DomainHandle<D> {
+        self.try_domain::<D>()
+            .unwrap_or_else(|| panic!(
+                "domain '{}' is not registered — did you forget to add .domain(...) to the SchedulerBuilder?",
+                D::NAME
+            ))
+    }
+
+    /// Returns a typed [`DomainHandle`] for the given domain, or `None`
+    /// if the domain is not registered.
+    pub fn try_domain<D: DomainKey>(&self) -> Option<DomainHandle<D>> {
+        let scheduler = self.scheduler.upgrade()?;
+        scheduler.try_domain::<D>()
+    }
+
+    // ── Module access (internal) ─────────────────────────────────────
 
     /// Returns a scoped handle for this task's owning module.
-    pub fn current_module(&self) -> ModuleHandle {
+    ///
+    /// Used internally by [`spawn_child`](Self::spawn_child) and
+    /// [`spawn_children`](Self::spawn_children).
+    pub(crate) fn current_module(&self) -> ModuleHandle {
         self.module(&self.owning_module)
     }
 
     /// Returns a scoped handle for the named module.
-    pub fn module(&self, name: &str) -> ModuleHandle {
+    pub(crate) fn module(&self, name: &str) -> ModuleHandle {
         self.try_module(name)
             .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .domain(...) to the SchedulerBuilder?"))
     }
 
     /// Returns a scoped handle for the named module, or `None` if not registered.
-    pub fn try_module(&self, name: &str) -> Option<ModuleHandle> {
+    pub(crate) fn try_module(&self, name: &str) -> Option<ModuleHandle> {
         let entry = self.module_registry.get(name)?;
         let scheduler = self.scheduler.upgrade()?;
         Some(ModuleHandle::new(scheduler, entry))
@@ -211,7 +269,8 @@ impl TaskContext {
     /// parent's remaining TTL and tags. The child's task type is auto-prefixed
     /// with the owning module's namespace (same-module child).
     ///
-    /// For cross-module children, use `ctx.module("other").submit_typed(...).parent(id).await`.
+    /// For cross-module children, use
+    /// `ctx.domain::<Other>().submit_with(task).parent(id).await`.
     pub async fn spawn_child(&self, sub: TaskSubmission) -> Result<SubmitOutcome, StoreError> {
         let spawner = self
             .child_spawner

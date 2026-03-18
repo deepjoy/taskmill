@@ -815,12 +815,9 @@ pub mod task;
 
 // ── Domain-centric API ───────────────────────────────────────────────
 pub use domain::{
-    Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskTypeConfig, TaskTypeOptions,
-    TypedExecutor,
+    Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskEvent, TaskTypeConfig,
+    TaskTypeOptions, TypedEventStream, TypedExecutor,
 };
-// Re-export ModuleHandle so TaskContext::module() / current_module() return
-// types are usable from external code (Phase 1 bridge until ctx.domain::<D>()).
-pub use module::ModuleHandle;
 
 // ── Core re-exports ──────────────────────────────────────────────────
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};

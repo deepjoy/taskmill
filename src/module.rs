@@ -430,11 +430,6 @@ impl ModuleHandle {
         &self.name
     }
 
-    /// The task type prefix (e.g. `"media::"`).
-    pub fn prefix(&self) -> &str {
-        &self.prefix
-    }
-
     // ── Submission ────────────────────────────────────────────────
 
     /// Submit a raw [`TaskSubmission`].
@@ -503,15 +498,6 @@ impl ModuleHandle {
             return Ok(false);
         }
         self.scheduler.cancel(task_id).await
-    }
-
-    /// Look up an active task by ID, validating it belongs to this module.
-    ///
-    /// Returns `None` if not found or if the task's type does not start with
-    /// this module's prefix.
-    pub async fn task(&self, task_id: i64) -> Result<Option<TaskRecord>, StoreError> {
-        let record = self.scheduler.inner.store.task_by_id(task_id).await?;
-        Ok(record.filter(|r| r.task_type.starts_with(self.prefix.as_ref())))
     }
 
     /// Re-submit a dead-lettered task belonging to this module.
@@ -738,28 +724,6 @@ impl ModuleHandle {
             .inner
             .store
             .tasks_by_tags_with_prefix(&self.prefix, filters, status)
-            .await
-    }
-
-    /// Count module tasks grouped by a tag key's values.
-    pub async fn count_by_tag(
-        &self,
-        key: &str,
-        status: Option<TaskStatus>,
-    ) -> Result<Vec<(String, i64)>, StoreError> {
-        self.scheduler
-            .inner
-            .store
-            .count_by_tag_with_prefix(&self.prefix, key, status)
-            .await
-    }
-
-    /// Distinct values for a tag key across module tasks, with counts.
-    pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
-        self.scheduler
-            .inner
-            .store
-            .tag_values_with_prefix(&self.prefix, key)
             .await
     }
 

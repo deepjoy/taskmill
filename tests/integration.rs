@@ -26,3 +26,5 @@ mod modules;
 mod retry_policy;
 #[path = "integration/scheduler_core.rs"]
 mod scheduler_core;
+#[path = "integration/typed_events.rs"]
+mod typed_events;

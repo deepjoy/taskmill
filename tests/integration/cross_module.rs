@@ -1,30 +1,29 @@
-//! Integration tests: steps 8–11
-//! TaskContext module access, cross-module child spawning,
-//! Scheduler::modules() convenience, and event module identity.
+//! Integration tests: cross-domain context access, child spawning,
+//! domain handle convenience, and event module identity.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    Domain, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    Domain, DomainHandle, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError,
+    TaskExecutor, TaskStore, TaskSubmission,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
 
-// ── Step 8: TaskContext module access ─────────────────────────────────────
+// ── Step 8: TaskContext domain access ─────────────────────────────────────
 
-/// Executor in module A that submits a task to module B via `ctx.module("b")`.
-struct CrossModuleSubmitter {
+/// Executor in module A that submits a task to module B via `ctx.domain::<DomainB>()`.
+struct CrossDomainSubmitter {
     submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for CrossModuleSubmitter {
+impl TaskExecutor for CrossDomainSubmitter {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-        ctx.module("b")
-            .submit(TaskSubmission::new("task").key("cross-module-child"))
+        let b: DomainHandle<DomainB> = ctx.domain::<DomainB>();
+        b.submit_raw(TaskSubmission::new("task").key("cross-module-child"))
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
         self.submitted.store(true, Ordering::SeqCst);
@@ -33,7 +32,7 @@ impl TaskExecutor for CrossModuleSubmitter {
 }
 
 #[tokio::test]
-async fn ctx_module_submits_to_other_module_with_prefix_and_defaults() {
+async fn ctx_domain_submits_to_other_module_with_prefix_and_defaults() {
     let submitted = Arc::new(AtomicBool::new(false));
     let b_ran = Arc::new(AtomicBool::new(false));
     let submitted_clone = submitted.clone();
@@ -43,7 +42,7 @@ async fn ctx_module_submits_to_other_module_with_prefix_and_defaults() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(Domain::<DomainA>::new().raw_executor(
             "trigger",
-            CrossModuleSubmitter {
+            CrossDomainSubmitter {
                 submitted: submitted_clone,
             },
         ))
@@ -87,15 +86,17 @@ async fn ctx_module_submits_to_other_module_with_prefix_and_defaults() {
     );
 }
 
-/// Executor that uses `ctx.current_module()` to submit a follow-up task.
-struct SameModuleSubmitter {
+/// Executor that uses `ctx.domain::<MediaDomain>()` to submit a follow-up task
+/// in its own domain.
+struct SameDomainSubmitter {
     submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for SameModuleSubmitter {
+impl TaskExecutor for SameDomainSubmitter {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-        ctx.current_module()
-            .submit(TaskSubmission::new("follower").key("same-module-follower"))
+        let media: DomainHandle<MediaDomain> = ctx.domain::<MediaDomain>();
+        media
+            .submit_raw(TaskSubmission::new("follower").key("same-module-follower"))
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
         self.submitted.store(true, Ordering::SeqCst);
@@ -104,7 +105,7 @@ impl TaskExecutor for SameModuleSubmitter {
 }
 
 #[tokio::test]
-async fn ctx_current_module_applies_owning_module_defaults() {
+async fn ctx_domain_self_submit_applies_owning_module_defaults() {
     let submitted = Arc::new(AtomicBool::new(false));
     let follower_ran = Arc::new(AtomicBool::new(false));
     let submitted_clone = submitted.clone();
@@ -116,7 +117,7 @@ async fn ctx_current_module_applies_owning_module_defaults() {
             Domain::<MediaDomain>::new()
                 .raw_executor(
                     "leader",
-                    SameModuleSubmitter {
+                    SameDomainSubmitter {
                         submitted: submitted_clone,
                     },
                 )
@@ -161,19 +162,24 @@ async fn ctx_current_module_applies_owning_module_defaults() {
     );
     assert!(
         follower_ran.load(Ordering::SeqCst),
-        "follower task submitted via current_module() should run"
+        "follower task submitted via ctx.domain() should run"
     );
 }
 
 #[tokio::test]
-async fn ctx_try_module_returns_none_for_unknown_module() {
+async fn ctx_try_domain_returns_none_for_unknown_domain() {
     let result: Arc<std::sync::Mutex<Option<bool>>> = Arc::new(std::sync::Mutex::new(None));
     let result_clone = result.clone();
 
-    struct TryModuleExecutor(Arc<std::sync::Mutex<Option<bool>>>);
-    impl TaskExecutor for TryModuleExecutor {
+    struct NonexistentDomain;
+    impl DomainKey for NonexistentDomain {
+        const NAME: &'static str = "nonexistent";
+    }
+
+    struct TryDomainExecutor(Arc<std::sync::Mutex<Option<bool>>>);
+    impl TaskExecutor for TryDomainExecutor {
         async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-            let found = ctx.try_module("nonexistent").is_some();
+            let found = ctx.try_domain::<NonexistentDomain>().is_some();
             *self.0.lock().unwrap() = Some(found);
             Ok(())
         }
@@ -181,7 +187,7 @@ async fn ctx_try_module_returns_none_for_unknown_module() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("probe", TryModuleExecutor(result_clone)))
+        .domain(Domain::<TestDomain>::new().raw_executor("probe", TryDomainExecutor(result_clone)))
         .max_concurrency(2)
         .poll_interval(Duration::from_millis(20))
         .build()
@@ -205,12 +211,12 @@ async fn ctx_try_module_returns_none_for_unknown_module() {
     assert_eq!(
         *result.lock().unwrap(),
         Some(false),
-        "try_module('nonexistent') should return None"
+        "try_domain::<NonexistentDomain>() should return None"
     );
 }
 
 #[tokio::test]
-async fn spawn_child_routes_through_current_module() {
+async fn spawn_child_routes_through_owning_module() {
     // Verify spawn_child auto-prefixes the task type with the owning module.
     // The child executor is registered under "child" (unprefixed) in the "test" module.
     let child_ran = Arc::new(AtomicBool::new(false));
@@ -266,18 +272,19 @@ async fn spawn_child_routes_through_current_module() {
     );
 }
 
-// ── Step 9: Cross-Module Child Spawning ───────────────────────────────────
+// ── Step 9: Cross-Domain Child Spawning ───────────────────────────────────
 
 /// Executor in module "media" that submits a cross-module child to "analytics"
-/// using `SubmitBuilder::parent()`.
-struct CrossModuleParentExec {
+/// using `ctx.domain::<AnalyticsDomain>()`.
+struct CrossDomainParentExec {
     child_submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for CrossModuleParentExec {
+impl TaskExecutor for CrossDomainParentExec {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
-        ctx.module("analytics")
-            .submit(TaskSubmission::new("work").key("cross-child"))
+        let analytics: DomainHandle<AnalyticsDomain> = ctx.domain::<AnalyticsDomain>();
+        analytics
+            .submit_raw(TaskSubmission::new("work").key("cross-child"))
             .parent(ctx.record().id)
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
@@ -289,7 +296,7 @@ impl TaskExecutor for CrossModuleParentExec {
 /// Cross-module parent-child: parent in "media", child in "analytics".
 /// Parent should enter Waiting, then complete once the analytics child completes.
 #[tokio::test]
-async fn cross_module_parent_child_lifecycle() {
+async fn cross_domain_parent_child_lifecycle() {
     let child_submitted = Arc::new(AtomicBool::new(false));
     let analytics_ran = Arc::new(AtomicBool::new(false));
     let child_submitted_clone = child_submitted.clone();
@@ -299,7 +306,7 @@ async fn cross_module_parent_child_lifecycle() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(Domain::<MediaDomain>::new().raw_executor(
             "parent",
-            CrossModuleParentExec {
+            CrossDomainParentExec {
                 child_submitted: child_submitted_clone,
             },
         ))
@@ -361,12 +368,12 @@ async fn cross_module_parent_child_lifecycle() {
 /// Cross-module failure cascade: child in "analytics" fails permanently →
 /// parent in "media" is failed (fail_fast = true, the default).
 #[tokio::test]
-async fn cross_module_failure_cascade() {
+async fn cross_domain_failure_cascade() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
         .domain(Domain::<MediaDomain>::new().raw_executor(
             "parent",
-            CrossModuleParentExec {
+            CrossDomainParentExec {
                 child_submitted: Arc::new(AtomicBool::new(false)),
             },
         ))
@@ -413,7 +420,7 @@ async fn cross_module_failure_cascade() {
     );
 }
 
-// ── Step 10: Scheduler::modules() and cross-cutting convenience ──────
+// ── Step 10: Scheduler::domains() and cross-cutting convenience ──────
 
 /// Domain handles for all registered modules can be obtained individually.
 #[tokio::test]
@@ -499,7 +506,7 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
 /// tasks in all modules and leaves untagged tasks untouched.
 /// Tasks stay pending (no run loop) so we verify the return IDs directly.
 #[tokio::test]
-async fn cross_module_cancel_by_tag_via_domain_handles() {
+async fn cross_domain_cancel_by_tag_via_domain_handles() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
         .domain(Domain::<AlphaDomain>::new().raw_executor("work", NoopExecutor))
