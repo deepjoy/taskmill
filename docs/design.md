@@ -16,10 +16,13 @@ This document explains *why* taskmill is designed the way it is. If you're looki
 ```
 taskmill/src/
   lib.rs                 — public API re-exports
+  domain.rs              — Domain<D>, DomainKey, DomainHandle<D>, TypedExecutor<T>,
+                           TaskTypeConfig, DomainSubmitBuilder, TypedEventStream
   task/                  — TaskRecord, TaskSubmission, TaskError, TypedTask
   priority.rs            — Priority newtype (u8, lower = higher priority)
   store/                 — TaskStore: SQLite persistence, atomic pop, queries
-  registry/              — TaskExecutor trait, TaskContext, TaskTypeRegistry
+  registry/              — TaskExecutor trait, TypedExecutor<T> adapter, TaskContext,
+                           TaskTypeRegistry
   backpressure.rs        — PressureSource trait, ThrottlePolicy, CompositePressure
   scheduler/
     mod.rs               — Scheduler, SchedulerBuilder, public API
@@ -127,20 +130,20 @@ Taskmill is designed for concurrent access from multiple async tasks and Tauri c
 
 Each spawned task gets its own `CancellationToken`. All trait objects require `Send + Sync + 'static`.
 
-### Module concurrency gating
+### Domain concurrency gating
 
-Per-module concurrency is enforced in the dispatch gate alongside the global concurrency check. Each module has two atomic counters:
+Per-domain concurrency is enforced in the dispatch gate alongside the global concurrency check. Each domain has two atomic counters:
 
 | Component | Type | Where | Purpose |
 |-----------|------|-------|---------|
-| `module_caps` | `RwLock<HashMap<String, usize>>` | `SchedulerInner` | Per-module concurrency cap. Initialized from `Module::max_concurrency` at build time. Updated at runtime by `ModuleHandle::set_max_concurrency`. |
-| `module_running` | `Arc<HashMap<String, AtomicUsize>>` | `SchedulerInner` | Live count of running tasks per module. Incremented when a task is dispatched; decremented on every terminal transition (complete, fail, cancel, pause). Shared with spawned tasks via `Arc`. |
+| `module_caps` | `RwLock<HashMap<String, usize>>` | `SchedulerInner` | Per-domain concurrency cap. Initialized from `Domain::max_concurrency` at build time. Updated at runtime by `DomainHandle::set_max_concurrency`. |
+| `module_running` | `Arc<HashMap<String, AtomicUsize>>` | `SchedulerInner` | Live count of running tasks per domain. Incremented when a task is dispatched; decremented on every terminal transition (complete, fail, cancel, pause). Shared with spawned tasks via `Arc`. |
 
-A task blocked on its *module* concurrency limit does **not** block dispatch for other modules — the scheduler moves on to the next candidate in the priority queue. The dispatch gate checks are AND-gates: both the global `max_concurrency` and the per-module cap must have headroom.
+A task blocked on its *domain* concurrency limit does **not** block dispatch for other domains — the scheduler moves on to the next candidate in the priority queue. The dispatch gate checks are AND-gates: both the global `max_concurrency` and the per-domain cap must have headroom.
 
-The module is identified at dispatch time by extracting the prefix from the qualified task type (e.g., `"media"` from `"media::thumbnail"`).
+The domain is identified at dispatch time by extracting the prefix from the qualified task type (e.g., `"media"` from `"media::thumbnail"`).
 
-Per-module pause uses a separate `HashMap<String, AtomicBool>` (`module_paused`). When a module is paused, the dispatch loop skips candidates whose task type matches that module's prefix.
+Per-domain pause uses a separate `HashMap<String, AtomicBool>` (`module_paused`). When a domain is paused, the dispatch loop skips candidates whose task type matches that domain's prefix.
 
 ## Extension points
 
@@ -161,9 +164,9 @@ pub trait PressureSource: Send + Sync + 'static {
 
 Implement `ResourceSampler` for platforms where `sysinfo` doesn't work (containers, cgroups, mobile). See [IO & Backpressure](io-and-backpressure.md#advanced-custom-samplers).
 
-### Typed tasks
+### Typed tasks and executors
 
-Implement `TypedTask` on your structs for compile-time type safety on payloads, priorities, and IO budgets. See [Quick Start](quick-start.md#typed-tasks).
+Implement `TypedTask` on your structs for compile-time type safety on payloads and configuration. Implement `TypedExecutor<T>` for executors that receive a deserialized, typed payload. Register with `Domain::task::<T>(executor)`. See [Quick Start](quick-start.md#typed-tasks).
 
 ### Application state injection
 

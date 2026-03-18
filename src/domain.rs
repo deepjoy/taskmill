@@ -232,8 +232,8 @@ impl<T: TypedTask, E: TypedExecutor<T>> TaskExecutor for TypedExecutorAdapter<T,
 /// A typed module builder that enforces the link between a [`DomainKey`],
 /// its tasks, and their executors at registration time.
 ///
-/// Replaces [`Module`](crate::module::Module) with compile-time domain
-/// identity. Internally builds a `Module` for the scheduler engine.
+/// Replaces `Module` with compile-time domain identity.
+/// Internally builds a `Module` for the scheduler engine.
 ///
 /// # Example
 ///

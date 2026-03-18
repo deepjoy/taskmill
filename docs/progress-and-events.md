@@ -7,11 +7,9 @@ Taskmill provides real-time progress tracking and lifecycle events so your UI al
 Executors report progress via `ctx.progress()`. This emits events that your UI can subscribe to for real-time updates.
 
 ```rust
-impl TaskExecutor for MyExecutor {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
-    ) -> Result<(), TaskError> {
-        let items = get_work_items();
+impl TypedExecutor<MyTask> for MyExecutor {
+    async fn execute(&self, task: MyTask, ctx: &TaskContext) -> Result<(), TaskError> {
+        let items = get_work_items(&task);
 
         for (i, item) in items.iter().enumerate() {
             process(item).await;
@@ -49,9 +47,10 @@ This means your progress bar always moves, even for tasks that don't call `repor
 
 ## Lifecycle events
 
-All scheduler state changes are broadcast as `SchedulerEvent` variants. Subscribe via `scheduler.subscribe()`:
+All scheduler state changes are broadcast as `SchedulerEvent` variants. Subscribe via `scheduler.subscribe()` for the global stream, `handle.events()` for domain-filtered events, or `handle.task_events::<T>()` for typed per-task-type events:
 
 ```rust
+// Global event stream (all domains)
 let mut events = scheduler.subscribe();
 tokio::spawn(async move {
     while let Ok(event) = events.recv().await {
@@ -66,6 +65,31 @@ tokio::spawn(async move {
                 if !will_retry {
                     show_error(header.task_id, error);
                 }
+            }
+            _ => {}
+        }
+    }
+});
+
+// Domain-filtered events (only events for one domain)
+let media = scheduler.domain::<Media>();
+let mut media_events = media.events();
+tokio::spawn(async move {
+    while let Ok(event) = media_events.recv().await {
+        // only media:: events arrive here
+    }
+});
+
+// Typed per-task-type events (only events for one task type)
+let mut thumb_events = media.task_events::<Thumbnail>();
+tokio::spawn(async move {
+    while let Ok(event) = thumb_events.recv().await {
+        match event {
+            TaskEvent::Completed { id, record, .. } => {
+                println!("thumbnail {id} done");
+            }
+            TaskEvent::Failed { id, error, .. } => {
+                eprintln!("thumbnail {id} failed: {error}");
             }
             _ => {}
         }
@@ -143,7 +167,7 @@ let snap = scheduler.snapshot().await?;
 All events derive `Serialize`, so they bridge directly to your frontend via Tauri IPC:
 
 ```rust
-let mut events = scheduler.subscribe();
+let mut events = scheduler.subscribe();  // or handle.events() for one domain
 let handle = app_handle.clone();
 tokio::spawn(async move {
     while let Ok(event) = events.recv().await {

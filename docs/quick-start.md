@@ -6,59 +6,86 @@ Add taskmill to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-taskmill = "0.4"
+taskmill = "0.5"
 ```
 
 To disable platform resource monitoring (e.g., for mobile targets or custom samplers):
 
 ```toml
 [dependencies]
-taskmill = { version = "0.4", default-features = false }
+taskmill = { version = "0.5", default-features = false }
 ```
 
 ## Core concepts
 
-In 0.4, executors live inside **modules** — self-contained bundles that own a set of task types together with their defaults and resource policy. You register modules with the builder; at runtime you interact through a `ModuleHandle`.
+In 0.5, executors live inside **domains** — typed, self-contained bundles that own a set of task types together with their defaults and resource policy. Each domain has a compile-time identity via the `DomainKey` trait. You register domains with the builder; at runtime you interact through a `DomainHandle<D>`.
 
 ```
-Module::new("name")       ← define executors, defaults, and state
-  .executor(...)
-  .default_priority(...)
-  .app_state(...)
+pub struct Media;                      <- zero-sized type
+impl DomainKey for Media {             <- compile-time identity
+    const NAME: &'static str = "media";
+}
 
-Scheduler::builder()      ← compose modules, set global policy
-  .module(my_module())
+Domain::<Media>::new()                 <- define executors, defaults, and state
+  .task::<ResizeTask>(ImageResizer)
+  .default_priority(...)
+  .state(...)
+
+Scheduler::builder()                   <- compose domains, set global policy
+  .domain(Domain::<Media>::new()...)
   .max_concurrency(8)
 
-scheduler.module("name")  ← get a scoped handle at runtime
-  .submit_typed(...)      ← submit, cancel, query — all scoped to this module
-  .await?
+scheduler.domain::<Media>()            <- get a typed handle at runtime
+  .submit(task).await?                 <- submit, cancel, query — all scoped to this domain
 ```
 
 ## Implement an executor
 
-Every task type needs code that knows how to do the work. Implement the `TaskExecutor` trait. The scheduler calls your executor whenever a task of that type is dispatched.
+Every task type needs code that knows how to do the work. Implement the `TypedExecutor<T>` trait. The scheduler deserializes the payload for you and passes it directly to your executor.
 
-Your executor receives a `TaskContext` with everything it needs:
+Your executor receives the deserialized payload `T` and a `TaskContext` with everything it needs:
 
-- `record()` — the full task record including payload, priority, and retry count
+- `record()` — the full task record including priority and retry count
 - `token()` — a cancellation token for responding to preemption (see [Priorities & Preemption](priorities-and-preemption.md#handling-preemption-in-executors))
 - `progress()` — a reporter for sending progress updates to the UI (see [Progress & Events](progress-and-events.md))
 - `state::<T>()` — shared application state registered at build time
 
 ```rust
-use taskmill::{TaskExecutor, TaskContext, TaskError};
+use taskmill::{TypedExecutor, TypedTask, TaskContext, TaskError, TaskTypeConfig, IoBudget, DomainKey};
+use serde::{Serialize, Deserialize};
 
+// Define the domain identity.
+pub struct Media;
+impl DomainKey for Media {
+    const NAME: &'static str = "media";
+}
+
+// Define the typed task payload.
+#[derive(Serialize, Deserialize)]
+struct ResizeTask {
+    path: String,
+    width: u32,
+}
+
+impl TypedTask for ResizeTask {
+    type Domain = Media;
+    const TASK_TYPE: &'static str = "resize";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .expected_io(IoBudget::disk(4096, 1024))
+    }
+}
+
+// Implement the typed executor.
 struct ImageResizer;
 
-impl TaskExecutor for ImageResizer {
-    async fn execute<'a>(
-        &'a self,
-        ctx: &'a TaskContext,
+impl TypedExecutor<ResizeTask> for ImageResizer {
+    async fn execute(
+        &self,
+        task: ResizeTask,
+        ctx: &TaskContext,
     ) -> Result<(), TaskError> {
-        // Deserialize your payload
-        let data: Option<serde_json::Value> = ctx.record().deserialize_payload()?;
-
         // Check for preemption at yield points
         if ctx.token().is_cancelled() {
             return Err(TaskError::retryable("preempted"));
@@ -67,7 +94,7 @@ impl TaskExecutor for ImageResizer {
         // Report progress
         ctx.progress().report(0.5, Some("resizing".into()));
 
-        // Do work...
+        // Do work with task.path, task.width...
 
         // Report actual IO
         ctx.record_read_bytes(4096);
@@ -77,39 +104,47 @@ impl TaskExecutor for ImageResizer {
 }
 ```
 
-## Define a module
+## Define a domain
 
-Group your executors into a `Module`. This is the unit of composition — define it once and register it anywhere.
+Group your executors into a `Domain<D>`. This is the unit of composition — define it once and register it anywhere. The domain name is derived from `D::NAME`, so there is no stringly-typed constructor.
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Module, Priority};
+use taskmill::{Domain, DomainKey, Priority};
 
-pub fn media_module() -> Module {
-    Module::new("media")
-        .executor("resize", Arc::new(ImageResizer))
+pub struct Media;
+impl DomainKey for Media {
+    const NAME: &'static str = "media";
+}
+
+pub fn media_domain() -> Domain<Media> {
+    Domain::<Media>::new()
+        .task::<ResizeTask>(ImageResizer)
         .default_priority(Priority::NORMAL)
         .default_ttl(Duration::from_secs(3600))
 }
 ```
 
-Module-wide defaults apply to every submission through the module's handle unless overridden per-call. This eliminates repetition across submissions.
+Domain-wide defaults apply to every submission through the domain's handle unless overridden per-call or per-task-type via `TypedTask::config()`.
 
 ## Build and run the scheduler
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use taskmill::{Module, Scheduler, IoBudget, TaskSubmission, ShutdownMode};
+use taskmill::{Domain, DomainKey, DomainHandle, Scheduler, ShutdownMode};
+
+pub struct Media;
+impl DomainKey for Media {
+    const NAME: &'static str = "media";
+}
 
 #[tokio::main]
 async fn main() {
-    // Build the scheduler — opens the DB, registers modules, starts monitoring.
+    // Build the scheduler — opens the DB, registers domains, starts monitoring.
     let scheduler = Scheduler::builder()
         .store_path("tasks.db")
-        .module(media_module())
+        .domain(media_domain())
         .max_concurrency(8)
         .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
         .with_resource_monitoring()
@@ -117,8 +152,8 @@ async fn main() {
         .await
         .unwrap();
 
-    // Get a scoped handle for the media module.
-    let media = scheduler.module("media");
+    // Get a typed handle for the media domain.
+    let media: DomainHandle<Media> = scheduler.domain::<Media>();
 
     // Scheduler is Clone — share freely across async tasks and Tauri state.
     let sched = scheduler.clone();
@@ -131,23 +166,20 @@ async fn main() {
         }
     });
 
-    // Submit a single task through the module handle.
-    // The handle auto-prefixes the task type ("resize" → "media::resize").
-    let sub = TaskSubmission::new("resize")
-        .payload_json(&serde_json::json!({"path": "/photos/image.jpg", "width": 300}))
-        .expected_io(IoBudget::disk(4096, 1024));
-    media.submit(sub).await.unwrap();
+    // Submit a single task through the domain handle.
+    // The handle auto-prefixes the task type ("resize" -> "media::resize").
+    media.submit(ResizeTask {
+        path: "/photos/image.jpg".into(),
+        width: 300,
+    }).await.unwrap();
 
     // Submit tasks in bulk (single SQLite transaction).
     let paths = vec!["/a.jpg", "/b.jpg", "/c.jpg"];
-    let subs: Vec<_> = paths.iter().map(|p| {
-        TaskSubmission::new("resize")
-            .payload_json(&serde_json::json!({"path": p}))
-            .expected_io(IoBudget::disk(4096, 1024))
+    let tasks: Vec<_> = paths.iter().map(|p| ResizeTask {
+        path: p.to_string(),
+        width: 300,
     }).collect();
-    for sub in subs {
-        media.submit(sub).await.unwrap();
-    }
+    media.submit_batch(tasks).await.unwrap();
 
     // Run the scheduler loop (blocks until the token is cancelled).
     let token = CancellationToken::new();
@@ -164,12 +196,19 @@ async fn main() {
 
 ## Typed tasks
 
-For stronger compile-time guarantees, implement `TypedTask` instead of using stringly-typed `TaskSubmission`. This keeps the task type name, priority, and IO budget co-located with the payload struct.
+For compile-time guarantees, implement `TypedTask` on your payload struct. This keeps the task type name, domain identity, and static configuration co-located with the payload.
+
+`TypedTask` requires an associated `type Domain: DomainKey` that ties the task to a specific domain. Static defaults (priority, IO budget, TTL, retry policy, dedup strategy) are returned from `fn config() -> TaskTypeConfig`. Per-instance values like dedup keys and tags remain as instance methods.
 
 ```rust
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
-use taskmill::{TypedTask, IoBudget, Priority};
+use taskmill::{TypedTask, TaskTypeConfig, IoBudget, Priority, DomainKey, RetryPolicy};
+
+pub struct Media;
+impl DomainKey for Media {
+    const NAME: &'static str = "media";
+}
 
 #[derive(Serialize, Deserialize)]
 struct ResizeTask {
@@ -178,32 +217,38 @@ struct ResizeTask {
 }
 
 impl TypedTask for ResizeTask {
+    type Domain = Media;
     const TASK_TYPE: &'static str = "resize";
 
-    fn expected_io(&self) -> IoBudget { IoBudget::disk(4096, 1024) }
-    fn priority(&self) -> Priority { Priority::NORMAL }
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .expected_io(IoBudget::disk(4096, 1024))
+            .priority(Priority::NORMAL)
+            .ttl(Duration::from_secs(600))
+            .retry(RetryPolicy::exponential(3, Duration::from_secs(1), Duration::from_secs(60)))
+    }
 
-    // Optional: expire if not started within 10 minutes.
-    // fn ttl(&self) -> Option<Duration> { Some(Duration::from_secs(600)) }
+    // Optional: custom dedup key derived from the payload.
+    fn key(&self) -> Option<String> {
+        Some(format!("resize:{}:{}", self.path, self.width))
+    }
 }
 
-// Register using the typed form — task type comes from ResizeTask::TASK_TYPE.
-Module::new("media").typed_executor::<ResizeTask, _>(Arc::new(ImageResizer));
+// Register using the typed form — task type comes from ResizeTask::TASK_TYPE,
+// domain from ResizeTask::Domain. No Arc::new() needed.
+Domain::<Media>::new().task::<ResizeTask>(ImageResizer);
 
-// Submit — module handle applies defaults and prefixes the type.
-media.submit_typed(&ResizeTask {
+// Submit — domain handle applies defaults and prefixes the type.
+media.submit(ResizeTask {
     path: "/photos/img.jpg".into(),
     width: 300,
 }).await?;
-
-// In the executor:
-let task: ResizeTask = ctx.payload()?;
 ```
 
-`submit_typed()` returns a `SubmitBuilder` — bare `.await` applies all defaults, or chain overrides before awaiting:
+`submit_with()` returns a `DomainSubmitBuilder` — chain overrides before awaiting:
 
 ```rust
-media.submit_typed(&task)
+media.submit_with(task)
     .priority(Priority::HIGH)
     .run_after(Duration::from_secs(30))
     .await?;
@@ -213,14 +258,14 @@ media.submit_typed(&task)
 
 Some work is naturally hierarchical — a multipart upload needs to upload individual parts, then call `CompleteMultipartUpload`. Taskmill supports this with child tasks and two-phase execution.
 
-Spawn children from within an executor using `ctx.spawn_child()`. Children are automatically module-aware: the task type is prefixed and module defaults are applied. The parent enters a `waiting` state until all children complete, then `finalize()` is called on the parent executor.
+Spawn children from within an executor using `ctx.spawn_child()`. Children are automatically domain-aware: the task type is prefixed and domain defaults are applied. The parent enters a `waiting` state until all children complete, then `finalize()` is called on the parent executor.
 
 ```rust
-impl TaskExecutor for MultipartUploader {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
+impl TypedExecutor<MultipartUpload> for MultipartUploader {
+    async fn execute(
+        &self, upload: MultipartUpload, ctx: &TaskContext,
     ) -> Result<(), TaskError> {
-        let parts = split_into_parts(&ctx.record().payload);
+        let parts = split_into_parts(&upload);
         for part in parts {
             ctx.spawn_child(
                 TaskSubmission::new("upload-part")
@@ -231,20 +276,20 @@ impl TaskExecutor for MultipartUploader {
         Ok(()) // parent enters 'waiting' state
     }
 
-    async fn finalize<'a>(
-        &'a self, ctx: &'a TaskContext,
+    async fn finalize(
+        &self, upload: MultipartUpload, ctx: &TaskContext,
     ) -> Result<(), TaskError> {
         // Called after all children complete
-        complete_multipart_upload(ctx).await
+        complete_multipart_upload(&upload).await
     }
 }
 ```
 
-For cross-module children, use `.parent()` on `SubmitBuilder`:
+For cross-domain children, use `ctx.domain::<D>()` to get a handle and `.parent()` on the submit builder:
 
 ```rust
-ctx.module("storage")
-    .submit_typed(&Upload { ... })
+ctx.domain::<Storage>()
+    .submit_with(Upload { /* ... */ })
     .parent(ctx.record().id)
     .await?;
 ```
@@ -253,35 +298,40 @@ By default, if any child fails, its siblings are cancelled and the parent fails 
 
 ## Sharing the scheduler
 
-A single `Scheduler` is `Clone` (via `Arc`) and can be shared across your entire application. Modules can carry their own scoped state, so library modules don't need to share a namespace with the host app's state.
+A single `Scheduler` is `Clone` (via `Arc`) and can be shared across your entire application. Domains can carry their own scoped state, so library domains don't need to share a namespace with the host app's state.
 
 ```rust
-use std::sync::Arc;
-use taskmill::{Module, Scheduler};
+use taskmill::{Domain, DomainKey, DomainHandle, Scheduler};
 
-// Each module brings its own state.
+pub struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+pub struct Sync;
+impl DomainKey for Sync { const NAME: &'static str = "sync"; }
+
+// Each domain brings its own state.
 let scheduler = Scheduler::builder()
     .store_path("app.db")
-    .module(
-        Module::new("media")
-            .typed_executor::<ResizeTask, _>(Arc::new(ImageResizer))
-            .app_state(MediaConfig { cdn_url: "...".into() })
+    .domain(
+        Domain::<Media>::new()
+            .task::<ResizeTask>(ImageResizer)
+            .state(MediaConfig { cdn_url: "...".into() })
     )
-    .module(
-        Module::new("sync")
-            .executor("remote-sync", Arc::new(SyncExecutor))
-            .app_state(SyncConfig { endpoint: "...".into() })
+    .domain(
+        Domain::<Sync>::new()
+            .task::<RemoteSyncTask>(SyncExecutor)
+            .state(SyncConfig { endpoint: "...".into() })
     )
-    // Global state shared across all modules.
+    // Global state shared across all domains.
     .app_state(SharedDb::new())
     .max_concurrency(8)
     .build()
     .await
     .unwrap();
 
-// Each module's state is visible to its own executors first,
+// Each domain's state is visible to its own executors first,
 // then falls back to global state.
-let media_state = ctx.state::<MediaConfig>(); // only in media module executors
+let media_state = ctx.state::<MediaConfig>(); // only in media domain executors
 let db = ctx.state::<SharedDb>();             // anywhere
 
 // The host manages the run loop.
@@ -295,7 +345,7 @@ Libraries that receive a pre-built scheduler can still inject global state after
 scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
 ```
 
-For applications with more than two modules, or when integrating third-party library modules, see [Multi-Module Applications](multi-module-apps.md) for guidance on cross-module dependencies, concurrency budgets, and coordinated cancellation.
+For applications with more than two domains, or when integrating third-party library domains, see [Multi-Module Applications](multi-module-apps.md) for guidance on cross-domain dependencies, concurrency budgets, and coordinated cancellation.
 
 ## Delayed and recurring tasks
 
@@ -308,14 +358,12 @@ use std::time::Duration;
 use chrono::Utc;
 
 // Run after a delay
-media.submit(
-    TaskSubmission::new("cleanup")
-        .payload_json(&serde_json::json!({"path": "/tmp/stale"}))
-        .run_after(Duration::from_secs(3600))
-).await?;
+media.submit_with(CleanupTask {
+    path: "/tmp/stale".into(),
+}).run_after(Duration::from_secs(3600)).await?;
 
-// Run at a specific time
-media.submit(
+// Run at a specific time (via raw submission for run_at support)
+media.submit_raw(
     TaskSubmission::new("report")
         .payload_json(&serde_json::json!({"date": "2025-01-15"}))
         .run_at(Utc::now() + chrono::Duration::hours(6))
@@ -329,9 +377,9 @@ If the `run_after` time is in the past (e.g., because the app was offline), the 
 A recurring task automatically re-submits itself on a schedule after each completion.
 
 ```rust
-use taskmill::RecurringSchedule;
+use taskmill::{TaskSubmission, RecurringSchedule};
 
-media.submit(
+media.submit_raw(
     TaskSubmission::new("sync")
         .payload_json(&serde_json::json!({"source": "remote"}))
         .recurring(RecurringSchedule::new(Duration::from_secs(300))) // every 5 minutes
@@ -350,10 +398,10 @@ Pile-up prevention is built in: if a recurring instance hasn't been dispatched y
 
 ### Managing recurring schedules
 
-Recurring schedules can be paused, resumed, or cancelled at runtime through the module handle:
+Recurring schedules can be paused, resumed, or cancelled at runtime through the domain handle:
 
 ```rust
-let media = scheduler.module("media");
+let media: DomainHandle<Media> = scheduler.domain::<Media>();
 
 // Pause — stops new occurrences from being enqueued
 media.pause_recurring(task_id).await?;
@@ -372,52 +420,55 @@ Tasks can declare dependencies on other tasks. A dependent task stays in `blocke
 ### Simple chain
 
 ```rust
-let upload = media.submit(
-    TaskSubmission::new("upload-file")
-        .payload_json(&upload_plan)
-).await?;
+let media: DomainHandle<Media> = scheduler.domain::<Media>();
+
+let upload = media.submit(UploadFileTask {
+    path: "/data/file.bin".into(),
+}).await?;
 
 // Only runs after upload succeeds
-media.submit(
-    TaskSubmission::new("delete-old-version")
-        .depends_on(upload.id().unwrap())
-        .payload_json(&delete_plan)
-).await?;
+media.submit_with(DeleteOldVersionTask {
+    path: "/data/file.bin".into(),
+}).depends_on(upload.id().unwrap()).await?;
 ```
 
 ### Fan-in (multiple dependencies)
 
 ```rust
-let a = media.submit(TaskSubmission::new("fetch-a").payload_json(&a_data)).await?;
-let b = media.submit(TaskSubmission::new("fetch-b").payload_json(&b_data)).await?;
+let a = media.submit(FetchTask { source: "a".into() }).await?;
+let b = media.submit(FetchTask { source: "b".into() }).await?;
 
 // Only runs after both A and B complete
-media.submit(
-    TaskSubmission::new("merge")
-        .depends_on_all([a.id().unwrap(), b.id().unwrap()])
-        .payload_json(&merge_plan)
-).await?;
+media.submit_with(MergeTask { sources: vec!["a".into(), "b".into()] })
+    .depends_on_all([a.id().unwrap(), b.id().unwrap()])
+    .await?;
 ```
 
-### Cross-module dependencies
+### Cross-domain dependencies
 
-Dependencies work across module boundaries. A task in one module can depend on a task in another module — the module boundary does not affect dependency resolution or failure propagation.
+Dependencies work across domain boundaries. A task in one domain can depend on a task in another domain — the domain boundary does not affect dependency resolution or failure propagation.
 
 ```rust
-let ingest = scheduler.module("ingest");
-let process = scheduler.module("process");
+pub struct Ingest;
+impl DomainKey for Ingest { const NAME: &'static str = "ingest"; }
 
-// Submit in the ingest module, capture the ID.
-let outcome = ingest.submit_typed(&FetchTask { url: source.clone() }).await?;
+pub struct Process;
+impl DomainKey for Process { const NAME: &'static str = "process"; }
+
+let ingest: DomainHandle<Ingest> = scheduler.domain::<Ingest>();
+let process: DomainHandle<Process> = scheduler.domain::<Process>();
+
+// Submit in the ingest domain, capture the ID.
+let outcome = ingest.submit(FetchTask { url: source.clone() }).await?;
 let fetch_id = outcome.id().expect("not a duplicate");
 
-// This task in the process module won't start until the fetch completes.
-process.submit_typed(&TranscodeTask { source })
+// This task in the process domain won't start until the fetch completes.
+process.submit_with(TranscodeTask { source })
     .depends_on(fetch_id)
     .await?;
 ```
 
-See [Multi-Module Applications](multi-module-apps.md#cross-module-task-dependencies) for more patterns including failure cascades and in-executor cross-module submission.
+See [Multi-Module Applications](multi-module-apps.md#cross-module-task-dependencies) for more patterns including failure cascades and in-executor cross-domain submission.
 
 ### Failure handling
 
@@ -426,12 +477,10 @@ By default, if a dependency fails permanently the dependent is cancelled and rec
 ```rust
 use taskmill::DependencyFailurePolicy;
 
-media.submit(
-    TaskSubmission::new("cleanup")
-        .depends_on(upload_id)
-        .on_dependency_failure(DependencyFailurePolicy::Ignore) // run anyway
-        .payload_json(&cleanup_plan)
-).await?;
+media.submit_with(CleanupTask { path: "/tmp/stale".into() })
+    .depends_on(upload_id)
+    .on_dependency_failure(DependencyFailurePolicy::Ignore) // run anyway
+    .await?;
 ```
 
 | Policy | Behavior |
@@ -446,7 +495,10 @@ Taskmill is designed for Tauri. The `Scheduler` drops directly into Tauri state,
 
 ```rust
 use tauri::Manager;
-use taskmill::{Scheduler, SchedulerSnapshot, StoreError};
+use taskmill::{Scheduler, DomainHandle, DomainKey, SchedulerSnapshot, StoreError};
+
+pub struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
 
 // Expose scheduler status to the frontend.
 #[tauri::command]
@@ -454,6 +506,18 @@ async fn scheduler_status(
     scheduler: tauri::State<'_, Scheduler>,
 ) -> Result<SchedulerSnapshot, StoreError> {
     scheduler.snapshot().await
+}
+
+// Submit tasks from frontend commands.
+#[tauri::command]
+async fn resize_image(
+    scheduler: tauri::State<'_, Scheduler>,
+    path: String,
+    width: u32,
+) -> Result<(), StoreError> {
+    let media: DomainHandle<Media> = scheduler.domain::<Media>();
+    media.submit(ResizeTask { path, width }).await?;
+    Ok(())
 }
 
 // Bridge events to the frontend.
@@ -480,6 +544,6 @@ Work through the topic guides in order:
 4. [Persistence & Recovery](persistence-and-recovery.md) — understand crash safety and deduplication
 5. [Configuration](configuration.md) — tune for your workload
 6. [Query APIs](query-apis.md) — build dashboards and debug stuck tasks
-7. [Multi-Module Applications](multi-module-apps.md) — assemble multiple modules, cross-module dependencies, tags, and dashboards
-8. [Writing a Reusable Module](library-modules.md) — publish a module as a library crate
+7. [Multi-Module Applications](multi-module-apps.md) — assemble multiple domains, cross-domain dependencies, tags, and dashboards
+8. [Writing a Reusable Module](library-modules.md) — publish a domain as a library crate
 9. [Design](design.md) — understand the architecture for advanced use

@@ -3,7 +3,7 @@
 Use these queries to build dashboards, debug stuck tasks, and gather analytics about task performance.
 
 Most queries are available in two places:
-- **`ModuleHandle`** — scoped to one module's tasks (preferred). Access via `scheduler.module("name")`.
+- **`DomainHandle<D>`** — scoped to one domain's tasks (preferred). Access via `scheduler.domain::<D>()`.
 - **`TaskStore`** — unscoped, across all tasks. Access via `scheduler.store()`.
 
 ## Common patterns
@@ -29,30 +29,30 @@ Most queries are available in two places:
 | `task_by_key(key)` | `Option<TaskRecord>` | Look up an active task by dedup key. |
 | `running_io_totals()` | `(i64, i64)` | Sum of expected disk read and write bytes across running tasks. Useful for comparing against system capacity. |
 
-## Module-scoped queries (ModuleHandle)
+## Domain-scoped queries (DomainHandle)
 
-These methods are available on `ModuleHandle` and are automatically scoped to the module's task type prefix.
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `handle.snapshot()` | `ModuleSnapshot` | Running tasks, pending/paused counts, progress, byte-level tracking, and pause state for this module. The primary entry point for per-module dashboards. |
-| `handle.active_tasks()` | `Vec<TaskRecord>` | In-memory running tasks for this module (no DB call). |
-| `handle.estimated_progress()` | `Vec<EstimatedProgress>` | Extrapolated progress for each running task in this module. |
-| `handle.byte_progress()` | `Vec<TaskProgress>` | Live byte-level progress for running tasks in this module. |
-| `handle.dead_letter_tasks(limit, offset)` | `Vec<TaskHistoryRecord>` | Paginated dead-letter (permanently failed) tasks for this module. |
-| `handle.tasks_by_tags(filters, status)` | `Vec<TaskRecord>` | Active tasks in this module matching the given tag filters and optional status. |
-| `handle.count_by_tag(key, status)` | `Vec<(String, i64)>` | Tag value counts for a given key within this module. |
-| `handle.tag_values(key)` | `Vec<(String, i64)>` | Distinct values for a tag key within this module. |
-
-## Cross-module operations (Scheduler)
-
-These methods operate across all modules and are available directly on `Scheduler`.
+These methods are available on `DomainHandle<D>` and are automatically scoped to the domain's task type prefix.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `scheduler.modules()` | `Vec<ModuleHandle>` | All registered module handles in registration order. Use to iterate for cross-cutting operations: cancel by tag, aggregate snapshots, build per-module dashboards. |
-| `scheduler.active_tasks()` | `Vec<TaskRecord>` | Running tasks from all modules combined. Equivalent to aggregating each module's `active_tasks()`. |
-| `scheduler.task(id)` | `Option<TaskRecord>` | Look up any active task by ID, regardless of which module owns it. |
+| `handle.snapshot()` | `ModuleSnapshot` | Running tasks, pending/paused counts, progress, byte-level tracking, and pause state for this domain. The primary entry point for per-domain dashboards. |
+| `handle.active_tasks()` | `Vec<TaskRecord>` | In-memory running tasks for this domain (no DB call). |
+| `handle.estimated_progress()` | `Vec<EstimatedProgress>` | Extrapolated progress for each running task in this domain. |
+| `handle.byte_progress()` | `Vec<TaskProgress>` | Live byte-level progress for running tasks in this domain. |
+| `handle.dead_letter_tasks(limit, offset)` | `Vec<TaskHistoryRecord>` | Paginated dead-letter (permanently failed) tasks for this domain. |
+| `handle.tasks_by_tags(filters, status)` | `Vec<TaskRecord>` | Active tasks in this domain matching the given tag filters and optional status. |
+| `handle.count_by_tag(key, status)` | `Vec<(String, i64)>` | Tag value counts for a given key within this domain. |
+| `handle.tag_values(key)` | `Vec<(String, i64)>` | Distinct values for a tag key within this domain. |
+
+## Cross-domain operations (Scheduler)
+
+These methods operate across all domains and are available directly on `Scheduler`.
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `scheduler.domain::<D>()` | `DomainHandle<D>` | Typed handle for a specific registered domain. Panics if `D` is not registered; use `scheduler.try_domain::<D>()` for a fallible variant. |
+| `scheduler.active_tasks()` | `Vec<TaskRecord>` | Running tasks from all domains combined. Equivalent to aggregating each domain's `active_tasks()`. |
+| `scheduler.task(id)` | `Option<TaskRecord>` | Look up any active task by ID, regardless of which domain owns it. |
 | `scheduler.snapshot()` | `SchedulerSnapshot` | Global aggregates: total running, pending, pressure, progress, and recurring schedules. |
 
 See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-dashboard) for dashboard patterns using these APIs.
@@ -67,8 +67,8 @@ See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-das
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `handle.cancel_all()` | `Vec<i64>` | Cancel all tasks belonging to this module. |
-| `handle.cancel_where(predicate)` | `Vec<i64>` | Cancel module tasks matching a predicate. |
+| `handle.cancel_all()` | `Vec<i64>` | Cancel all tasks belonging to this domain. |
+| `handle.cancel_where(predicate)` | `Vec<i64>` | Cancel domain tasks matching a predicate. |
 
 `cancel_all()` and `cancel_where()` affect tasks in any active status:
 
@@ -76,7 +76,7 @@ See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-das
 - **Running** tasks have their cancellation token triggered and are moved to history as `Cancelled`.
 - **Paused** tasks are cancelled immediately (no executor is running).
 - **Waiting** tasks (parents waiting for children) are cancelled, and their children are also cancelled (cascade).
-- **Children in other modules** are cancelled if they were linked via `.parent()` from a task in this module.
+- **Children in other domains** are cancelled if they were linked via `.parent()` from a task in this domain.
 
 ## Dependency queries
 
@@ -87,9 +87,9 @@ See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-das
 | `blocked_tasks()` | `Vec<TaskRecord>` | All tasks currently in `blocked` status, waiting for dependencies. |
 | `blocked_count()` | `i64` | Count of blocked tasks. Also available in `SchedulerSnapshot::blocked_count`. |
 
-Dependencies work across module boundaries. A task in `"process"` can depend on a task in `"ingest"` — the module boundary does not affect dependency resolution or failure propagation. See [Multi-Module Applications](multi-module-apps.md#cross-module-task-dependencies) for patterns.
+Dependencies work across domain boundaries. A task in `"process"` can depend on a task in `"ingest"` — the domain boundary does not affect dependency resolution or failure propagation. See [Multi-Module Applications](multi-module-apps.md#cross-module-task-dependencies) for patterns.
 
-> **Task type names in queries** — All store-level queries that accept a `task_type` string expect the *qualified* name including the module prefix: `"media::thumbnail"`, not `"thumbnail"`. Use `ModuleHandle` methods where possible — they apply the prefix automatically.
+> **Task type names in queries** — All store-level queries that accept a `task_type` string expect the *qualified* name including the domain prefix: `"media::thumbnail"`, not `"thumbnail"`. Use `DomainHandle` methods where possible — they apply the prefix automatically.
 
 ## History queries
 
@@ -102,7 +102,7 @@ Dependencies work across module boundaries. A task in `"process"` can depend on 
 
 History records include a `status` field that can be `completed`, `failed`, `cancelled`, `superseded`, `expired`, or `dead_letter`. Filter by status to find expired tasks (e.g., for analytics on TTL effectiveness).
 
-The `history_by_type(task_type)` parameter requires the qualified name including the module prefix — e.g. `"media::thumbnail"`, not `"thumbnail"`.
+The `history_by_type(task_type)` parameter requires the qualified name including the domain prefix — e.g. `"media::thumbnail"`, not `"thumbnail"`.
 
 ## Aggregate queries
 
@@ -137,10 +137,10 @@ let snap = scheduler.snapshot().await?;
 
 ### Managing recurring schedules
 
-Pause, resume, or cancel recurring schedules via the module handle:
+Pause, resume, or cancel recurring schedules via the domain handle:
 
 ```rust
-let handle = scheduler.module("app");
+let handle = scheduler.domain::<App>();
 
 // Pause — stops new occurrences from being enqueued
 handle.pause_recurring(task_id).await?;
@@ -154,7 +154,7 @@ handle.cancel_recurring(task_id).await?;
 
 ## Unified lookup
 
-Search both active and history tables by dedup key — useful for checking whether a task has been submitted or has already completed. Note that in 0.4 the task type stored in the database is the fully qualified name (e.g. `"media::resize"`, not `"resize"`):
+Search both active and history tables by dedup key — useful for checking whether a task has been submitted or has already completed. Note that the task type stored in the database is the fully qualified name (e.g. `"media::resize"`, not `"resize"`):
 
 ```rust
 use taskmill::TaskLookup;
@@ -173,7 +173,7 @@ match lookup {
 }
 ```
 
-Or with typed tasks (the module prefix is applied automatically):
+Or with typed tasks (the domain prefix is applied automatically):
 
 ```rust
 let lookup = scheduler.lookup_typed(&ResizeTask {
@@ -192,8 +192,8 @@ let lookup = scheduler.lookup_typed(&ResizeTask {
 ## Usage example
 
 ```rust
-// Module-scoped snapshot — running tasks, pending count, progress.
-let snap = scheduler.module("media").snapshot().await?;
+// Domain-scoped snapshot — running tasks, pending count, progress.
+let snap = scheduler.domain::<Media>().snapshot().await?;
 println!("media: {} running, {} pending", snap.running.len(), snap.pending_count);
 
 // Global dashboard data via the store.

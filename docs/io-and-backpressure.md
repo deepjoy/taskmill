@@ -64,7 +64,7 @@ Use store queries to see how your tasks actually perform and refine future estim
 let store = scheduler.store();
 
 // Average throughput for a task type (from recent completions).
-// Note: use the qualified name including the module prefix.
+// Note: use the qualified name including the domain prefix.
 let (avg_read_bps, avg_write_bps) = store.avg_throughput("media::thumbnail", 20).await?;
 
 // Aggregate stats: count, avg duration, avg IO, failure rate

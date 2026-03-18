@@ -9,19 +9,36 @@ Read more about the [motivation and use cases](docs/why-taskmill.md).
 ## Quick example
 
 ```rust
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use serde::{Serialize, Deserialize};
 use taskmill::{
-    Module, Scheduler, IoBudget, TaskSubmission, TaskExecutor,
-    TaskContext, TaskError,
+    Domain, DomainKey, DomainHandle, Scheduler, TypedExecutor,
+    TypedTask, TaskTypeConfig, TaskContext, TaskError, IoBudget,
 };
 
+// 1. Define a domain and a typed task.
+struct Media;
+impl DomainKey for Media { const NAME: &'static str = "media"; }
+
+#[derive(Serialize, Deserialize)]
+struct Thumbnail { path: String, size: u32 }
+
+impl TypedTask for Thumbnail {
+    type Domain = Media;
+    const TASK_TYPE: &'static str = "thumbnail";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new().expected_io(IoBudget::disk(4096, 1024))
+    }
+
+    fn key(&self) -> Option<String> { Some(self.path.clone()) }
+}
+
+// 2. Implement a typed executor — no manual deserialization.
 struct ThumbnailGenerator;
 
-impl TaskExecutor for ThumbnailGenerator {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
-    ) -> Result<(), TaskError> {
+impl TypedExecutor<Thumbnail> for ThumbnailGenerator {
+    async fn execute(&self, thumb: Thumbnail, ctx: &TaskContext) -> Result<(), TaskError> {
         ctx.progress().report(0.5, Some("resizing".into()));
         ctx.record_read_bytes(4096);
         ctx.record_write_bytes(1024);
@@ -31,21 +48,20 @@ impl TaskExecutor for ThumbnailGenerator {
 
 #[tokio::main]
 async fn main() {
+    // 3. Build the scheduler with a typed domain.
     let scheduler = Scheduler::builder()
         .store_path("tasks.db")
-        .module(Module::new("media")
-            .executor("thumbnail", Arc::new(ThumbnailGenerator)))
+        .domain(Domain::<Media>::new()
+            .task::<Thumbnail>(ThumbnailGenerator))
         .max_concurrency(8)
         .with_resource_monitoring()
         .build()
         .await
         .unwrap();
 
-    let media = scheduler.module("media");
-    let sub = TaskSubmission::new("thumbnail")
-        .payload_json(&serde_json::json!({"path": "/photos/img.jpg"}))
-        .expected_io(IoBudget::disk(4096, 1024));
-    media.submit(sub).await.unwrap();
+    // 4. Submit via a typed domain handle — compile-time domain enforcement.
+    let media: DomainHandle<Media> = scheduler.domain::<Media>();
+    media.submit(Thumbnail { path: "/photos/img.jpg".into(), size: 256 }).await.unwrap();
 
     let token = CancellationToken::new();
     scheduler.run(token).await;
@@ -78,10 +94,12 @@ async fn main() {
 
 | Guide | What it covers |
 |-------|----------------|
-| [Quick Start](docs/quick-start.md) | Installation, first executor, builder setup, Tauri integration |
+| [Quick Start](docs/quick-start.md) | Installation, domains, typed executors, builder setup, Tauri integration |
+| [Multi-Module Applications](docs/multi-module-apps.md) | Composing multiple domains, cross-domain patterns, concurrency budgets |
+| [Writing a Reusable Module](docs/library-modules.md) | Publishing a domain as a library crate |
 | [Priorities & Preemption](docs/priorities-and-preemption.md) | Priority levels, task groups, preemption, and throttle behavior |
 | [IO & Backpressure](docs/io-and-backpressure.md) | IO budgets, resource monitoring, pressure sources, and tuning |
-| [Progress & Events](docs/progress-and-events.md) | Progress reporting, lifecycle events, dashboard snapshots |
+| [Progress & Events](docs/progress-and-events.md) | Progress reporting, lifecycle events, typed event streams |
 | [Persistence & Recovery](docs/persistence-and-recovery.md) | Crash recovery, deduplication, history retention |
 | [Configuration](docs/configuration.md) | All options, recommended defaults, workload-specific tuning |
 | [Query APIs](docs/query-apis.md) | TaskStore queries for dashboards, debugging, and analytics |

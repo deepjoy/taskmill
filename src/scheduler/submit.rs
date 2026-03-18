@@ -179,7 +179,7 @@ impl Scheduler {
 
     /// Submit a [`TypedTask`], handling serialization automatically.
     ///
-    /// Uses the priority from [`TypedTask::priority()`].
+    /// Uses the priority from [`TypedTask::config()`].
     pub async fn submit_typed<T: TypedTask>(&self, task: &T) -> Result<SubmitOutcome, StoreError> {
         let sub = TaskSubmission::from_typed(task);
         self.submit(&sub).await
@@ -187,7 +187,7 @@ impl Scheduler {
 
     /// Submit a [`TypedTask`] with an explicit priority override.
     ///
-    /// The provided `priority` replaces whatever [`TypedTask::priority()`]
+    /// The provided `priority` replaces whatever [`TypedTask::config()`]
     /// would return, keeping priority out of the serialized payload.
     pub async fn submit_typed_at<T: TypedTask>(
         &self,

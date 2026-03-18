@@ -62,10 +62,8 @@ Don't use preemption when:
 Executors should check for cancellation at natural yield points — between chunks of work, between loop iterations, etc. This lets the executor clean up gracefully.
 
 ```rust
-impl TaskExecutor for MyExecutor {
-    async fn execute<'a>(
-        &'a self, ctx: &'a TaskContext,
-    ) -> Result<(), TaskError> {
+impl TypedExecutor<MyTask> for MyExecutor {
+    async fn execute(&self, task: MyTask, ctx: &TaskContext) -> Result<(), TaskError> {
         for chunk in chunks {
             // Check before each unit of work
             if ctx.token().is_cancelled() {
@@ -97,7 +95,7 @@ let scheduler = Scheduler::builder()
 
 When multiple tasks share a limited resource (e.g., an API with rate limits, or a specific S3 bucket), you can limit how many run concurrently using task groups.
 
-Assign tasks to a group via `.group()` on `TaskSubmission` or `TypedTask::group_key()`:
+Assign tasks to a group via `.group()` on `TaskSubmission` or `TaskTypeConfig::group()` in `TypedTask::config()`:
 
 ```rust
 let sub = TaskSubmission::new("upload")
@@ -121,12 +119,12 @@ scheduler.remove_group_limit("bucket-prod").await;
 
 Group limits are checked *in addition to* `max_concurrency` — a task must pass both the global and group gate to be dispatched.
 
-## Module-level pause and resume
+## Domain-level pause and resume
 
-Individual modules can be paused and resumed independently, without affecting other modules. This is useful for features like a user-togglable sync, or temporarily disabling a module during maintenance.
+Individual domains can be paused and resumed independently, without affecting other domains. This is useful for features like a user-togglable sync, or temporarily disabling a domain during maintenance.
 
 ```rust
-let sync = scheduler.module("sync");
+let sync = scheduler.domain::<Sync>();
 
 // Pause — stops dispatch, interrupts running tasks, moves everything to paused.
 let paused_count = sync.pause().await?;
@@ -136,19 +134,19 @@ let resumed_count = sync.resume().await?;
 ```
 
 **What `pause()` does:**
-1. Sets the per-module `is_paused` flag (prevents new dispatch).
+1. Sets the per-domain `is_paused` flag (prevents new dispatch).
 2. Triggers the cancellation token of running tasks and moves them to `paused` in the database.
 3. Moves pending tasks to `paused` in the database.
 
 **What `resume()` does:**
-1. Clears the per-module `is_paused` flag.
+1. Clears the per-domain `is_paused` flag.
 2. Moves `paused` tasks back to `pending` (unless the global scheduler is also paused).
 
 ### Interaction with global pause
 
-The scheduler must be globally unpaused **and** the module must be unpaused for dispatch to proceed. Module pause is additive — `handle.resume()` does not override `scheduler.pause_all()`.
+The scheduler must be globally unpaused **and** the domain must be unpaused for dispatch to proceed. Domain pause is additive — `handle.resume()` does not override `scheduler.pause_all()`.
 
-| Global paused? | Module paused? | Dispatch? |
+| Global paused? | Domain paused? | Dispatch? |
 |----------------|----------------|-----------|
 | No | No | Yes |
 | No | Yes | No |
@@ -159,13 +157,13 @@ The scheduler must be globally unpaused **and** the module must be unpaused for 
 
 ```rust
 // User disables background sync in settings.
-scheduler.module("sync").pause().await?;
+scheduler.domain::<Sync>().pause().await?;
 
-// Other modules continue normally.
-scheduler.module("media").submit_typed(&thumb).await?;
+// Other domains continue normally.
+scheduler.domain::<Media>().submit(thumb).await?;
 
 // User re-enables sync.
-scheduler.module("sync").resume().await?;
+scheduler.domain::<Sync>().resume().await?;
 ```
 
 See [Multi-Module Applications](multi-module-apps.md#module-level-pause-and-resume) for more patterns.

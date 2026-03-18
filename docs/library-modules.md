@@ -1,51 +1,58 @@
 # Writing a Reusable Module
 
-This guide covers how to package a taskmill module as a standalone Rust crate that other applications can pull in as a dependency. A library module owns its executors, typed tasks, and scoped state — the host application registers it with `Scheduler::builder().module(...)` and everything works without further wiring.
+This guide covers how to package a taskmill domain as a standalone Rust crate that other applications can pull in as a dependency. A library domain owns its executors, typed tasks, and scoped state — the host application registers it with `Scheduler::builder().domain(...)` and everything works without further wiring.
 
 ## Design goals for library modules
 
 A good library module is:
 
 - **Self-contained.** It brings its own executors, task types, defaults, and state. The host should not need to know internal details.
-- **Conflict-free.** It uses a unique module name that avoids collisions with the host's modules or other libraries.
-- **Decoupled from host state.** Executors only access module-scoped state. They never reach into the host's global state map for types the host did not explicitly promise.
-- **Testable in isolation.** The module can be exercised against an in-memory store without a full application scaffold.
+- **Conflict-free.** It uses a unique `DomainKey` type whose `NAME` avoids collisions with the host's domains or other libraries.
+- **Decoupled from host state.** Executors only access domain-scoped state. They never reach into the host's global state map for types the host did not explicitly promise.
+- **Testable in isolation.** The domain can be exercised against an in-memory store without a full application scaffold.
 
-## Naming: avoid conflicts, export a constant
+## Naming: the DomainKey type IS the identity
 
-Module names are global within a scheduler. If two `.module()` calls use the same name, `build()` returns an error. Avoid generic names like `"upload"` or `"sync"` — prefix with your crate or organization name.
+Domain names are global within a scheduler. If two `.domain()` calls use the same `NAME`, `build()` returns an error. Avoid generic names like `"upload"` or `"sync"` — prefix with your crate or organization name.
 
-Export the name as a constant so callers can reference it without string duplication:
+Export a zero-sized `DomainKey` struct as the public identity of your domain. Callers reference it as a type parameter instead of duplicating a name string:
 
 ```rust
-/// Module name for the acme-cdn crate.
-pub const MODULE_NAME: &str = "acme-cdn";
+/// Domain identity for the acme-cdn crate.
+pub struct AcmeCdn;
+
+impl DomainKey for AcmeCdn {
+    const NAME: &'static str = "acme-cdn";
+}
 ```
 
-Task types are automatically prefixed at build time. A task type `"upload"` in the `"acme-cdn"` module is stored in the database as `"acme-cdn::upload"`. Callers never need to construct the prefixed form themselves — the `ModuleHandle` does it.
+Task types are automatically prefixed at build time. A task type `"upload"` in the `"acme-cdn"` domain is stored in the database as `"acme-cdn::upload"`. Callers never need to construct the prefixed form themselves — the `DomainHandle` does it.
 
 ## What to export from your crate
 
 A minimal library module exports:
 
-1. **A module constructor** that returns a `Module`.
-2. **A module name constant** for the host to look up the handle.
+1. **A `DomainKey` struct** — the type-level identity of the domain.
+2. **A domain constructor** that returns a `Domain<D>`.
 3. **Typed task structs** so the host can submit tasks.
-4. **A configuration struct** if the module needs runtime settings.
+4. **A configuration struct** if the domain needs runtime settings.
 
 ```rust
-use std::sync::Arc;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use taskmill::{
-    Module, TypedTask, IoBudget, Priority, RetryPolicy, BackoffStrategy,
+    Domain, DomainKey, TypedTask, TypedExecutor, TaskTypeConfig,
+    TaskContext, TaskError, IoBudget, Priority, RetryPolicy,
 };
 
 // ── Public API ──────────────────────────────────────────────────
 
-pub const MODULE_NAME: &str = "acme-cdn";
+pub struct AcmeCdn;
+impl DomainKey for AcmeCdn {
+    const NAME: &'static str = "acme-cdn";
+}
 
-/// Configuration for the acme-cdn module.
+/// Configuration for the acme-cdn domain.
 pub struct AcmeCdnConfig {
     pub endpoint: String,
     pub api_key: String,
@@ -61,13 +68,14 @@ pub struct UploadTask {
 }
 
 impl TypedTask for UploadTask {
+    type Domain = AcmeCdn;
     const TASK_TYPE: &'static str = "upload";
 
-    fn expected_io(&self) -> IoBudget {
-        IoBudget::net(0, self.size as i64)
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new()
+            .expected_io(IoBudget::net(0, 1_000_000))
+            .priority(Priority::NORMAL)
     }
-
-    fn priority(&self) -> Priority { Priority::NORMAL }
 
     fn key(&self) -> Option<String> {
         Some(self.file_id.clone())
@@ -85,41 +93,43 @@ pub struct PurgeTask {
 }
 
 impl TypedTask for PurgeTask {
+    type Domain = AcmeCdn;
     const TASK_TYPE: &'static str = "purge";
     fn key(&self) -> Option<String> { Some(self.file_id.clone()) }
 }
 
-/// Build the acme-cdn module. Call this from the host's scheduler builder.
-pub fn acme_cdn_module(config: AcmeCdnConfig) -> Module {
-    Module::new(MODULE_NAME)
-        .typed_executor::<UploadTask, _>(Arc::new(UploadExecutor))
-        .typed_executor::<PurgeTask, _>(Arc::new(PurgeExecutor))
+/// Build the acme-cdn domain. Call this from the host's scheduler builder.
+pub fn acme_cdn_domain(config: AcmeCdnConfig) -> Domain<AcmeCdn> {
+    Domain::<AcmeCdn>::new()
+        .task::<UploadTask>(UploadExecutor)
+        .task::<PurgeTask>(PurgeExecutor)
         .max_concurrency(config.max_upload_concurrency)
-        .default_retry_policy(RetryPolicy {
-            strategy: BackoffStrategy::Exponential {
-                initial: Duration::from_secs(2),
-                max: Duration::from_secs(120),
-                multiplier: 2.0,
-            },
-            max_retries: 5,
-        })
+        .default_retry(RetryPolicy::exponential(
+            5,
+            Duration::from_secs(2),
+            Duration::from_secs(120),
+        ))
         .default_tag("provider", "acme-cdn")
-        .app_state(config)
+        .state(config)
 }
 
 // ── Internal (not exported) ─────────────────────────────────────
 
 struct UploadExecutor;
 struct PurgeExecutor;
-// ... impl TaskExecutor for each ...
+// ... impl TypedExecutor<UploadTask> for UploadExecutor { ... }
+// ... impl TypedExecutor<PurgeTask> for PurgeExecutor { ... }
 ```
 
 The host wires it in one line:
 
 ```rust
+use acme_cdn::{AcmeCdn, AcmeCdnConfig, UploadTask};
+use taskmill::{DomainHandle, Scheduler};
+
 let scheduler = Scheduler::builder()
     .store_path("app.db")
-    .module(acme_cdn_module(AcmeCdnConfig {
+    .domain(acme_cdn_domain(AcmeCdnConfig {
         endpoint: "https://cdn.acme.io".into(),
         api_key: std::env::var("ACME_KEY").unwrap(),
         max_upload_concurrency: 4,
@@ -127,8 +137,8 @@ let scheduler = Scheduler::builder()
     .build()
     .await?;
 
-let cdn = scheduler.module(acme_cdn::MODULE_NAME);
-cdn.submit_typed(&UploadTask {
+let cdn: DomainHandle<AcmeCdn> = scheduler.domain::<AcmeCdn>();
+cdn.submit(UploadTask {
     file_id: "abc123".into(),
     path: "/data/photo.jpg".into(),
     size: 2_000_000,
@@ -143,8 +153,8 @@ Executors can access any type via `ctx.state::<T>()`. It is tempting to grab a d
 
 ```rust
 // BAD: invisible coupling to the host's global state
-impl TaskExecutor for UploadExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<UploadTask> for UploadExecutor {
+    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
         let db = ctx.state::<AppDb>().expect("host must register AppDb");
         // ...
     }
@@ -153,15 +163,15 @@ impl TaskExecutor for UploadExecutor {
 
 This compiles, but it means the library silently requires the host to register `AppDb` as global state. Nothing in the type system enforces it. If the host forgets, the executor panics at runtime.
 
-### The pattern: inject dependencies via module constructor
+### The pattern: inject dependencies via domain constructor
 
-Pass everything the module needs through its constructor and register it as module-scoped state:
+Pass everything the domain needs through its constructor and register it as domain-scoped state:
 
 ```rust
-pub fn acme_cdn_module(config: AcmeCdnConfig) -> Module {
-    Module::new(MODULE_NAME)
-        .typed_executor::<UploadTask, _>(Arc::new(UploadExecutor))
-        .app_state(config) // module-scoped — only visible to this module's executors
+pub fn acme_cdn_domain(config: AcmeCdnConfig) -> Domain<AcmeCdn> {
+    Domain::<AcmeCdn>::new()
+        .task::<UploadTask>(UploadExecutor)
+        .state(config) // domain-scoped — only visible to this domain's executors
         // ...
 }
 ```
@@ -169,76 +179,79 @@ pub fn acme_cdn_module(config: AcmeCdnConfig) -> Module {
 Inside the executor:
 
 ```rust
-impl TaskExecutor for UploadExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<UploadTask> for UploadExecutor {
+    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
         let config = ctx.state::<AcmeCdnConfig>()
-            .expect("AcmeCdnConfig is registered by acme_cdn_module()");
-        // safe — this module always registers its own config
+            .expect("AcmeCdnConfig is registered by acme_cdn_domain()");
+        // safe — this domain always registers its own config
     }
 }
 ```
 
-`ctx.state::<T>()` checks module-scoped state first, then falls back to global state. Because the module constructor registers `AcmeCdnConfig` via `Module::app_state()`, the executor always finds it regardless of what the host does with global state.
+`ctx.state::<T>()` checks domain-scoped state first, then falls back to global state. Because the domain constructor registers `AcmeCdnConfig` via `Domain::state()`, the executor always finds it regardless of what the host does with global state.
 
 ## Exposing a typed handle wrapper
 
-For a polished library API, wrap `ModuleHandle` in a domain-specific struct so callers don't need to know internal task type names:
+With the domain-centric API, `DomainHandle<D>` is already a typed handle scoped to your domain. Callers obtain it with `scheduler.domain::<AcmeCdn>()` — no manual wrapper struct needed.
+
+Compare the old approach (a hand-written `CdnHandle` wrapping an untyped `ModuleHandle`) with the new one:
 
 ```rust
-/// Typed handle for submitting CDN tasks.
-pub struct CdnHandle {
-    inner: taskmill::ModuleHandle,
+// Before (old API): manual wrapper required
+let cdn = CdnHandle::from_scheduler(&scheduler);
+cdn.upload(&task).await?;
+
+// After (new API): DomainHandle<AcmeCdn> IS the typed handle
+let cdn: DomainHandle<AcmeCdn> = scheduler.domain::<AcmeCdn>();
+cdn.submit(UploadTask { /* ... */ }).await?;
+cdn.submit(PurgeTask { /* ... */ }).await?;
+```
+
+`DomainHandle<AcmeCdn>` enforces at compile time that you can only submit task types whose `type Domain = AcmeCdn`. Attempting to submit a task from another domain is a type error.
+
+If you still want convenience methods (e.g. `cdn.upload(file_id, path, size)` that constructs the struct internally), you can add them as extension methods on `DomainHandle<AcmeCdn>`:
+
+```rust
+/// Extension methods for CDN operations.
+pub trait CdnHandleExt {
+    fn upload(&self, file_id: &str, path: &str, size: u64)
+        -> impl std::future::Future<Output = Result<SubmitOutcome, StoreError>> + Send;
 }
 
-impl CdnHandle {
-    /// Get the CDN handle from a scheduler.
-    ///
-    /// Panics if the acme-cdn module was not registered.
-    pub fn from_scheduler(scheduler: &taskmill::Scheduler) -> Self {
-        Self {
-            inner: scheduler.module(MODULE_NAME),
-        }
-    }
-
-    /// Get the CDN handle, returning `None` if the module is not registered.
-    pub fn try_from_scheduler(scheduler: &taskmill::Scheduler) -> Option<Self> {
-        scheduler.try_module(MODULE_NAME).map(|h| Self { inner: h })
-    }
-
-    /// Upload a file to the CDN.
-    pub fn upload(&self, task: &UploadTask) -> taskmill::SubmitBuilder {
-        self.inner.submit_typed(task)
-    }
-
-    /// Purge a file from the CDN edge cache.
-    pub fn purge(&self, task: &PurgeTask) -> taskmill::SubmitBuilder {
-        self.inner.submit_typed(task)
-    }
-
-    /// Subscribe to CDN module events only.
-    pub fn subscribe(&self) -> taskmill::ModuleReceiver<taskmill::SchedulerEvent> {
-        self.inner.subscribe()
+impl CdnHandleExt for DomainHandle<AcmeCdn> {
+    async fn upload(&self, file_id: &str, path: &str, size: u64)
+        -> Result<SubmitOutcome, StoreError>
+    {
+        self.submit(UploadTask {
+            file_id: file_id.into(),
+            path: path.into(),
+            size,
+        }).await
     }
 }
 ```
 
-The host uses domain methods instead of generic `submit_typed`:
+Domain-filtered events are also built in — `cdn.events()` returns only events for the `acme-cdn` domain:
 
 ```rust
-let cdn = CdnHandle::from_scheduler(&scheduler);
-cdn.upload(&UploadTask { file_id: "abc".into(), path: "/f.jpg".into(), size: 1024 }).await?;
+let mut events = cdn.events();
+tokio::spawn(async move {
+    while let Ok(event) = events.recv().await {
+        // Only acme-cdn events appear here.
+    }
+});
 ```
 
 ## Late-binding state injection
 
-Sometimes a library module needs state that is only available after the scheduler is built — for example, a shared HTTP client pool created during application startup.
+Sometimes a library domain needs state that is only available after the scheduler is built — for example, a shared HTTP client pool created during application startup.
 
 Use `scheduler.register_state()` to inject global state after `build()` but before `run()`:
 
 ```rust
 let scheduler = Scheduler::builder()
     .store_path("app.db")
-    .module(acme_cdn_module(config))
+    .domain(acme_cdn_domain(config))
     .build()
     .await?;
 
@@ -251,23 +264,25 @@ let token = CancellationToken::new();
 scheduler.run(token).await;
 ```
 
-The executor accesses it through the normal `ctx.state::<HttpPool>()` path. Since `register_state` writes to global state, all modules can see it.
+The executor accesses it through the normal `ctx.state::<HttpPool>()` path. Since `register_state` writes to global state, all domains can see it.
 
 **Race condition warning:** `register_state()` is safe to call before `scheduler.run()`. After `run()` starts dispatching tasks, there are no ordering guarantees with in-flight executors. An executor that runs before the state is registered will see `None` from `ctx.state::<T>()`. Always register late-binding state before calling `run()`.
 
-## Handling scheduler.try_module() for optional integration
+## Handling optional cross-domain integration
 
-If your library provides optional integration with another module, use `try_module()` to avoid panicking when it is not registered:
+If your library provides optional integration with another domain, use `ctx.try_domain::<D>()` to avoid panicking when it is not registered:
 
 ```rust
-impl TaskExecutor for UploadExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+use analytics::{Analytics, TrackEvent};
+
+impl TypedExecutor<UploadTask> for UploadExecutor {
+    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
         // Core upload logic...
         do_upload(ctx).await?;
 
-        // Optional: notify analytics module if present
-        if let Some(analytics) = ctx.try_module("analytics") {
-            analytics.submit_typed(&TrackEvent {
+        // Optional: notify analytics domain if present
+        if let Some(analytics) = ctx.try_domain::<Analytics>() {
+            analytics.submit(TrackEvent {
                 action: "cdn_upload".into(),
                 // ...
             }).await.ok(); // best-effort — don't fail the upload
@@ -278,11 +293,13 @@ impl TaskExecutor for UploadExecutor {
 }
 ```
 
-This pattern lets your library cooperate with modules from other crates without requiring them. Document which optional module names your library looks for so the host knows what to wire up.
+Because `try_domain` takes a type parameter, the dependency on the `Analytics` domain key is visible in your `Cargo.toml` (you import the struct from the `analytics` crate). This is strictly better than the old string-based `try_module("analytics")` approach — if the analytics crate renames its domain, your code fails at compile time rather than silently doing nothing at runtime.
+
+Document which optional domain types your library looks for so the host knows what to wire up.
 
 ## Testing your module in isolation
 
-`TaskStore::open_memory()` creates an in-memory SQLite database. Combine it with `Scheduler::builder().store()` to test your module without touching the filesystem:
+`TaskStore::open_memory()` creates an in-memory SQLite database. Combine it with `Scheduler::builder().store()` to test your domain without touching the filesystem:
 
 ```rust
 #[tokio::test]
@@ -291,7 +308,7 @@ async fn upload_task_completes() {
 
     let scheduler = Scheduler::builder()
         .store(store)
-        .module(acme_cdn_module(AcmeCdnConfig {
+        .domain(acme_cdn_domain(AcmeCdnConfig {
             endpoint: "http://localhost:9999".into(),
             api_key: "test-key".into(),
             max_upload_concurrency: 2,
@@ -300,10 +317,10 @@ async fn upload_task_completes() {
         .await
         .unwrap();
 
-    let cdn = scheduler.module(MODULE_NAME);
-    let mut events = cdn.subscribe();
+    let cdn: DomainHandle<AcmeCdn> = scheduler.domain::<AcmeCdn>();
+    let mut events = cdn.events();
 
-    cdn.submit_typed(&UploadTask {
+    cdn.submit(UploadTask {
         file_id: "test-1".into(),
         path: "/tmp/test.jpg".into(),
         size: 1024,
@@ -327,21 +344,21 @@ async fn upload_task_completes() {
 Key points for testing:
 
 - `TaskStore::open_memory()` gives you a fresh database per test. No cleanup needed.
-- Register only your module — no need for the host's modules or global state.
+- Register only your domain — no need for the host's domains or global state.
 - Spawn `scheduler.run()` in a background task and cancel the token when done.
-- Use `cdn.subscribe()` (module-filtered) to receive only your module's events.
+- Use `cdn.events()` (domain-filtered) to receive only your domain's events.
 
 ## Checklist before publishing
 
-- [ ] **Unique module name.** Use an organization or crate prefix (e.g. `"acme-cdn"`, not `"cdn"`). Export it as `pub const MODULE_NAME`.
-- [ ] **No global state access.** Executors only use `ctx.state::<T>()` for types registered via `Module::app_state()` in your own module constructor. Document any late-binding state requirements.
-- [ ] **Constructor takes config.** All knobs (endpoints, keys, concurrency limits) are parameters of the module constructor function, not hardcoded.
-- [ ] **TypedTask for every task type.** Use `typed_executor` over string-based `executor` registration. Export the typed task structs so callers can use `submit_typed`.
-- [ ] **Serde derives on task structs.** Both `Serialize` and `Deserialize` — the host needs `Serialize` for submission, your executor needs `Deserialize` for `ctx.payload::<T>()`.
-- [ ] **TASK_TYPE uses short form.** `const TASK_TYPE: &'static str = "upload"`, not `"acme-cdn::upload"`. The module prefixes it automatically.
+- [ ] **Unique domain name.** Use an organization or crate prefix (e.g. `"acme-cdn"`, not `"cdn"`). Export the `DomainKey` struct as the public identity.
+- [ ] **No global state access.** Executors only use `ctx.state::<T>()` for types registered via `Domain::state()` in your own domain constructor. Document any late-binding state requirements.
+- [ ] **Constructor takes config.** All knobs (endpoints, keys, concurrency limits) are parameters of the domain constructor function, not hardcoded.
+- [ ] **TypedTask for every task type.** Use `Domain::task::<T>(executor)` for registration. Each task struct declares `type Domain = YourDomainKey`. Export the typed task structs so callers can use `handle.submit(task)`.
+- [ ] **Serde derives on task structs.** Both `Serialize` and `Deserialize` — the host needs `Serialize` for submission, your executor needs `Deserialize` for the typed payload.
+- [ ] **TASK_TYPE uses short form.** `const TASK_TYPE: &'static str = "upload"`, not `"acme-cdn::upload"`. The domain prefixes it automatically.
+- [ ] **Static defaults in `config()`.** Use `TypedTask::config()` with `TaskTypeConfig` for priority, IO budget, TTL, retry policy, and group key. Reserve instance methods (`key()`, `label()`, `tags()`) for payload-dependent values.
 - [ ] **key() returns a stable dedup key.** If your task has a natural identity (file ID, URL), return it from `TypedTask::key()` so duplicate submissions are handled correctly.
-- [ ] **Default retry policy set.** Use `Module::default_retry_policy()` with sensible backoff for your use case.
-- [ ] **Module concurrency capped.** Set `Module::max_concurrency()` to a reasonable default. The host can adjust at runtime via `ModuleHandle::set_max_concurrency()`.
+- [ ] **Default retry policy set.** Use `Domain::default_retry()` with a `RetryPolicy::exponential(...)` for sensible backoff across the domain.
+- [ ] **Domain concurrency capped.** Set `Domain::max_concurrency()` to a reasonable default. The host can adjust at runtime via `DomainHandle::set_max_concurrency()`.
 - [ ] **Tests use open_memory().** No filesystem side effects. Tests should pass in CI without special setup.
-- [ ] **Typed handle wrapper (optional).** If your module has more than two task types, consider wrapping `ModuleHandle` in a domain-specific API struct.
-- [ ] **Document optional integrations.** If your executors use `ctx.try_module("other")`, list those optional module names in your crate docs.
+- [ ] **Document optional integrations.** If your executors use `ctx.try_domain::<OtherDomain>()`, list those optional domain crate dependencies in your docs.
