@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
-use crate::registry::{
-    ChildSpawner, IoTracker, ParentContext, StateMap, StateSnapshot, TaskContext,
-};
+use crate::registry::{ChildSpawner, IoTracker, ParentContext, StateSnapshot, TaskContext};
 use crate::store::TaskStore;
 use crate::task::{IoBudget, ParentResolution, TaskRecord};
 
@@ -351,8 +349,8 @@ pub(crate) struct SpawnContext {
     pub cancel_hook_timeout: tokio::time::Duration,
     /// Per-module live running counts. Incremented on dispatch; decremented on terminal.
     pub module_running: Arc<HashMap<String, AtomicUsize>>,
-    /// Per-module state maps. A snapshot for the task's module is taken at dispatch time.
-    pub module_state: Arc<HashMap<String, StateMap>>,
+    /// Pre-snapshotted per-module state (module name → snapshot). Cloned at dispatch time.
+    pub module_state: Arc<HashMap<String, StateSnapshot>>,
     /// Registry of all registered modules — shared with spawned tasks so they can
     /// construct [`ModuleHandle`](crate::module::ModuleHandle) instances.
     pub module_registry: Arc<crate::module::ModuleRegistry>,
@@ -390,17 +388,12 @@ pub(crate) async fn spawn_task(
         .map(|(n, _)| n.to_string())
         .unwrap_or_default();
 
-    // Snapshot the per-module state for this task's owning module.
-    let module_state_snapshot: StateSnapshot =
-        if let Some(name) = task.task_type.split_once("::").map(|(n, _)| n) {
-            if let Some(state_map) = module_state.get(name) {
-                state_map.snapshot().await
-            } else {
-                StateSnapshot::default()
-            }
-        } else {
-            StateSnapshot::default()
-        };
+    // Clone the pre-snapshotted module state — no lock needed, already lock-free.
+    let module_state_snapshot: StateSnapshot = task
+        .task_type
+        .split_once("::")
+        .and_then(|(name, _)| module_state.get(name).cloned())
+        .unwrap_or_default();
     let child_token = CancellationToken::new();
 
     // Build execution context.

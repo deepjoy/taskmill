@@ -330,7 +330,7 @@ impl SchedulerBuilder {
         // Build registry, prefixing all task types with "{module_name}::".
         let mut registry = crate::registry::TaskTypeRegistry::new();
         let mut module_entries: Vec<ModuleEntry> = Vec::new();
-        let mut module_state_map: HashMap<String, crate::registry::StateMap> = HashMap::new();
+        let mut module_state_map: HashMap<String, crate::registry::StateSnapshot> = HashMap::new();
 
         for module in self.modules {
             let prefix = module.prefix(); // e.g. "media::"
@@ -381,7 +381,9 @@ impl SchedulerBuilder {
 
             module_state_map.insert(
                 module_name,
-                crate::registry::StateMap::from_entries(app_state_entries),
+                crate::registry::StateMap::from_entries(app_state_entries)
+                    .snapshot()
+                    .await,
             );
         }
 

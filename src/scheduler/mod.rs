@@ -103,7 +103,7 @@ pub(crate) struct SchedulerInner {
     /// Per-module app state (module name → state map). Populated at build time from
     /// each module's `.app_state()` calls. Executors access it via
     /// [`TaskContext::state`], which checks module state before falling back to global.
-    pub(crate) module_state: Arc<HashMap<String, crate::registry::StateMap>>,
+    pub(crate) module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
     /// Per-module pause flags. Keys are module names; values are `true` when that
     /// module has been explicitly paused via [`ModuleHandle::pause`].
     /// Initialized to `false` for every module at build time.
@@ -190,7 +190,7 @@ impl Scheduler {
         gate: Box<dyn gate::DispatchGate>,
         app_state: Arc<crate::registry::StateMap>,
         module_registry: Arc<crate::module::ModuleRegistry>,
-        module_state: Arc<HashMap<String, crate::registry::StateMap>>,
+        module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
     ) -> Self {
         let module_paused: HashMap<String, AtomicBool> = module_registry
             .entries()
