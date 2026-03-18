@@ -9,6 +9,9 @@ keywords = ["scheduler", "priority-queue", "task", "async"]
 categories = ["asynchronous", "concurrency"]
 repository = "https://github.com/deepjoy/taskmill"
 
+[lib]
+bench = false
+
 [features]
 default = ["sysinfo-monitor"]
 sysinfo-monitor = ["dep:sysinfo"]
