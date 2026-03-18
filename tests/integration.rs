@@ -2623,3 +2623,95 @@ async fn module_registry_stored_in_scheduler() {
         "media prefix should be 'media::'"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// P. Default Layering (Step 5)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Full 5-layer precedence chain exercised through `submit_typed()`:
+///
+/// Layer 1 (SubmitBuilder override) > Layer 3 (module defaults) >
+/// Layer 4 (TypedTask defaults) > Layer 5 (scheduler global defaults).
+///
+/// Layer 2 (explicit TaskSubmission field) is not relevant for `submit_typed()`
+/// since the submission is always built from the TypedTask.
+#[tokio::test]
+async fn submit_typed_five_layer_precedence_chain() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct LayeredTask;
+
+    impl taskmill::TypedTask for LayeredTask {
+        const TASK_TYPE: &'static str = "layered";
+        fn priority(&self) -> Priority {
+            Priority::HIGH // layer 4: should be overridden by module (layer 3)
+        }
+        fn group_key(&self) -> Option<String> {
+            Some("typed-group".into()) // layer 4: should be overridden by module
+        }
+        fn ttl(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_secs(7200)) // layer 4: overridden by module
+        }
+        fn tags(&self) -> std::collections::HashMap<String, String> {
+            [("source".into(), "typed".into())].into()
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .default_ttl(std::time::Duration::from_secs(14400)) // layer 5 (not reached)
+        .module(
+            Module::new("media")
+                .executor("layered", Arc::new(NoopExecutor))
+                .default_priority(Priority::BACKGROUND) // layer 3: overrides TypedTask HIGH
+                .default_group("module-group") // layer 3: overrides typed-group
+                .default_ttl(std::time::Duration::from_secs(10800)) // layer 3: 3 h
+                .default_tag("tier", "free"),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    let media = sched.module("media");
+
+    // Layer 1: SubmitBuilder overrides trump everything.
+    let outcome = media
+        .submit_typed(&LayeredTask)
+        .priority(Priority::REALTIME) // beats module's BACKGROUND
+        .ttl(std::time::Duration::from_secs(3600)) // beats module's 3 h
+        .await
+        .unwrap();
+
+    let task_id = outcome.id().unwrap();
+    let task = sched.task(task_id).await.unwrap().unwrap();
+
+    // Layer 1 wins for priority and ttl.
+    assert_eq!(task.priority, Priority::REALTIME, "layer 1 priority wins");
+    assert_eq!(task.ttl_seconds, Some(3600), "layer 1 ttl wins");
+
+    // Layer 3 (module) wins over layer 4 (TypedTask) for group.
+    assert_eq!(
+        task.group_key.as_deref(),
+        Some("module-group"),
+        "layer 3 group wins over TypedTask"
+    );
+
+    // Tags: all layers merge correctly.
+    assert_eq!(
+        task.tags.get("source").map(String::as_str),
+        Some("typed"),
+        "TypedTask tag preserved"
+    );
+    assert_eq!(
+        task.tags.get("tier").map(String::as_str),
+        Some("free"),
+        "module tag present"
+    );
+    assert_eq!(
+        task.tags.get("_module").map(String::as_str),
+        Some("media"),
+        "_module tag injected"
+    );
+
+    // task_type is prefixed by the module name.
+    assert_eq!(task.task_type, "media::layered");
+}

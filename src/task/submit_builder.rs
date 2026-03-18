@@ -7,10 +7,20 @@
 //!
 //! # Resolution order (highest → lowest priority)
 //!
-//! 1. Explicit [`SubmitBuilder`] override (set via chaining methods)
-//! 2. Fields explicitly set on the [`TaskSubmission`]
-//! 3. Module defaults (from the [`Module`](crate::module::Module) that owns the task type)
-//! 4. Scheduler global defaults (applied by the scheduler)
+//! ## `submit_typed()` path
+//!
+//! 1. [`SubmitBuilder`] per-call override (chained methods)
+//! 2. Module defaults — override TypedTask values when the module has an
+//!    explicit setting
+//! 3. [`TypedTask`](crate::TypedTask) trait method return values
+//! 4. Scheduler global defaults (applied inside `Scheduler::submit`)
+//!
+//! ## `submit()` path
+//!
+//! 1. [`SubmitBuilder`] per-call override (highest)
+//! 2. Fields explicitly set on the [`TaskSubmission`] (non-zero / non-`None`)
+//! 3. Module defaults (fill in zero/`None` submission fields)
+//! 4. Scheduler global defaults (applied inside `Scheduler::submit`)
 
 use std::collections::HashMap;
 use std::future::IntoFuture;
@@ -34,6 +44,20 @@ pub struct ModuleSubmitDefaults {
     pub group: Option<String>,
     pub ttl: Option<Duration>,
     /// Tags merged into every submission. Submission-level tags win on key conflicts.
+    pub tags: HashMap<String, String>,
+}
+
+/// [`TypedTask`](crate::TypedTask)-level defaults used in the 5-layer precedence
+/// chain for the `submit_typed()` path.
+///
+/// These hold the values returned by the `TypedTask` trait methods. In the
+/// chain they sit **below** module defaults — a module setting with an explicit
+/// value unconditionally wins over the corresponding TypedTask value.
+#[derive(Clone)]
+pub(crate) struct TypedTaskDefaults {
+    pub priority: Priority,
+    pub group: Option<String>,
+    pub ttl: Option<Duration>,
     pub tags: HashMap<String, String>,
 }
 
@@ -65,6 +89,13 @@ pub struct SubmitBuilder {
     module_name: String,
     /// Module-level defaults applied where the submission is at its zero value.
     module_defaults: ModuleSubmitDefaults,
+    /// Present only for the `submit_typed()` path. Stores the raw values
+    /// returned by `TypedTask` methods so that `resolve()` can apply module
+    /// defaults on top of them (module wins over TypedTask).
+    ///
+    /// `None` for the `submit()` path, where the `TaskSubmission` fields are
+    /// treated as explicit values that beat module defaults.
+    typed_defaults: Option<TypedTaskDefaults>,
     // ── Per-call override fields ─────────────────────────────────────────────
     // These are `Option` so they are applied only when explicitly set.
     override_priority: Option<Priority>,
@@ -93,6 +124,7 @@ impl SubmitBuilder {
             scheduler,
             module_name: module_name.into(),
             module_defaults,
+            typed_defaults: None,
             override_priority: None,
             override_group: None,
             override_key: None,
@@ -102,6 +134,18 @@ impl SubmitBuilder {
             override_tags: HashMap::new(),
             override_parent_id: None,
         }
+    }
+
+    /// Attach [`TypedTask`](crate::TypedTask) defaults for the 5-layer
+    /// precedence chain.
+    ///
+    /// Called internally by `ModuleHandle::submit_typed()`. Marks this builder
+    /// as being on the `submit_typed()` path so that `resolve()` applies module
+    /// defaults **on top of** TypedTask values rather than only filling in
+    /// zero/`None` fields.
+    pub(crate) fn with_typed_defaults(mut self, td: TypedTaskDefaults) -> Self {
+        self.typed_defaults = Some(td);
+        self
     }
 
     /// Override the task priority. Takes precedence over both the module
@@ -163,13 +207,25 @@ impl SubmitBuilder {
         self
     }
 
-    /// Apply module defaults and per-call overrides to the base submission,
-    /// returning the scheduler and the fully resolved `TaskSubmission`.
+    /// Apply all default layers and per-call overrides, returning the
+    /// scheduler and the fully resolved [`TaskSubmission`].
     ///
-    /// Applies fields in priority order:
-    /// 1. Per-call overrides (highest)
-    /// 2. Module defaults (where submission is at its zero/default value)
-    /// 3. Base `TaskSubmission` fields (lowest, already set by caller)
+    /// Two modes determined by whether [`with_typed_defaults`](Self::with_typed_defaults)
+    /// was called:
+    ///
+    /// **`submit_typed()` path** (typed_defaults present):
+    /// 1. TypedTask values are set as the base (layer 4).
+    /// 2. Module defaults override them where the module has an explicit
+    ///    setting (layer 3).
+    /// 3. SubmitBuilder per-call overrides trump everything (layer 1).
+    ///
+    /// **`submit()` path** (typed_defaults absent):
+    /// 1. Module defaults fill in only where the submission is at its
+    ///    zero/`None` value (layer 3 fills in layer 2 gaps).
+    /// 2. SubmitBuilder per-call overrides trump everything (layer 1).
+    ///
+    /// Layer 5 (Scheduler global defaults, e.g. global TTL) is applied later
+    /// inside `Scheduler::submit()`.
     fn resolve(self) -> (Scheduler, TaskSubmission) {
         let scheduler = self.scheduler;
         let mut sub = self.submission;
@@ -184,31 +240,58 @@ impl SubmitBuilder {
             }
         }
 
-        // ── 2. Apply module defaults where the submission is at its zero value ─
-        //
-        // Priority: treat `NORMAL` as "not explicitly set" — the same
-        // convention used by `BatchSubmission::build`.
-        if sub.priority == Priority::NORMAL {
+        // ── 2+3. Apply TypedTask defaults then module overrides ───────────────
+        if let Some(td) = self.typed_defaults {
+            // ── submit_typed() path ───────────────────────────────────────────
+            // TypedTask values are the baseline (layer 4). Module defaults
+            // unconditionally override them when the module has an explicit
+            // setting (layer 3).
+            sub.priority = td.priority;
+            sub.group_key = td.group;
+            sub.ttl = td.ttl;
+            // TypedTask tags are the base; module tags add new keys only.
+            sub.tags = td.tags;
+            for (k, v) in &self.module_defaults.tags {
+                sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
+            }
             if let Some(p) = self.module_defaults.priority {
                 sub.priority = p;
             }
-        }
-        if sub.group_key.is_none() {
             if let Some(g) = self.module_defaults.group {
                 sub.group_key = Some(g);
             }
-        }
-        if sub.ttl.is_none() {
             if let Some(t) = self.module_defaults.ttl {
                 sub.ttl = Some(t);
             }
-        }
-        // Module tags: add keys not already on the submission (submission wins).
-        for (k, v) in &self.module_defaults.tags {
-            sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
+        } else {
+            // ── submit() path ─────────────────────────────────────────────────
+            // Module defaults fill in only where the submission is at its
+            // zero/None value (submission explicit values beat module defaults).
+            //
+            // Priority: treat `NORMAL` as "not explicitly set" — the same
+            // convention used by `BatchSubmission::build`.
+            if sub.priority == Priority::NORMAL {
+                if let Some(p) = self.module_defaults.priority {
+                    sub.priority = p;
+                }
+            }
+            if sub.group_key.is_none() {
+                if let Some(g) = self.module_defaults.group {
+                    sub.group_key = Some(g);
+                }
+            }
+            if sub.ttl.is_none() {
+                if let Some(t) = self.module_defaults.ttl {
+                    sub.ttl = Some(t);
+                }
+            }
+            // Module tags: add keys not already on the submission (submission wins).
+            for (k, v) in &self.module_defaults.tags {
+                sub.tags.entry(k.clone()).or_insert_with(|| v.clone());
+            }
         }
 
-        // ── 3. Apply per-call overrides (highest priority) ───────────────────
+        // ── 4. Apply per-call overrides (layer 1 — always highest priority) ──
         if let Some(p) = self.override_priority {
             sub.priority = p;
         }
@@ -366,5 +449,147 @@ mod tests {
             .unwrap();
 
         assert_eq!(task.task_type, "media::thumbnail");
+    }
+
+    // ── Step 5: 5-layer precedence chain ─────────────────────────────────────
+
+    /// Layer 3 (module default) overrides layer 4 (TypedTask default).
+    ///
+    /// TypedTask priority=HIGH, module priority=BACKGROUND → BACKGROUND wins.
+    #[tokio::test]
+    async fn module_default_overrides_typed_task_priority() {
+        let scheduler = make_scheduler().await;
+        let defaults = ModuleSubmitDefaults {
+            priority: Some(Priority::BACKGROUND),
+            ..Default::default()
+        };
+        let typed_defaults = super::TypedTaskDefaults {
+            priority: Priority::HIGH,
+            group: None,
+            ttl: None,
+            tags: Default::default(),
+        };
+        let sub = TaskSubmission::new("task");
+
+        let outcome = SubmitBuilder::new(sub, scheduler.clone(), "media", defaults)
+            .with_typed_defaults(typed_defaults)
+            .await
+            .unwrap();
+
+        let task_id = outcome.id().unwrap();
+        let task = scheduler
+            .inner
+            .store
+            .task_by_id(task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.priority, Priority::BACKGROUND);
+    }
+
+    /// Layer 1 (SubmitBuilder override) wins over layer 3 (module default).
+    ///
+    /// Module priority=BACKGROUND, SubmitBuilder override=REALTIME → REALTIME wins.
+    #[tokio::test]
+    async fn submit_builder_override_wins_over_module_default_priority() {
+        let scheduler = make_scheduler().await;
+        let defaults = ModuleSubmitDefaults {
+            priority: Some(Priority::BACKGROUND),
+            ..Default::default()
+        };
+        let typed_defaults = super::TypedTaskDefaults {
+            priority: Priority::NORMAL,
+            group: None,
+            ttl: None,
+            tags: Default::default(),
+        };
+        let sub = TaskSubmission::new("task");
+
+        let outcome = SubmitBuilder::new(sub, scheduler.clone(), "media", defaults)
+            .with_typed_defaults(typed_defaults)
+            .priority(Priority::HIGH)
+            .await
+            .unwrap();
+
+        let task_id = outcome.id().unwrap();
+        let task = scheduler
+            .inner
+            .store
+            .task_by_id(task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.priority, Priority::HIGH);
+    }
+
+    /// Layer 2 (explicit TaskSubmission field) beats layer 3 (module default)
+    /// in the `submit()` path.
+    ///
+    /// Module group="api", submission group="gpu" → "gpu" wins.
+    #[tokio::test]
+    async fn submission_explicit_group_beats_module_default_in_submit_path() {
+        let scheduler = make_scheduler().await;
+        let defaults = ModuleSubmitDefaults {
+            group: Some("api".into()),
+            ..Default::default()
+        };
+        // submit() path: no typed_defaults, submission has explicit group.
+        let sub = TaskSubmission::new("task").group("gpu");
+
+        let outcome = SubmitBuilder::new(sub, scheduler.clone(), "media", defaults)
+            .await
+            .unwrap();
+
+        let task_id = outcome.id().unwrap();
+        let task = scheduler
+            .inner
+            .store
+            .task_by_id(task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.group_key.as_deref(), Some("gpu"));
+    }
+
+    /// Layer 5 (scheduler global TTL) applies when no other layer sets TTL.
+    #[tokio::test]
+    async fn global_ttl_applies_when_no_layer_sets_ttl() {
+        let store = crate::store::TaskStore::open_memory().await.unwrap();
+        let global_ttl_secs: i64 = 3600;
+        let scheduler = Scheduler::new(
+            store,
+            SchedulerConfig {
+                default_ttl: Some(std::time::Duration::from_secs(global_ttl_secs as u64)),
+                ..Default::default()
+            },
+            Arc::new(crate::registry::TaskTypeRegistry::new()),
+            crate::backpressure::CompositePressure::new(),
+            crate::backpressure::ThrottlePolicy::default_three_tier(),
+        );
+
+        // No TTL set at any layer.
+        let sub = TaskSubmission::new("task");
+        let outcome = SubmitBuilder::new(
+            sub,
+            scheduler.clone(),
+            "media",
+            ModuleSubmitDefaults::default(),
+        )
+        .await
+        .unwrap();
+
+        let task_id = outcome.id().unwrap();
+        let task = scheduler
+            .inner
+            .store
+            .task_by_id(task_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(task.ttl_seconds, Some(global_ttl_secs));
     }
 }

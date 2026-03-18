@@ -17,6 +17,7 @@ use crate::registry::{ErasedExecutor, TaskExecutor};
 use crate::scheduler::progress::{EstimatedProgress, TaskProgress};
 use crate::store::StoreError;
 use crate::task::retry::RetryPolicy;
+use crate::task::submit_builder::TypedTaskDefaults;
 use crate::task::{ModuleSubmitDefaults, SubmitBuilder};
 use crate::task::{
     SubmitOutcome, TaskHistoryRecord, TaskRecord, TaskStatus, TaskSubmission, TypedTask,
@@ -450,9 +451,37 @@ impl ModuleHandle {
     ///
     /// Serializes the task and wraps it in a [`SubmitBuilder`]. Bare `.await`
     /// applies module defaults; chain override methods for per-call overrides.
+    ///
+    /// Uses the 5-layer precedence chain: module defaults override TypedTask
+    /// values, and SubmitBuilder per-call overrides trump everything.
     pub fn submit_typed<T: TypedTask>(&self, task: &T) -> SubmitBuilder {
-        let sub = TaskSubmission::from_typed(task);
-        self.submit(sub)
+        // Build the base submission without the layered fields (priority, group,
+        // ttl, tags). Those go into TypedTaskDefaults so that resolve() can
+        // apply module defaults on top of them (module wins over TypedTask).
+        let mut sub = TaskSubmission::new(T::TASK_TYPE)
+            .payload_json(task)
+            .expected_io(task.expected_io())
+            .on_duplicate(task.on_duplicate())
+            .ttl_from(task.ttl_from());
+        if let Some(k) = task.key() {
+            sub = sub.key(k);
+        }
+        if let Some(l) = task.label() {
+            sub = sub.label(l);
+        }
+        if let Some(delay) = task.run_after() {
+            sub = sub.run_after(delay);
+        }
+        if let Some(sched) = task.recurring() {
+            sub = sub.recurring_schedule(sched);
+        }
+        let typed_defaults = TypedTaskDefaults {
+            priority: task.priority(),
+            group: task.group_key(),
+            ttl: task.ttl(),
+            tags: task.tags(),
+        };
+        self.submit(sub).with_typed_defaults(typed_defaults)
     }
 
     // ── Single-task operations ────────────────────────────────────
