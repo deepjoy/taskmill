@@ -385,7 +385,7 @@ impl SchedulerBuilder {
             );
         }
 
-        let module_registry = ModuleRegistry::new(module_entries);
+        let module_registry = Arc::new(ModuleRegistry::new(module_entries));
         let module_state = Arc::new(module_state_map);
 
         // Prepare resource monitoring reader early so NetworkPressure can

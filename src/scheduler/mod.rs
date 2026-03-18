@@ -99,7 +99,7 @@ pub(crate) struct SchedulerInner {
     /// Last time the expiry sweep ran.
     pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
     /// Registry of all registered modules (empty for schedulers built without the module API).
-    pub(crate) module_registry: crate::module::ModuleRegistry,
+    pub(crate) module_registry: Arc<crate::module::ModuleRegistry>,
     /// Per-module app state (module name → state map). Populated at build time from
     /// each module's `.app_state()` calls. Executors access it via
     /// [`TaskContext::state`], which checks module state before falling back to global.
@@ -177,7 +177,7 @@ impl Scheduler {
             registry,
             gate,
             Arc::new(crate::registry::StateMap::new()),
-            crate::module::ModuleRegistry::empty(),
+            Arc::new(crate::module::ModuleRegistry::empty()),
             Arc::new(HashMap::new()),
         )
     }
@@ -189,7 +189,7 @@ impl Scheduler {
         registry: Arc<TaskTypeRegistry>,
         gate: Box<dyn gate::DispatchGate>,
         app_state: Arc<crate::registry::StateMap>,
-        module_registry: crate::module::ModuleRegistry,
+        module_registry: Arc<crate::module::ModuleRegistry>,
         module_state: Arc<HashMap<String, crate::registry::StateMap>>,
     ) -> Self {
         let module_paused: HashMap<String, AtomicBool> = module_registry

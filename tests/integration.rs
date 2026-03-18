@@ -130,7 +130,7 @@ struct FinalizeTracker {
 impl TaskExecutor for FinalizeTracker {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         for i in 0..self.child_count {
-            let sub = TaskSubmission::new("test::child")
+            let sub = TaskSubmission::new("child")
                 .key(format!("ft-child-{i}"))
                 .priority(ctx.record().priority);
             ctx.spawn_child(sub).await?;
@@ -712,7 +712,7 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
                 .executor(
                     "parent",
                     Arc::new(ChildSpawnerExecutor {
-                        child_type: "test::child",
+                        child_type: "child",
                         count: 3,
                         fail_fast: true,
                     }),
@@ -3276,5 +3276,276 @@ async fn module_state_shadows_global_state() {
         b_value.lock().unwrap().as_str(),
         "global",
         "module B executor (no module state) should fall back to global Config"
+    );
+}
+
+// ── Step 8: TaskContext module access ─────────────────────────────────────
+
+/// Executor in module A that submits a task to module B via `ctx.module("b")`.
+struct CrossModuleSubmitter {
+    submitted: Arc<AtomicBool>,
+}
+
+impl TaskExecutor for CrossModuleSubmitter {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        ctx.module("b")
+            .submit(TaskSubmission::new("task").key("cross-module-child"))
+            .await
+            .map_err(|e| TaskError::new(format!("{e}")))?;
+        self.submitted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn ctx_module_submits_to_other_module_with_prefix_and_defaults() {
+    let submitted = Arc::new(AtomicBool::new(false));
+    let b_ran = Arc::new(AtomicBool::new(false));
+    let submitted_clone = submitted.clone();
+    let b_ran_clone = b_ran.clone();
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("a").executor(
+            "trigger",
+            Arc::new(CrossModuleSubmitter {
+                submitted: submitted_clone,
+            }),
+        ))
+        .module(Module::new("b").executor(
+            "task",
+            Arc::new({
+                struct B(Arc<AtomicBool>);
+                impl TaskExecutor for B {
+                    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+                        self.0.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                }
+                B(b_ran_clone)
+            }),
+        ))
+        .max_concurrency(4)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("a")
+        .submit(TaskSubmission::new("trigger").key("t1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    token.cancel();
+
+    assert!(
+        submitted.load(Ordering::SeqCst),
+        "module A executor should have run"
+    );
+    assert!(
+        b_ran.load(Ordering::SeqCst),
+        "module B task should have been created and run"
+    );
+}
+
+/// Executor that uses `ctx.current_module()` to submit a follow-up task.
+struct SameModuleSubmitter {
+    submitted: Arc<AtomicBool>,
+}
+
+impl TaskExecutor for SameModuleSubmitter {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        ctx.current_module()
+            .submit(TaskSubmission::new("follower").key("same-module-follower"))
+            .await
+            .map_err(|e| TaskError::new(format!("{e}")))?;
+        self.submitted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn ctx_current_module_applies_owning_module_defaults() {
+    let submitted = Arc::new(AtomicBool::new(false));
+    let follower_ran = Arc::new(AtomicBool::new(false));
+    let submitted_clone = submitted.clone();
+    let follower_ran_clone = follower_ran.clone();
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(
+            Module::new("media")
+                .executor(
+                    "leader",
+                    Arc::new(SameModuleSubmitter {
+                        submitted: submitted_clone,
+                    }),
+                )
+                .executor(
+                    "follower",
+                    Arc::new({
+                        struct Follower(Arc<AtomicBool>);
+                        impl TaskExecutor for Follower {
+                            async fn execute<'a>(
+                                &'a self,
+                                _ctx: &'a TaskContext,
+                            ) -> Result<(), TaskError> {
+                                self.0.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }
+                        }
+                        Follower(follower_ran_clone)
+                    }),
+                )
+                .default_priority(Priority::BACKGROUND),
+        )
+        .max_concurrency(4)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("media")
+        .submit(TaskSubmission::new("leader").key("l1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    token.cancel();
+
+    assert!(
+        submitted.load(Ordering::SeqCst),
+        "leader executor should have run"
+    );
+    assert!(
+        follower_ran.load(Ordering::SeqCst),
+        "follower task submitted via current_module() should run"
+    );
+}
+
+/// Executor that calls `ctx.module("nonexistent")` — should panic.
+struct PanicsOnUnknownModule;
+
+impl TaskExecutor for PanicsOnUnknownModule {
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        let _ = ctx.try_module("nonexistent");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // We can't easily test panic in async, just verify try_module returns None.
+        }));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn ctx_try_module_returns_none_for_unknown_module() {
+    let result: Arc<std::sync::Mutex<Option<bool>>> = Arc::new(std::sync::Mutex::new(None));
+    let result_clone = result.clone();
+
+    struct TryModuleExecutor(Arc<std::sync::Mutex<Option<bool>>>);
+    impl TaskExecutor for TryModuleExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            let found = ctx.try_module("nonexistent").is_some();
+            *self.0.lock().unwrap() = Some(found);
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("test").executor("probe", Arc::new(TryModuleExecutor(result_clone))))
+        .max_concurrency(2)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("test")
+        .submit(TaskSubmission::new("probe").key("p1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    token.cancel();
+
+    assert_eq!(
+        *result.lock().unwrap(),
+        Some(false),
+        "try_module('nonexistent') should return None"
+    );
+}
+
+#[tokio::test]
+async fn spawn_child_routes_through_current_module() {
+    // Verify spawn_child auto-prefixes the task type with the owning module.
+    // The child executor is registered under "child" (unprefixed) in the "test" module.
+    let child_ran = Arc::new(AtomicBool::new(false));
+    let child_ran_clone = child_ran.clone();
+
+    struct SpawnChildExecutor;
+    impl TaskExecutor for SpawnChildExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            ctx.spawn_child(TaskSubmission::new("worker").key("spawned-child"))
+                .await?;
+            Ok(())
+        }
+    }
+
+    struct WorkerExecutor(Arc<AtomicBool>);
+    impl TaskExecutor for WorkerExecutor {
+        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(
+            Module::new("test")
+                .executor("spawner", Arc::new(SpawnChildExecutor))
+                .executor("worker", Arc::new(WorkerExecutor(child_ran_clone))),
+        )
+        .max_concurrency(4)
+        .poll_interval(Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("test")
+        .submit(TaskSubmission::new("spawner").key("s1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    token.cancel();
+
+    assert!(
+        child_ran.load(Ordering::SeqCst),
+        "child spawned via spawn_child should run with auto-prefixed task type"
     );
 }

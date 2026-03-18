@@ -89,6 +89,17 @@ impl ChildSpawner {
         }
     }
 
+    /// Prepare a child submission: sets `parent_id`, inherits TTL, and inherits tags.
+    ///
+    /// Returns the modified submission without submitting it. Used by
+    /// [`TaskContext::spawn_child`] when routing through a module handle.
+    pub(crate) fn prepare(&self, mut sub: TaskSubmission) -> TaskSubmission {
+        sub.parent_id = Some(self.parent_id);
+        self.inherit_ttl(&mut sub);
+        self.inherit_tags(&mut sub);
+        sub
+    }
+
     /// Submit a single child task. Sets `parent_id` automatically.
     pub async fn spawn(&self, mut sub: TaskSubmission) -> Result<SubmitOutcome, StoreError> {
         sub.parent_id = Some(self.parent_id);

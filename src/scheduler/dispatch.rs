@@ -353,6 +353,9 @@ pub(crate) struct SpawnContext {
     pub module_running: Arc<HashMap<String, AtomicUsize>>,
     /// Per-module state maps. A snapshot for the task's module is taken at dispatch time.
     pub module_state: Arc<HashMap<String, StateMap>>,
+    /// Registry of all registered modules — shared with spawned tasks so they can
+    /// construct [`ModuleHandle`](crate::module::ModuleHandle) instances.
+    pub module_registry: Arc<crate::module::ModuleRegistry>,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -377,7 +380,15 @@ pub(crate) async fn spawn_task(
         cancel_hook_timeout: _,
         module_running,
         module_state,
+        module_registry,
     } = ctx;
+
+    // Extract the owning module name from the task type prefix (e.g. "media" from "media::thumb").
+    let owning_module: String = task
+        .task_type
+        .split_once("::")
+        .map(|(n, _)| n.to_string())
+        .unwrap_or_default();
 
     // Snapshot the per-module state for this task's owning module.
     let module_state_snapshot: StateSnapshot =
@@ -442,6 +453,8 @@ pub(crate) async fn spawn_task(
         module_state: module_state_snapshot,
         child_spawner: Some(child_spawner),
         io: io.clone(),
+        module_registry,
+        owning_module,
     };
 
     // Emit dispatched event.

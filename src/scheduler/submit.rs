@@ -471,6 +471,12 @@ impl Scheduler {
         let scheduler = self.downgrade();
         let event_tx = self.inner.event_tx.clone();
         let active = self.inner.active.clone();
+        let module_registry = Arc::clone(&self.inner.module_registry);
+        let owning_module: String = record
+            .task_type
+            .split_once("::")
+            .map(|(n, _)| n.to_string())
+            .unwrap_or_default();
 
         tokio::spawn(async move {
             let fresh_token = CancellationToken::new();
@@ -489,6 +495,8 @@ impl Scheduler {
                 module_state: StateSnapshot::default(),
                 child_spawner: None,
                 io,
+                module_registry,
+                owning_module,
             };
 
             match tokio::time::timeout(timeout, executor.on_cancel_erased(&ctx)).await {
