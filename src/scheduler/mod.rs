@@ -97,6 +97,8 @@ pub(crate) struct SchedulerInner {
     pub(crate) expiry_sweep_interval: Option<Duration>,
     /// Last time the expiry sweep ran.
     pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
+    /// Registry of all registered modules (empty for schedulers built without the module API).
+    pub(crate) module_registry: crate::module::ModuleRegistry,
 }
 
 /// IO-aware priority scheduler.
@@ -158,6 +160,7 @@ impl Scheduler {
             registry,
             gate,
             Arc::new(crate::registry::StateMap::new()),
+            crate::module::ModuleRegistry::empty(),
         )
     }
 
@@ -168,6 +171,7 @@ impl Scheduler {
         registry: Arc<TaskTypeRegistry>,
         gate: Box<dyn gate::DispatchGate>,
         app_state: Arc<crate::registry::StateMap>,
+        module_registry: crate::module::ModuleRegistry,
     ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
@@ -197,6 +201,7 @@ impl Scheduler {
                 default_ttl: config.default_ttl,
                 expiry_sweep_interval: config.expiry_sweep_interval,
                 last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
+                module_registry,
             }),
         }
     }
@@ -204,6 +209,13 @@ impl Scheduler {
     /// Create a [`SchedulerBuilder`] for ergonomic construction.
     pub fn builder() -> SchedulerBuilder {
         SchedulerBuilder::new()
+    }
+
+    /// Returns the module registry for this scheduler.
+    ///
+    /// Contains metadata for all modules registered at build time.
+    pub fn module_registry(&self) -> &crate::module::ModuleRegistry {
+        &self.inner.module_registry
     }
 
     /// Subscribe to scheduler lifecycle events.

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    PressureSource, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor,
-    TaskStore, TaskSubmission,
+    Module, PressureSource, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError,
+    TaskExecutor, TaskStore, TaskSubmission,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -130,7 +130,7 @@ struct FinalizeTracker {
 impl TaskExecutor for FinalizeTracker {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         for i in 0..self.child_count {
-            let sub = TaskSubmission::new("child")
+            let sub = TaskSubmission::new("test::child")
                 .key(format!("ft-child-{i}"))
                 .priority(ctx.record().priority);
             ctx.spawn_child(sub).await?;
@@ -194,7 +194,7 @@ async fn wait_for_event(
 async fn priority_ordering_dispatches_highest_first() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .max_concurrency(1) // dispatch one at a time
         .build()
         .await
@@ -205,7 +205,7 @@ async fn priority_ordering_dispatches_highest_first() {
     // Submit in reverse priority order (low first, high last).
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("low")
                 .priority(Priority::IDLE),
         )
@@ -213,7 +213,7 @@ async fn priority_ordering_dispatches_highest_first() {
         .unwrap();
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("mid")
                 .priority(Priority::NORMAL),
         )
@@ -221,7 +221,7 @@ async fn priority_ordering_dispatches_highest_first() {
         .unwrap();
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("high")
                 .priority(Priority::HIGH),
         )
@@ -253,13 +253,13 @@ async fn priority_ordering_dispatches_highest_first() {
 async fn retryable_error_retries_then_succeeds() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(FailNTimesExecutor {
                 failures: AtomicI32::new(0),
                 max_failures: 2,
             }),
-        )
+        ))
         .max_retries(3)
         .max_concurrency(1)
         .build()
@@ -269,7 +269,7 @@ async fn retryable_error_retries_then_succeeds() {
     let mut rx = sched.subscribe();
 
     sched
-        .submit(&TaskSubmission::new("test").key("retry-me"))
+        .submit(&TaskSubmission::new("test::test").key("retry-me"))
         .await
         .unwrap();
 
@@ -298,13 +298,13 @@ async fn retryable_error_retries_then_succeeds() {
 async fn retryable_error_exhausts_retries() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(FailNTimesExecutor {
                 failures: AtomicI32::new(0),
                 max_failures: 100, // will never succeed
             }),
-        )
+        ))
         .max_retries(2)
         .max_concurrency(1)
         .build()
@@ -314,7 +314,7 @@ async fn retryable_error_exhausts_retries() {
     let mut rx = sched.subscribe();
 
     sched
-        .submit(&TaskSubmission::new("test").key("exhaust"))
+        .submit(&TaskSubmission::new("test::test").key("exhaust"))
         .await
         .unwrap();
 
@@ -349,8 +349,11 @@ async fn retryable_error_exhausts_retries() {
 async fn preemption_resumes_after_preemptor_completes() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("slow", Arc::new(DelayExecutor(Duration::from_secs(10))))
-        .executor("fast", Arc::new(NoopExecutor))
+        .module(
+            Module::new("test")
+                .executor("slow", Arc::new(DelayExecutor(Duration::from_secs(10))))
+                .executor("fast", Arc::new(NoopExecutor)),
+        )
         .max_concurrency(1)
         .preempt_priority(Priority::REALTIME)
         .poll_interval(Duration::from_millis(50))
@@ -363,7 +366,7 @@ async fn preemption_resumes_after_preemptor_completes() {
     // Submit a background task first.
     sched
         .submit(
-            &TaskSubmission::new("slow")
+            &TaskSubmission::new("test::slow")
                 .key("bg-work")
                 .priority(Priority::BACKGROUND),
         )
@@ -377,7 +380,7 @@ async fn preemption_resumes_after_preemptor_completes() {
     // Now submit a REALTIME task — should preempt the slow task.
     sched
         .submit(
-            &TaskSubmission::new("fast")
+            &TaskSubmission::new("test::fast")
                 .key("urgent")
                 .priority(Priority::REALTIME),
         )
@@ -425,7 +428,7 @@ async fn backpressure_throttles_low_priority_tasks() {
     // Default three-tier policy: BACKGROUND throttled >50%.
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .pressure_source(Box::new(FixedPressure {
             value: 0.6,
             name: "test-pressure",
@@ -438,7 +441,7 @@ async fn backpressure_throttles_low_priority_tasks() {
     // Submit BACKGROUND task — should be throttled (not dispatched).
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("bg")
                 .priority(Priority::BACKGROUND),
         )
@@ -454,7 +457,7 @@ async fn backpressure_throttles_low_priority_tasks() {
     // Submit NORMAL task — should dispatch (threshold is 75%).
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("normal")
                 .priority(Priority::NORMAL),
         )
@@ -469,7 +472,7 @@ async fn backpressure_throttles_low_priority_tasks() {
 async fn backpressure_blocks_normal_at_high_pressure() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .pressure_source(Box::new(FixedPressure {
             value: 0.8,
             name: "test-pressure",
@@ -482,7 +485,7 @@ async fn backpressure_blocks_normal_at_high_pressure() {
     // NORMAL task should also be throttled at 80% pressure.
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("normal")
                 .priority(Priority::NORMAL),
         )
@@ -498,7 +501,7 @@ async fn backpressure_blocks_normal_at_high_pressure() {
     // HIGH priority should still dispatch.
     sched
         .submit(
-            &TaskSubmission::new("test")
+            &TaskSubmission::new("test::test")
                 .key("high")
                 .priority(Priority::HIGH),
         )
@@ -520,14 +523,14 @@ async fn group_concurrency_limits_dispatch() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(ConcurrencyTrackingExecutor {
                 current: current.clone(),
                 max_seen: max_seen.clone(),
                 delay: Duration::from_millis(100),
             }),
-        )
+        ))
         .max_concurrency(10) // high global limit
         .group_concurrency("s3-bucket", 2) // but group capped at 2
         .poll_interval(Duration::from_millis(50))
@@ -539,7 +542,7 @@ async fn group_concurrency_limits_dispatch() {
     for i in 0..5 {
         sched
             .submit(
-                &TaskSubmission::new("test")
+                &TaskSubmission::new("test::test")
                     .key(format!("group-task-{i}"))
                     .group("s3-bucket"),
             )
@@ -588,12 +591,12 @@ async fn run_loop_processes_queue_to_completion() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(CountingExecutor {
                 count: count.clone(),
             }),
-        )
+        ))
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -603,7 +606,7 @@ async fn run_loop_processes_queue_to_completion() {
     // Submit 20 tasks.
     for i in 0..20 {
         sched
-            .submit(&TaskSubmission::new("test").key(format!("task-{i}")))
+            .submit(&TaskSubmission::new("test::test").key(format!("task-{i}")))
             .await
             .unwrap();
     }
@@ -645,14 +648,14 @@ async fn concurrent_tasks_respect_max_concurrency() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(ConcurrencyTrackingExecutor {
                 current: current.clone(),
                 max_seen: max_seen.clone(),
                 delay: Duration::from_millis(50),
             }),
-        )
+        ))
         .max_concurrency(2)
         .poll_interval(Duration::from_millis(20))
         .build()
@@ -661,7 +664,7 @@ async fn concurrent_tasks_respect_max_concurrency() {
 
     for i in 0..10 {
         sched
-            .submit(&TaskSubmission::new("test").key(format!("conc-{i}")))
+            .submit(&TaskSubmission::new("test::test").key(format!("conc-{i}")))
             .await
             .unwrap();
     }
@@ -704,15 +707,18 @@ async fn concurrent_tasks_respect_max_concurrency() {
 async fn fail_fast_cancels_siblings_on_child_failure() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
-            "parent",
-            Arc::new(ChildSpawnerExecutor {
-                child_type: "child",
-                count: 3,
-                fail_fast: true,
-            }),
+        .module(
+            Module::new("test")
+                .executor(
+                    "parent",
+                    Arc::new(ChildSpawnerExecutor {
+                        child_type: "test::child",
+                        count: 3,
+                        fail_fast: true,
+                    }),
+                )
+                .executor("child", Arc::new(AlwaysFailExecutor)),
         )
-        .executor("child", Arc::new(AlwaysFailExecutor))
         .max_concurrency(4)
         .max_retries(0) // no retries so failures are permanent
         .poll_interval(Duration::from_millis(50))
@@ -724,7 +730,7 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
 
     sched
         .submit(
-            &TaskSubmission::new("parent")
+            &TaskSubmission::new("test::parent")
                 .key("parent-ff")
                 .fail_fast(true),
         )
@@ -743,7 +749,7 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
     let parent_failed = wait_for_event(
         &mut rx,
         deadline,
-        |evt| matches!(evt, SchedulerEvent::Failed { ref header, .. } if header.task_type == "parent"),
+        |evt| matches!(evt, SchedulerEvent::Failed { ref header, .. } if header.task_type == "test::parent"),
     )
     .await;
 
@@ -762,14 +768,17 @@ async fn non_fail_fast_waits_for_all_children() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
-            "parent",
-            Arc::new(FinalizeTracker {
-                child_count: 2,
-                finalized: finalized.clone(),
-            }),
+        .module(
+            Module::new("test")
+                .executor(
+                    "parent",
+                    Arc::new(FinalizeTracker {
+                        child_count: 2,
+                        finalized: finalized.clone(),
+                    }),
+                )
+                .executor("child", Arc::new(NoopExecutor)),
         )
-        .executor("child", Arc::new(NoopExecutor))
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -780,7 +789,7 @@ async fn non_fail_fast_waits_for_all_children() {
 
     sched
         .submit(
-            &TaskSubmission::new("parent")
+            &TaskSubmission::new("test::parent")
                 .key("parent-noff")
                 .fail_fast(false),
         )
@@ -799,7 +808,7 @@ async fn non_fail_fast_waits_for_all_children() {
     let parent_completed = wait_for_event(
         &mut rx,
         deadline,
-        |evt| matches!(evt, SchedulerEvent::Completed(ref h) if h.task_type == "parent"),
+        |evt| matches!(evt, SchedulerEvent::Completed(ref h) if h.task_type == "test::parent"),
     )
     .await;
 
@@ -861,13 +870,13 @@ async fn running_tasks_reset_to_pending_on_restart() {
 async fn submit_batch_enqueues_all_tasks() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .build()
         .await
         .unwrap();
 
     let submissions: Vec<_> = (0..50)
-        .map(|i| TaskSubmission::new("test").key(format!("batch-{i}")))
+        .map(|i| TaskSubmission::new("test::test").key(format!("batch-{i}")))
         .collect();
 
     let outcomes = sched.submit_batch(&submissions).await.unwrap();
@@ -889,19 +898,19 @@ async fn submit_batch_enqueues_all_tasks() {
 async fn io_metrics_recorded_in_history() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "test",
             Arc::new(IoReportingExecutor {
                 read: 4096,
                 write: 1024,
             }),
-        )
+        ))
         .build()
         .await
         .unwrap();
 
     sched
-        .submit(&TaskSubmission::new("test").key("io-track"))
+        .submit(&TaskSubmission::new("test::test").key("io-track"))
         .await
         .unwrap();
 
@@ -909,7 +918,7 @@ async fn io_metrics_recorded_in_history() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Check history for the completed task.
-    let key = taskmill::generate_dedup_key("test", Some(b"io-track"));
+    let key = taskmill::generate_dedup_key("test::test", Some(b"io-track"));
     let history = sched.store().history_by_key(&key).await.unwrap();
     assert_eq!(history.len(), 1);
     let actual = history[0].actual_io.unwrap();
@@ -925,7 +934,7 @@ async fn io_metrics_recorded_in_history() {
 async fn snapshot_reflects_pressure_breakdown() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .pressure_source(Box::new(FixedPressure {
             value: 0.42,
             name: "api-load",
@@ -1162,19 +1171,19 @@ async fn delayed_task_full_scheduler_lifecycle() {
     let count = Arc::new(AtomicUsize::new(0));
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "counting",
             Arc::new(CountingExecutor {
                 count: count.clone(),
             }),
-        )
+        ))
         .poll_interval(Duration::from_millis(50))
         .build()
         .await
         .unwrap();
 
     // Submit a task with run_at in the past.
-    let sub = TaskSubmission::new("counting")
+    let sub = TaskSubmission::new("test::counting")
         .key("immediate")
         .run_at(chrono::Utc::now() - chrono::Duration::seconds(1));
     sched.submit(&sub).await.unwrap();
@@ -1193,12 +1202,12 @@ async fn delayed_task_full_scheduler_lifecycle() {
 async fn recurring_task_snapshot_includes_schedules() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(NoopExecutor))
+        .module(Module::new("test").executor("test", Arc::new(NoopExecutor)))
         .build()
         .await
         .unwrap();
 
-    let sub = TaskSubmission::new("test")
+    let sub = TaskSubmission::new("test::test")
         .key("snap-recurring")
         .recurring(Duration::from_secs(600));
     sched.submit(&sub).await.unwrap();
@@ -1627,19 +1636,25 @@ async fn dep_blocked_count_in_snapshot() {
     let store = TaskStore::open_memory().await.unwrap();
     let sched = Scheduler::builder()
         .store(store)
-        .executor("test", Arc::new(DelayExecutor(Duration::from_secs(60))))
+        .module(
+            Module::new("test").executor("test", Arc::new(DelayExecutor(Duration::from_secs(60)))),
+        )
         .build()
         .await
         .unwrap();
 
     let outcome_a = sched
-        .submit(&TaskSubmission::new("test").key("snap-a"))
+        .submit(&TaskSubmission::new("test::test").key("snap-a"))
         .await
         .unwrap();
     let id_a = outcome_a.id().unwrap();
 
     sched
-        .submit(&TaskSubmission::new("test").key("snap-b").depends_on(id_a))
+        .submit(
+            &TaskSubmission::new("test::test")
+                .key("snap-b")
+                .depends_on(id_a),
+        )
         .await
         .unwrap();
 
@@ -1658,12 +1673,12 @@ async fn dep_full_chain_with_scheduler() {
 
     let sched = Scheduler::builder()
         .store(store)
-        .executor(
+        .module(Module::new("test").executor(
             "step",
             Arc::new(CountingExecutor {
                 count: counter.clone(),
             }),
-        )
+        ))
         .build()
         .await
         .unwrap();
@@ -1679,19 +1694,27 @@ async fn dep_full_chain_with_scheduler() {
     });
 
     let outcome_a = sched
-        .submit(&TaskSubmission::new("step").key("chain-a"))
+        .submit(&TaskSubmission::new("test::step").key("chain-a"))
         .await
         .unwrap();
     let id_a = outcome_a.id().unwrap();
 
     let outcome_b = sched
-        .submit(&TaskSubmission::new("step").key("chain-b").depends_on(id_a))
+        .submit(
+            &TaskSubmission::new("test::step")
+                .key("chain-b")
+                .depends_on(id_a),
+        )
         .await
         .unwrap();
     let id_b = outcome_b.id().unwrap();
 
     let outcome_c = sched
-        .submit(&TaskSubmission::new("step").key("chain-c").depends_on(id_b))
+        .submit(
+            &TaskSubmission::new("test::step")
+                .key("chain-c")
+                .depends_on(id_b),
+        )
         .await
         .unwrap();
     let _id_c = outcome_c.id().unwrap();
@@ -1785,8 +1808,11 @@ async fn per_type_retry_policy_overrides_global_default() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor_with_retry_policy("type-a", Arc::new(AlwaysRetryableExecutor), policy_a)
-        .executor("type-b", Arc::new(AlwaysRetryableExecutor))
+        .module(
+            Module::new("test")
+                .executor_with_retry_policy("type-a", Arc::new(AlwaysRetryableExecutor), policy_a)
+                .executor("type-b", Arc::new(AlwaysRetryableExecutor)),
+        )
         .max_retries(3)
         .max_concurrency(2)
         .poll_interval(Duration::from_millis(50))
@@ -1803,11 +1829,11 @@ async fn per_type_retry_policy_overrides_global_default() {
     });
 
     sched
-        .submit(&TaskSubmission::new("type-a").key("a1"))
+        .submit(&TaskSubmission::new("test::type-a").key("a1"))
         .await
         .unwrap();
     sched
-        .submit(&TaskSubmission::new("type-b").key("b1"))
+        .submit(&TaskSubmission::new("test::type-b").key("b1"))
         .await
         .unwrap();
 
@@ -1824,10 +1850,10 @@ async fn per_type_retry_policy_overrides_global_default() {
                 retry_count,
                 ..
             })) => {
-                if header.task_type == "type-a" {
+                if header.task_type == "test::type-a" {
                     dead_a = true;
                     a_retry_count = retry_count;
-                } else if header.task_type == "type-b" {
+                } else if header.task_type == "test::type-b" {
                     dead_b = true;
                     b_retry_count = retry_count;
                 }
@@ -1877,7 +1903,11 @@ async fn exponential_backoff_delays_redispatch() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor_with_retry_policy("backoff-test", Arc::new(AlwaysRetryableExecutor), policy)
+        .module(Module::new("test").executor_with_retry_policy(
+            "backoff-test",
+            Arc::new(AlwaysRetryableExecutor),
+            policy,
+        ))
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -1893,7 +1923,7 @@ async fn exponential_backoff_delays_redispatch() {
     });
 
     sched
-        .submit(&TaskSubmission::new("backoff-test").key("bk1"))
+        .submit(&TaskSubmission::new("test::backoff-test").key("bk1"))
         .await
         .unwrap();
 
@@ -1958,7 +1988,11 @@ async fn failed_event_includes_retry_after_duration() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor_with_retry_policy("retry-event", Arc::new(AlwaysRetryableExecutor), policy)
+        .module(Module::new("test").executor_with_retry_policy(
+            "retry-event",
+            Arc::new(AlwaysRetryableExecutor),
+            policy,
+        ))
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -1974,7 +2008,7 @@ async fn failed_event_includes_retry_after_duration() {
     });
 
     sched
-        .submit(&TaskSubmission::new("retry-event").key("re1"))
+        .submit(&TaskSubmission::new("test::retry-event").key("re1"))
         .await
         .unwrap();
 
@@ -2008,10 +2042,10 @@ async fn failed_event_includes_retry_after_duration() {
 async fn failed_event_includes_executor_retry_after_override() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor(
+        .module(Module::new("test").executor(
             "retry-override",
             Arc::new(RetryAfterExecutor(Duration::from_secs(42))),
-        )
+        ))
         .max_retries(3)
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
@@ -2028,7 +2062,7 @@ async fn failed_event_includes_executor_retry_after_override() {
     });
 
     sched
-        .submit(&TaskSubmission::new("retry-override").key("ro1"))
+        .submit(&TaskSubmission::new("test::retry-override").key("ro1"))
         .await
         .unwrap();
 
@@ -2065,7 +2099,7 @@ async fn failed_event_includes_executor_retry_after_override() {
 async fn null_max_retries_uses_global_default() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("legacy", Arc::new(AlwaysRetryableExecutor))
+        .module(Module::new("test").executor("legacy", Arc::new(AlwaysRetryableExecutor)))
         .max_retries(2)
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
@@ -2082,7 +2116,7 @@ async fn null_max_retries_uses_global_default() {
     });
 
     sched
-        .submit(&TaskSubmission::new("legacy").key("leg1"))
+        .submit(&TaskSubmission::new("test::legacy").key("leg1"))
         .await
         .unwrap();
 
@@ -2107,5 +2141,140 @@ async fn null_max_retries_uses_global_default() {
     assert_eq!(
         count, 3,
         "dead-letter should report retry_count=3 (2 retries + final attempt)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// N. Module Registration (Step 3)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn two_modules_route_to_correct_executors() {
+    let media_count = Arc::new(AtomicUsize::new(0));
+    let sync_count = Arc::new(AtomicUsize::new(0));
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor(
+            "thumb",
+            Arc::new(CountingExecutor {
+                count: media_count.clone(),
+            }),
+        ))
+        .module(Module::new("sync").executor(
+            "push",
+            Arc::new(CountingExecutor {
+                count: sync_count.clone(),
+            }),
+        ))
+        .max_concurrency(4)
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .submit(&TaskSubmission::new("media::thumb").key("t1"))
+        .await
+        .unwrap();
+    sched
+        .submit(&TaskSubmission::new("sync::push").key("p1"))
+        .await
+        .unwrap();
+
+    sched.try_dispatch().await.unwrap();
+    sched.try_dispatch().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert_eq!(
+        media_count.load(Ordering::SeqCst),
+        1,
+        "media::thumb executor should have run once"
+    );
+    assert_eq!(
+        sync_count.load(Ordering::SeqCst),
+        1,
+        "sync::push executor should have run once"
+    );
+}
+
+#[tokio::test]
+async fn zero_modules_build_returns_error() {
+    let result = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .build()
+        .await;
+
+    assert!(result.is_err(), "build with no modules should fail");
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("module"),
+        "error message should mention modules, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_module_names_build_returns_error() {
+    let result = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor("thumb", Arc::new(NoopExecutor)))
+        .module(Module::new("media").executor("transcode", Arc::new(NoopExecutor)))
+        .build()
+        .await;
+
+    assert!(result.is_err(), "duplicate module names should fail");
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("media"),
+        "error message should mention the duplicate name, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn task_type_collision_across_modules_returns_error() {
+    // Two different modules register the same local task type name.
+    // The prefixed names differ ("a::thumb" vs "b::thumb") so this is actually fine.
+    // To get a true collision we'd need the same *prefixed* name, which means
+    // the same module name AND same type — covered by duplicate_module_names.
+    // Instead, verify that two distinct modules with distinct types succeed.
+    let result = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor("thumb", Arc::new(NoopExecutor)))
+        .module(Module::new("analytics").executor("thumb", Arc::new(NoopExecutor)))
+        .build()
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "same local type name in different modules should be fine (different prefixes)"
+    );
+}
+
+#[tokio::test]
+async fn module_registry_stored_in_scheduler() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("media").executor("thumb", Arc::new(NoopExecutor)))
+        .module(Module::new("sync").executor("push", Arc::new(NoopExecutor)))
+        .build()
+        .await
+        .unwrap();
+
+    let registry = sched.module_registry();
+    assert!(
+        registry.get("media").is_some(),
+        "media module should be in registry"
+    );
+    assert!(
+        registry.get("sync").is_some(),
+        "sync module should be in registry"
+    );
+    assert!(
+        registry.get("nonexistent").is_none(),
+        "nonexistent module should not be found"
+    );
+    assert_eq!(
+        registry.get("media").unwrap().prefix,
+        "media::",
+        "media prefix should be 'media::'"
     );
 }

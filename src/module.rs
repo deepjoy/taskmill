@@ -139,6 +139,42 @@ impl Module {
         self
     }
 
+    /// Register a named executor with both a per-type TTL and a retry policy.
+    pub fn executor_with_options<E: TaskExecutor>(
+        mut self,
+        task_type: impl Into<String>,
+        executor: Arc<E>,
+        ttl: Option<Duration>,
+        retry_policy: Option<RetryPolicy>,
+    ) -> Self {
+        self.executors.push(ModuleExecutor {
+            task_type: task_type.into(),
+            executor: executor as Arc<dyn ErasedExecutor>,
+            options: ExecutorOptions { ttl, retry_policy },
+        });
+        self
+    }
+
+    /// Register a named executor with a per-type default TTL.
+    pub fn executor_with_ttl<E: TaskExecutor>(
+        self,
+        task_type: impl Into<String>,
+        executor: Arc<E>,
+        ttl: Duration,
+    ) -> Self {
+        self.executor_with_options(task_type, executor, Some(ttl), None)
+    }
+
+    /// Register a named executor with a per-type retry policy.
+    pub fn executor_with_retry_policy<E: TaskExecutor>(
+        self,
+        task_type: impl Into<String>,
+        executor: Arc<E>,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        self.executor_with_options(task_type, executor, None, Some(retry_policy))
+    }
+
     /// Set the module-wide default priority applied to all tasks submitted
     /// through this module's handle (unless overridden per-submission).
     pub fn default_priority(mut self, priority: Priority) -> Self {
@@ -212,6 +248,54 @@ impl Module {
     /// e.g. `"media::"` for a module named `"media"`.
     pub fn prefix(&self) -> String {
         format!("{}::", self.name)
+    }
+}
+
+// ── ModuleRegistry ───────────────────────────────────────────────────
+
+/// Metadata for a single registered module, stored inside [`ModuleRegistry`].
+pub struct ModuleEntry {
+    /// Module name (e.g. `"media"`).
+    pub name: String,
+    /// Task type prefix (e.g. `"media::"`).
+    pub prefix: String,
+    pub default_priority: Option<Priority>,
+    pub default_retry_policy: Option<RetryPolicy>,
+    pub default_group: Option<String>,
+    pub default_ttl: Option<Duration>,
+    pub default_tags: HashMap<String, String>,
+    pub max_concurrency: Option<usize>,
+}
+
+/// Registry of all modules registered with the scheduler.
+///
+/// Stored in [`SchedulerInner`](crate::scheduler::Scheduler) and used by
+/// future steps to implement scoped handles, concurrency gating, and
+/// module-aware dispatch.
+pub struct ModuleRegistry {
+    entries: Vec<ModuleEntry>,
+}
+
+impl ModuleRegistry {
+    /// Create an empty registry (used for schedulers built without the module API).
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub(crate) fn new(entries: Vec<ModuleEntry>) -> Self {
+        Self { entries }
+    }
+
+    /// Look up a module by name.
+    pub fn get(&self, name: &str) -> Option<&ModuleEntry> {
+        self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// All registered module entries.
+    pub fn entries(&self) -> &[ModuleEntry] {
+        &self.entries
     }
 }
 

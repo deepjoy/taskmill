@@ -306,8 +306,8 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use taskmill::{
-//!     Scheduler, TaskExecutor, TaskContext, TaskError,
-//!     TypedTask, IoBudget, Priority,
+//!     Module, Scheduler, TaskExecutor, TaskContext, TaskError,
+//!     TypedTask, IoBudget, Priority, TaskSubmission,
 //! };
 //! use serde::{Serialize, Deserialize};
 //! use tokio_util::sync::CancellationToken;
@@ -341,15 +341,15 @@
 //! // 3. Build and run the scheduler.
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .typed_executor::<Thumbnail, _>(Arc::new(ThumbnailExecutor))
+//!     .module(Module::new("media").typed_executor::<Thumbnail, _>(Arc::new(ThumbnailExecutor)))
 //!     .max_concurrency(4)
 //!     .with_resource_monitoring()
 //!     .build()
 //!     .await?;
 //!
-//! // 4. Submit work.
+//! // 4. Submit work (task type is prefixed with the module name).
 //! let task = Thumbnail { path: "/photos/a.jpg".into(), size: 256 };
-//! scheduler.submit_typed(&task).await?;
+//! scheduler.submit(&TaskSubmission::new("media::thumbnail").payload_json(&task)).await?;
 //!
 //! // 5. Run until cancelled.
 //! let token = CancellationToken::new();
@@ -789,7 +789,7 @@ pub mod task;
 
 // Convenience re-exports.
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
-pub use module::Module;
+pub use module::{Module, ModuleRegistry};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
