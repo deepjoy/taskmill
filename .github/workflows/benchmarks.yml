@@ -36,6 +36,10 @@ jobs:
 
       # ── Push to main: update timeline + cache baseline ──
 
+      - name: Ensure _benchmarks branch exists
+        if: github.event_name == 'push'
+        run: git fetch origin _benchmarks:_benchmarks 2>/dev/null || git push origin HEAD:refs/heads/_benchmarks
+
       - name: Update benchmark timeline
         if: github.event_name == 'push'
         uses: benchmark-action/github-action-benchmark@v1
