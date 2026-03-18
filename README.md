@@ -12,7 +12,7 @@ Read more about the [motivation and use cases](docs/why-taskmill.md).
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use taskmill::{
-    Scheduler, Priority, IoBudget, TaskSubmission, TaskExecutor,
+    Module, Scheduler, IoBudget, TaskSubmission, TaskExecutor,
     TaskContext, TaskError,
 };
 
@@ -33,17 +33,19 @@ impl TaskExecutor for ThumbnailGenerator {
 async fn main() {
     let scheduler = Scheduler::builder()
         .store_path("tasks.db")
-        .executor("thumbnail", Arc::new(ThumbnailGenerator))
+        .module(Module::new("media")
+            .executor("thumbnail", Arc::new(ThumbnailGenerator)))
         .max_concurrency(8)
         .with_resource_monitoring()
         .build()
         .await
         .unwrap();
 
+    let media = scheduler.module("media");
     let sub = TaskSubmission::new("thumbnail")
         .payload_json(&serde_json::json!({"path": "/photos/img.jpg"}))
         .expected_io(IoBudget::disk(4096, 1024));
-    scheduler.submit(&sub).await.unwrap();
+    media.submit(sub).await.unwrap();
 
     let token = CancellationToken::new();
     scheduler.run(token).await;

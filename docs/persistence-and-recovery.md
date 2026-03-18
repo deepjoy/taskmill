@@ -2,6 +2,8 @@
 
 Taskmill persists all task state to SQLite. Work survives process restarts, crashes, and power loss — no manual recovery needed.
 
+> **0.4.0 note: databases from 0.3.x are not compatible.** Task type strings stored by 0.3.x use bare names (e.g. `"thumbnail"`); 0.4.0 stores qualified names (e.g. `"media::thumbnail"`). Delete the database file before first run after upgrading — there is no in-place migration path.
+
 ## What survives a crash
 
 When your app starts up, taskmill automatically recovers:
@@ -58,7 +60,7 @@ A key is "occupied" while the task is active — pending, running, paused, waiti
 ```rust
 use taskmill::SubmitOutcome;
 
-let outcome = scheduler.submit(&submission).await?;
+let outcome = scheduler.module("app").submit(submission).await?;
 match outcome {
     SubmitOutcome::Inserted(id) => println!("new task: {id}"),
     SubmitOutcome::Duplicate => println!("already queued"),
@@ -70,18 +72,22 @@ match outcome {
 `submit_batch()` applies the same dedup within a single transaction:
 
 ```rust
-let outcomes = scheduler.submit_batch(&[sub1, sub2, sub3]).await?;
-// outcomes: Vec<SubmitOutcome>  — sub2 might be Duplicate
+use taskmill::BatchSubmission;
+
+let batch = BatchSubmission::new()
+    .task(sub1).task(sub2).task(sub3);
+let outcome = scheduler.module("app").submit_batch(batch).await?;
+// outcome.duplicated_count() — how many were Duplicate
 ```
 
 ### Looking up tasks by dedup key
 
-Check whether a task has been submitted (or has already completed):
+Check whether a task has been submitted (or has already completed). In 0.4 the task type in the database is the qualified name:
 
 ```rust
 use taskmill::TaskLookup;
 
-let lookup = scheduler.task_lookup("resize", "/photos/img.jpg").await?;
+let lookup = scheduler.task_lookup("app::resize", "/photos/img.jpg").await?;
 match lookup {
     TaskLookup::Active(record) => println!("still running: {:?}", record.status),
     TaskLookup::History(record) => println!("completed: {:?}", record.completed_at),

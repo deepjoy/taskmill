@@ -41,10 +41,10 @@
 //!    blocked ─(dep failed)─→ dep_failed (history)
 //! ```
 //!
-//! 1. **Submit** — [`Scheduler::submit`] (or [`submit_typed`](Scheduler::submit_typed),
-//!    [`submit_batch`](Scheduler::submit_batch),
-//!    [`submit_built`](Scheduler::submit_built))
-//!    enqueues a [`TaskSubmission`] into the SQLite store.
+//! 1. **Submit** — [`ModuleHandle::submit`] (or [`submit_typed`](ModuleHandle::submit_typed),
+//!    [`submit_batch`](ModuleHandle::submit_batch))
+//!    enqueues a [`TaskSubmission`] into the SQLite store. The module handle
+//!    auto-prefixes the task type with the module name and applies module defaults.
 //! 2. **Pending** — the task waits in a priority queue. The scheduler's run loop
 //!    pops the highest-priority pending task on each tick.
 //! 3. **Running** — the scheduler calls [`TaskExecutor::execute`] with a
@@ -56,8 +56,8 @@
 //!    with a configurable [`BackoffStrategy`] delay; a non-retryable
 //!    ([`permanent`](TaskError::permanent)) error moves it to history as failed.
 //!    Tasks that exhaust all retries enter [`dead_letter`](HistoryStatus::DeadLetter)
-//!    state — queryable and manually re-submittable via
-//!    [`Scheduler::retry_dead_letter`].
+//!    state — queryable via [`ModuleHandle::dead_letter_tasks`] and manually
+//!    re-submittable via [`ModuleHandle::retry_dead_letter`].
 //!
 //! ## Deduplication & duplicate strategies
 //!
@@ -170,10 +170,9 @@
 //! Tags are copied to history on all terminal transitions and are included in
 //! [`TaskEventHeader`] for event subscribers.
 //!
-//! Query by tags with [`TaskStore::tasks_by_tags`] (AND semantics),
-//! [`TaskStore::count_by_tag`] (grouped counts), or
-//! [`TaskStore::tag_values`] (distinct values). Cancel by tag with
-//! [`Scheduler::cancel_by_tag`].
+//! Query by tags via the module handle with [`ModuleHandle::tasks_by_tags`]
+//! (AND semantics), [`ModuleHandle::count_by_tag`] (grouped counts), or
+//! [`ModuleHandle::tag_values`] (distinct values).
 //!
 //! ## Delayed & scheduled tasks
 //!
@@ -199,8 +198,8 @@
 //! - **Parent/Child**: Recurring tasks cannot be children (enforced at submit).
 //!
 //! Recurring schedules can be paused, resumed, or cancelled via
-//! [`Scheduler::pause_recurring`], [`Scheduler::resume_recurring`], and
-//! [`Scheduler::cancel_recurring`]. Pausing stops new instances from being
+//! [`ModuleHandle::pause_recurring`], [`ModuleHandle::resume_recurring`], and
+//! [`ModuleHandle::cancel_recurring`]. Pausing stops new instances from being
 //! created without affecting any currently running instance.
 //!
 //! The scheduler optimizes idle wakeups: when the next scheduled task is far
@@ -270,10 +269,11 @@
 //!
 //! ## Cancellation
 //!
-//! Tasks can be cancelled individually via [`Scheduler::cancel`], or in bulk
-//! via [`Scheduler::cancel_group`], [`Scheduler::cancel_type`], or
-//! [`Scheduler::cancel_where`]. Cancelled tasks are recorded in the history
-//! table as [`HistoryStatus::Cancelled`] rather than silently deleted.
+//! Tasks can be cancelled via the [`ModuleHandle`] — individually with
+//! [`ModuleHandle::cancel`], all at once with [`ModuleHandle::cancel_all`],
+//! or by predicate with [`ModuleHandle::cancel_where`]. Cancelled tasks are
+//! recorded in the history table as [`HistoryStatus::Cancelled`] rather than
+//! silently deleted.
 //!
 //! For running tasks, cancellation fires the
 //! [`on_cancel`](TaskExecutor::on_cancel) hook (with a configurable
@@ -363,28 +363,33 @@
 //! ## Shared application state
 //!
 //! Register shared services (database pools, HTTP clients, etc.) at build time
-//! and retrieve them from any executor via [`TaskContext::state`]:
+//! and retrieve them from any executor via [`TaskContext::state`]. State can be
+//! module-scoped (checked first) or global (fallback):
 //!
 //! ```ignore
 //! struct AppServices { db: DatabasePool, http: reqwest::Client }
+//! struct IngestConfig { bucket: String }
 //!
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .app_state(AppServices { /* ... */ })
-//!     .executor("ingest", Arc::new(IngestExecutor))
+//!     .app_state(AppServices { /* ... */ })            // global — all modules
+//!     .module(Module::new("ingest")
+//!         .executor("ingest", Arc::new(IngestExecutor))
+//!         .app_state(IngestConfig { bucket: "...".into() }))  // module-scoped
 //!     .build()
 //!     .await?;
 //!
-//! // Inside the executor:
+//! // Inside an ingest executor — module state checked first, then global:
 //! async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+//!     let cfg = ctx.state::<IngestConfig>().expect("IngestConfig not registered");
 //!     let svc = ctx.state::<AppServices>().expect("AppServices not registered");
 //!     svc.db.query("...").await?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! State can also be injected after construction via
-//! [`Scheduler::register_state`] — useful when a library (e.g. shoebox)
+//! State can also be injected globally after construction via
+//! [`Scheduler::register_state`] — useful when a library
 //! receives a pre-built scheduler from a parent application.
 //!
 //! ## Backpressure
@@ -463,17 +468,18 @@
 //! ```ignore
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .executor("upload-part", Arc::new(UploadPartExecutor))
+//!     .module(Module::new("uploads")
+//!         .executor("upload-part", Arc::new(UploadPartExecutor)))
 //!     .default_group_concurrency(4)               // default for all groups
 //!     .group_concurrency("s3://hot-bucket", 8)    // override for one group
 //!     .build()
 //!     .await?;
 //!
-//! // Tasks declare their group via the submission:
+//! // Tasks declare their group via the submission (or TypedTask::group_key):
 //! let sub = TaskSubmission::new("upload-part")
 //!     .group("s3://my-bucket")
 //!     .payload_json(&part);
-//! scheduler.submit(&sub).await?;
+//! scheduler.module("uploads").submit(sub).await?;
 //!
 //! // Adjust at runtime:
 //! scheduler.set_group_limit("s3://my-bucket", 2);
@@ -482,10 +488,9 @@
 //!
 //! ## Batch submission
 //!
-//! Submit many tasks at once with [`Scheduler::submit_batch`] for better
-//! throughput (single SQLite transaction instead of N). Use
-//! [`BatchSubmission`] to set batch-wide defaults and [`BatchOutcome`] to
-//! inspect results:
+//! Submit many tasks at once for better throughput (single SQLite transaction
+//! instead of N). Use [`BatchSubmission`] to set batch-wide defaults and
+//! [`BatchOutcome`] to inspect results. Submit via the module handle:
 //!
 //! ```ignore
 //! use taskmill::{BatchSubmission, TaskSubmission, Priority};
@@ -496,7 +501,7 @@
 //!     .task(TaskSubmission::new("upload").key("file-1").payload_json(&p1))
 //!     .task(TaskSubmission::new("upload").key("file-2").payload_json(&p2));
 //!
-//! let outcome = scheduler.submit_built(batch).await?;
+//! let outcome = scheduler.module("uploads").submit_batch(batch).await?;
 //! println!("inserted: {:?}, dupes: {}", outcome.inserted(), outcome.duplicated_count());
 //! ```
 //!
@@ -512,13 +517,15 @@
 //!
 //! Spawn child tasks from an executor to model fan-out work. The parent
 //! automatically waits for all children before its [`finalize`](TaskExecutor::finalize)
-//! method is called:
+//! method is called. `spawn_child` is module-aware: the task type is
+//! auto-prefixed with the owning module's namespace.
 //!
 //! ```ignore
 //! impl TaskExecutor for MultipartUploadExecutor {
 //!     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
 //!         let upload: MultipartUpload = ctx.payload()?;
 //!         for part in &upload.parts {
+//!             // "upload-part" is prefixed with the owning module name automatically.
 //!             ctx.spawn_child(
 //!                 TaskSubmission::new("upload-part")
 //!                     .key(&part.etag)
@@ -537,6 +544,15 @@
 //!         Ok(())
 //!     }
 //! }
+//! ```
+//!
+//! For cross-module children, use [`SubmitBuilder::parent`] via `ctx.module()`:
+//!
+//! ```ignore
+//! ctx.module("storage")
+//!     .submit_typed(&Upload { ... })
+//!     .parent(ctx.record().id)
+//!     .await?;
 //! ```
 //!
 //! ## Cancellation & cleanup hooks
@@ -563,11 +579,15 @@
 //!     }
 //! }
 //!
-//! // Cancel by ID, group, type, or predicate:
-//! scheduler.cancel(task_id).await?;
-//! scheduler.cancel_group("s3://my-bucket").await?;
-//! scheduler.cancel_type("upload").await?;
-//! scheduler.cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
+//! // Cancel by ID through the module handle (scoped to that module):
+//! scheduler.module("uploads").cancel(task_id).await?;
+//!
+//! // Bulk cancel all tasks in a module:
+//! scheduler.module("uploads").cancel_all().await?;
+//!
+//! // Cancel by predicate:
+//! scheduler.module("uploads")
+//!     .cancel_where(|t| t.priority == Priority::BACKGROUND).await?;
 //! ```
 //!
 //! ## Task TTL
@@ -589,7 +609,8 @@
 //! // unless overridden per-task.
 //! let scheduler = Scheduler::builder()
 //!     .store_path("tasks.db")
-//!     .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600))
+//!     .module(Module::new("media")
+//!         .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600)))
 //!     .build()
 //!     .await?;
 //!
@@ -619,32 +640,31 @@
 //! use std::time::Duration;
 //! use taskmill::{TaskSubmission, RecurringSchedule};
 //!
+//! let handle = scheduler.module("app");
+//!
 //! // One-shot delay — dispatch after 30 seconds.
-//! let sub = TaskSubmission::new("cleanup")
+//! handle.submit(TaskSubmission::new("cleanup")
 //!     .key("stale-uploads")
-//!     .run_after(Duration::from_secs(30));
-//! scheduler.submit(&sub).await?;
+//!     .run_after(Duration::from_secs(30))).await?;
 //!
 //! // Recurring — abort stale uploads every 6 hours.
-//! let sub = TaskSubmission::new("cleanup")
+//! handle.submit(TaskSubmission::new("cleanup")
 //!     .key("stale-uploads")
-//!     .recurring(Duration::from_secs(6 * 3600));
-//! scheduler.submit(&sub).await?;
+//!     .recurring(Duration::from_secs(6 * 3600))).await?;
 //!
 //! // Full schedule control — initial delay, max executions.
-//! let sub = TaskSubmission::new("sync")
+//! handle.submit(TaskSubmission::new("sync")
 //!     .key("daily-sync")
 //!     .recurring_schedule(RecurringSchedule {
 //!         interval: Duration::from_secs(86400),
 //!         initial_delay: Some(Duration::from_secs(60)),
 //!         max_executions: Some(30),
-//!     });
-//! scheduler.submit(&sub).await?;
+//!     })).await?;
 //!
-//! // Pause/resume/cancel recurring schedules.
-//! scheduler.pause_recurring(task_id).await?;
-//! scheduler.resume_recurring(task_id).await?;
-//! scheduler.cancel_recurring(task_id).await?;
+//! // Pause/resume/cancel recurring schedules via the module handle.
+//! handle.pause_recurring(task_id).await?;
+//! handle.resume_recurring(task_id).await?;
+//! handle.cancel_recurring(task_id).await?;
 //! ```
 //!
 //! ## Task chains
@@ -659,18 +679,20 @@
 //! Upload a file, verify its checksum, then delete the local copy:
 //!
 //! ```ignore
-//! let upload = scheduler.submit(
+//! let handle = scheduler.module("pipeline");
+//!
+//! let upload = handle.submit(
 //!     TaskSubmission::new("upload").key("file-a").payload_json(&upload_plan)
 //! ).await?;
 //!
-//! let verify = scheduler.submit(
+//! let verify = handle.submit(
 //!     TaskSubmission::new("verify")
 //!         .key("file-a-verify")
 //!         .depends_on(upload.id().unwrap())
 //!         .payload_json(&verify_plan)
 //! ).await?;
 //!
-//! scheduler.submit(
+//! handle.submit(
 //!     TaskSubmission::new("delete-local")
 //!         .key("file-a-delete")
 //!         .depends_on(verify.id().unwrap())
@@ -683,9 +705,10 @@
 //! Multiple uploads converging on a single finalize step:
 //!
 //! ```ignore
+//! let handle = scheduler.module("pipeline");
 //! let mut upload_ids = Vec::new();
 //! for part in &parts {
-//!     let outcome = scheduler.submit(
+//!     let outcome = handle.submit(
 //!         TaskSubmission::new("upload-part")
 //!             .key(&part.key)
 //!             .payload_json(part)
@@ -693,7 +716,7 @@
 //!     upload_ids.push(outcome.id().unwrap());
 //! }
 //!
-//! scheduler.submit(
+//! handle.submit(
 //!     TaskSubmission::new("finalize")
 //!         .key("finalize-upload")
 //!         .depends_on_all(upload_ids)
@@ -706,22 +729,24 @@
 //! Task A fans out to B and C, which both converge on D:
 //!
 //! ```ignore
-//! let a = scheduler.submit(
+//! let handle = scheduler.module("pipeline");
+//!
+//! let a = handle.submit(
 //!     TaskSubmission::new("extract").key("a").payload_json(&extract)
 //! ).await?;
 //! let a_id = a.id().unwrap();
 //!
-//! let b = scheduler.submit(
+//! let b = handle.submit(
 //!     TaskSubmission::new("transform-x")
 //!         .key("b").depends_on(a_id).payload_json(&tx)
 //! ).await?;
 //!
-//! let c = scheduler.submit(
+//! let c = handle.submit(
 //!     TaskSubmission::new("transform-y")
 //!         .key("c").depends_on(a_id).payload_json(&ty)
 //! ).await?;
 //!
-//! scheduler.submit(
+//! handle.submit(
 //!     TaskSubmission::new("load")
 //!         .key("d")
 //!         .depends_on_all([b.id().unwrap(), c.id().unwrap()])
@@ -743,7 +768,7 @@
 //!     .payload_json(&new_content)
 //!     .on_duplicate(DuplicateStrategy::Supersede);
 //!
-//! let outcome = scheduler.submit(&sub).await?;
+//! let outcome = scheduler.module("sync").submit(sub).await?;
 //! // outcome is Superseded { new_task_id, replaced_task_id } if a duplicate existed,
 //! // or Inserted(id) if this was the first submission.
 //! ```

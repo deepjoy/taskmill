@@ -85,6 +85,19 @@ impl TaskExecutor for ImageProcessor {
 }
 ```
 
+## Define the module
+
+```rust
+use std::sync::Arc;
+use taskmill::{Module, Priority};
+
+pub fn images_module() -> Module {
+    Module::new("images")
+        .typed_executor::<ProcessImageTask, _>(Arc::new(ImageProcessor))
+        .max_concurrency(4)
+}
+```
+
 ## Set up the service
 
 ```rust
@@ -99,7 +112,7 @@ async fn main() {
 
     let scheduler = Scheduler::builder()
         .store_path("/var/lib/myservice/tasks.db")
-        .executor("process-image", Arc::new(ImageProcessor))
+        .module(images_module())
         .max_concurrency(4)
         .max_retries(5)
         .with_resource_monitoring()
@@ -125,9 +138,9 @@ async fn main() {
     });
 
     // Watch for new files and submit tasks
-    let sched = scheduler.clone();
+    let images = scheduler.module("images");
     tokio::spawn(async move {
-        watch_directory("/data/incoming", sched).await;
+        watch_directory("/data/incoming", images).await;
     });
 
     // Shut down gracefully on SIGTERM
@@ -141,6 +154,16 @@ async fn main() {
 
     scheduler.run(token).await;
     tracing::info!("shutdown complete");
+}
+```
+
+The watcher submits tasks through the `ModuleHandle`:
+
+```rust
+async fn watch_directory(path: &str, handle: ModuleHandle) {
+    // ... watch for new files ...
+    let task = ProcessImageTask { path: file_path, file_size, is_raw };
+    handle.submit_typed(&task).await.unwrap();
 }
 ```
 
@@ -174,7 +197,7 @@ Scheduler::builder()
 Disable the default sampler in `Cargo.toml`:
 
 ```toml
-taskmill = { version = "0.3", default-features = false }
+taskmill = { version = "0.4", default-features = false }
 ```
 
 ## Key differences from desktop

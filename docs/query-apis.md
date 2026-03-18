@@ -1,6 +1,10 @@
 # Query APIs
 
-Use these queries to build dashboards, debug stuck tasks, and gather analytics about task performance. All queries are available on `TaskStore`, accessed via `scheduler.store()`.
+Use these queries to build dashboards, debug stuck tasks, and gather analytics about task performance.
+
+Most queries are available in two places:
+- **`ModuleHandle`** — scoped to one module's tasks (preferred). Access via `scheduler.module("name")`.
+- **`TaskStore`** — unscoped, across all tasks. Access via `scheduler.store()`.
 
 ## Common patterns
 
@@ -78,27 +82,29 @@ let snap = scheduler.snapshot().await?;
 
 ### Managing recurring schedules
 
-Pause, resume, or cancel recurring schedules via the `Scheduler`:
+Pause, resume, or cancel recurring schedules via the module handle:
 
 ```rust
+let handle = scheduler.module("app");
+
 // Pause — stops new occurrences from being enqueued
-scheduler.pause_recurring(task_id).await?;
+handle.pause_recurring(task_id).await?;
 
 // Resume — re-enables the schedule from where it left off
-scheduler.resume_recurring(task_id).await?;
+handle.resume_recurring(task_id).await?;
 
 // Cancel — permanently removes the recurring schedule
-scheduler.cancel_recurring(task_id).await?;
+handle.cancel_recurring(task_id).await?;
 ```
 
 ## Unified lookup
 
-Search both active and history tables by dedup key — useful for checking whether a task has been submitted or has already completed:
+Search both active and history tables by dedup key — useful for checking whether a task has been submitted or has already completed. Note that in 0.4 the task type stored in the database is the fully qualified name (e.g. `"media::resize"`, not `"resize"`):
 
 ```rust
 use taskmill::TaskLookup;
 
-let lookup = scheduler.task_lookup("resize", "/photos/img.jpg").await?;
+let lookup = scheduler.task_lookup("media::resize", "/photos/img.jpg").await?;
 match lookup {
     TaskLookup::Active(record) => {
         println!("Status: {:?}, priority: {}", record.status, record.priority.value());
@@ -112,7 +118,7 @@ match lookup {
 }
 ```
 
-Or with typed tasks:
+Or with typed tasks (the module prefix is applied automatically):
 
 ```rust
 let lookup = scheduler.lookup_typed(&ResizeTask {
@@ -131,17 +137,20 @@ let lookup = scheduler.lookup_typed(&ResizeTask {
 ## Usage example
 
 ```rust
-let store = scheduler.store();
+// Module-scoped snapshot — running tasks, pending count, progress.
+let snap = scheduler.module("media").snapshot().await?;
+println!("media: {} running, {} pending", snap.running.len(), snap.pending_count);
 
-// Dashboard data
+// Global dashboard data via the store.
+let store = scheduler.store();
 let running = store.running_count().await?;
 let pending = store.pending_count().await?;
 let (read_io, write_io) = store.running_io_totals().await?;
 
-// Per-type analytics
-let stats = store.history_stats("thumbnail").await?;
+// Per-type analytics — note the qualified type name.
+let stats = store.history_stats("media::thumbnail").await?;
 println!(
-    "thumbnail: {} completed, avg {:.0}ms, {:.1}% failure rate",
+    "media::thumbnail: {} completed, avg {:.0}ms, {:.1}% failure rate",
     stats.count, stats.avg_duration_ms, stats.failure_rate * 100.0,
 );
 
