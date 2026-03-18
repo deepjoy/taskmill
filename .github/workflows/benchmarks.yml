@@ -1,0 +1,107 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install critcmp
+        run: cargo install critcmp
+
+      - name: Run benchmarks
+        run: cargo bench --all-features -- --save-baseline current --output-format bencher 2>/dev/null | tee bench-output.txt
+
+      # ── Push to main: update timeline + cache baseline ──
+
+      - name: Update benchmark timeline
+        if: github.event_name == 'push'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: bench-output.txt
+          gh-pages-branch: _benchmarks
+          benchmark-data-dir-path: timeline
+          auto-push: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache baseline for PR comparison
+        if: github.event_name == 'push'
+        run: critcmp --export current > baseline.json
+
+      - name: Save baseline to cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: baseline.json
+          key: benchmark-baseline-${{ github.sha }}
+
+      # ── Pull request: compare against cached baseline ──
+
+      - name: Restore baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline.json
+          key: benchmark-baseline-${{ github.event.pull_request.base.sha }}
+          restore-keys: benchmark-baseline-
+
+      - name: Compare benchmarks
+        if: github.event_name == 'pull_request'
+        id: compare
+        run: |
+          if [ ! -f baseline.json ]; then
+            echo "::warning::No benchmark baseline found. Merge to main to generate one."
+            exit 0
+          fi
+          critcmp --export current > pr.json
+          echo 'result<<EOF' >> $GITHUB_OUTPUT
+          critcmp baseline.json pr.json >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Find existing comment
+        if: github.event_name == 'pull_request' && steps.compare.outputs.result
+        uses: peter-evans/find-comment@v3
+        id: find_comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: "## Benchmark Comparison"
+
+      - name: Post or update comment
+        if: github.event_name == 'pull_request' && steps.compare.outputs.result
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            ## Benchmark Comparison
+
+            <details>
+            <summary>Click to expand</summary>
+
+            ```
+            ${{ steps.compare.outputs.result }}
+            ```
+
+            </details>

@@ -51,6 +51,8 @@ let sub = TaskSubmission::new("upload")
     .key("/photos/img.jpg");  // dedup on file path, not full payload
 ```
 
+> **Dedup keys include the module prefix.** The key is derived from the *qualified* task type (e.g., `"media::thumbnail"`, not `"thumbnail"`), so `"media::thumbnail"` and `"cdn::thumbnail"` have separate key spaces. A `Supersede` submission in module A will never supersede a task in module B, even if both tasks have the same logical payload.
+
 ### Key lifecycle
 
 A key is "occupied" while the task is active — pending, running, paused, waiting, or retrying. When the task completes or permanently fails (moves to history), the key is freed and the same work can be submitted again.
@@ -82,7 +84,7 @@ let outcome = scheduler.module("app").submit_batch(batch).await?;
 
 ### Looking up tasks by dedup key
 
-Check whether a task has been submitted (or has already completed). In 0.4 the task type in the database is the qualified name:
+Check whether a task has been submitted (or has already completed). In 0.4 the task type in the database is the qualified name including the module prefix:
 
 ```rust
 use taskmill::TaskLookup;

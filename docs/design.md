@@ -127,6 +127,21 @@ Taskmill is designed for concurrent access from multiple async tasks and Tauri c
 
 Each spawned task gets its own `CancellationToken`. All trait objects require `Send + Sync + 'static`.
 
+### Module concurrency gating
+
+Per-module concurrency is enforced in the dispatch gate alongside the global concurrency check. Each module has two atomic counters:
+
+| Component | Type | Where | Purpose |
+|-----------|------|-------|---------|
+| `module_caps` | `RwLock<HashMap<String, usize>>` | `SchedulerInner` | Per-module concurrency cap. Initialized from `Module::max_concurrency` at build time. Updated at runtime by `ModuleHandle::set_max_concurrency`. |
+| `module_running` | `Arc<HashMap<String, AtomicUsize>>` | `SchedulerInner` | Live count of running tasks per module. Incremented when a task is dispatched; decremented on every terminal transition (complete, fail, cancel, pause). Shared with spawned tasks via `Arc`. |
+
+A task blocked on its *module* concurrency limit does **not** block dispatch for other modules — the scheduler moves on to the next candidate in the priority queue. The dispatch gate checks are AND-gates: both the global `max_concurrency` and the per-module cap must have headroom.
+
+The module is identified at dispatch time by extracting the prefix from the qualified task type (e.g., `"media"` from `"media::thumbnail"`).
+
+Per-module pause uses a separate `HashMap<String, AtomicBool>` (`module_paused`). When a module is paused, the dispatch loop skips candidates whose task type matches that module's prefix.
+
 ## Extension points
 
 Taskmill is designed to be extended without forking:

@@ -289,11 +289,13 @@ let token = CancellationToken::new();
 scheduler.run(token).await;
 ```
 
-Libraries that receive a pre-built scheduler can still inject global state after construction:
+Libraries that receive a pre-built scheduler can still inject global state after construction (call before `scheduler.run()`):
 
 ```rust
 scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
 ```
+
+For applications with more than two modules, or when integrating third-party library modules, see [Multi-Module Applications](multi-module-apps.md) for guidance on cross-module dependencies, concurrency budgets, and coordinated cancellation.
 
 ## Delayed and recurring tasks
 
@@ -397,6 +399,26 @@ media.submit(
 ).await?;
 ```
 
+### Cross-module dependencies
+
+Dependencies work across module boundaries. A task in one module can depend on a task in another module — the module boundary does not affect dependency resolution or failure propagation.
+
+```rust
+let ingest = scheduler.module("ingest");
+let process = scheduler.module("process");
+
+// Submit in the ingest module, capture the ID.
+let outcome = ingest.submit_typed(&FetchTask { url: source.clone() }).await?;
+let fetch_id = outcome.id().expect("not a duplicate");
+
+// This task in the process module won't start until the fetch completes.
+process.submit_typed(&TranscodeTask { source })
+    .depends_on(fetch_id)
+    .await?;
+```
+
+See [Multi-Module Applications](multi-module-apps.md#cross-module-task-dependencies) for more patterns including failure cascades and in-executor cross-module submission.
+
 ### Failure handling
 
 By default, if a dependency fails permanently the dependent is cancelled and recorded as `DependencyFailed` in history. Change this per-submission:
@@ -458,4 +480,6 @@ Work through the topic guides in order:
 4. [Persistence & Recovery](persistence-and-recovery.md) — understand crash safety and deduplication
 5. [Configuration](configuration.md) — tune for your workload
 6. [Query APIs](query-apis.md) — build dashboards and debug stuck tasks
-7. [Design](design.md) — understand the architecture for advanced use
+7. [Multi-Module Applications](multi-module-apps.md) — assemble multiple modules, cross-module dependencies, tags, and dashboards
+8. [Writing a Reusable Module](library-modules.md) — publish a module as a library crate
+9. [Design](design.md) — understand the architecture for advanced use

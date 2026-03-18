@@ -41,7 +41,7 @@ let scheduler = Scheduler::builder()
     .await?;
 ```
 
-At least one `.module()` call is required — `build()` returns an error if no modules are registered. There is no default module.
+At least one `.module()` call is required — `build()` returns an error if no modules are registered. There is no default module. Library authors publishing reusable modules should see [Writing a Reusable Module](library-modules.md) for naming conventions, state isolation, and conflict avoidance.
 
 ### Task type namespacing
 

@@ -33,3 +33,23 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "scheduler"
 harness = false
+
+[[bench]]
+name = "retry"
+harness = false
+
+[[bench]]
+name = "dependencies"
+harness = false
+
+[[bench]]
+name = "tags"
+harness = false
+
+[[bench]]
+name = "groups"
+harness = false
+
+[[bench]]
+name = "history"
+harness = false

@@ -121,6 +121,55 @@ scheduler.remove_group_limit("bucket-prod").await;
 
 Group limits are checked *in addition to* `max_concurrency` — a task must pass both the global and group gate to be dispatched.
 
+## Module-level pause and resume
+
+Individual modules can be paused and resumed independently, without affecting other modules. This is useful for features like a user-togglable sync, or temporarily disabling a module during maintenance.
+
+```rust
+let sync = scheduler.module("sync");
+
+// Pause — stops dispatch, interrupts running tasks, moves everything to paused.
+let paused_count = sync.pause().await?;
+
+// Resume — moves paused tasks back to pending, re-enables dispatch.
+let resumed_count = sync.resume().await?;
+```
+
+**What `pause()` does:**
+1. Sets the per-module `is_paused` flag (prevents new dispatch).
+2. Triggers the cancellation token of running tasks and moves them to `paused` in the database.
+3. Moves pending tasks to `paused` in the database.
+
+**What `resume()` does:**
+1. Clears the per-module `is_paused` flag.
+2. Moves `paused` tasks back to `pending` (unless the global scheduler is also paused).
+
+### Interaction with global pause
+
+The scheduler must be globally unpaused **and** the module must be unpaused for dispatch to proceed. Module pause is additive — `handle.resume()` does not override `scheduler.pause_all()`.
+
+| Global paused? | Module paused? | Dispatch? |
+|----------------|----------------|-----------|
+| No | No | Yes |
+| No | Yes | No |
+| Yes | No | No |
+| Yes | Yes | No |
+
+### Use case: user-togglable features
+
+```rust
+// User disables background sync in settings.
+scheduler.module("sync").pause().await?;
+
+// Other modules continue normally.
+scheduler.module("media").submit_typed(&thumb).await?;
+
+// User re-enables sync.
+scheduler.module("sync").resume().await?;
+```
+
+See [Multi-Module Applications](multi-module-apps.md#module-level-pause-and-resume) for more patterns.
+
 ## Throttle behavior
 
 Throttling is independent of preemption. While preemption *interrupts* running tasks, throttling controls whether pending tasks are *dispatched in the first place* based on current system [pressure](glossary.md#backpressure).
