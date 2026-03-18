@@ -278,6 +278,20 @@ impl Scheduler {
         Some(crate::module::ModuleHandle::new(self.clone(), entry))
     }
 
+    /// All registered module handles, in registration order.
+    ///
+    /// Useful for cross-cutting operations that span every module, such as
+    /// cancelling tasks by tag across all modules or building a per-module
+    /// dashboard snapshot.
+    pub fn modules(&self) -> Vec<crate::module::ModuleHandle> {
+        self.inner
+            .module_registry
+            .entries()
+            .iter()
+            .map(|e| crate::module::ModuleHandle::new(self.clone(), e))
+            .collect()
+    }
+
     /// Look up an active task by ID, regardless of which module owns it.
     ///
     /// Returns `None` if no active task with that ID exists.

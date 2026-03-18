@@ -3700,6 +3700,171 @@ async fn cross_module_failure_cascade() {
     );
 }
 
+// ── Step 10: Scheduler::modules() and cross-cutting convenience ──────
+
+/// `scheduler.modules()` returns handles for all registered modules in registration order.
+#[tokio::test]
+async fn scheduler_modules_returns_all_registered_modules() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("alpha").executor("work", Arc::new(NoopExecutor)))
+        .module(Module::new("beta").executor("work", Arc::new(NoopExecutor)))
+        .module(Module::new("gamma").executor("work", Arc::new(NoopExecutor)))
+        .max_concurrency(4)
+        .build()
+        .await
+        .unwrap();
+
+    let handles = sched.modules();
+    let names: Vec<&str> = handles.iter().map(|h| h.name()).collect();
+
+    assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+}
+
+/// `scheduler.active_tasks()` returns running tasks from all modules.
+#[tokio::test]
+async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let barrier_clone = barrier.clone();
+    struct BarrierExecutor(Arc<tokio::sync::Barrier>);
+    impl TaskExecutor for BarrierExecutor {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            self.0.wait().await;
+            tokio::select! {
+                _ = ctx.token().cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+            }
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("alpha").executor("work", Arc::new(BarrierExecutor(barrier.clone()))))
+        .module(Module::new("beta").executor("work", Arc::new(BarrierExecutor(barrier_clone))))
+        .max_concurrency(4)
+        .poll_interval(Duration::from_millis(10))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("alpha")
+        .submit(TaskSubmission::new("work").key("a1"))
+        .await
+        .unwrap();
+    sched
+        .module("beta")
+        .submit(TaskSubmission::new("work").key("b1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    // Wait until both tasks are running.
+    barrier.wait().await;
+
+    let active = sched.active_tasks().await;
+    let types: Vec<&str> = active.iter().map(|t| t.task_type.as_str()).collect();
+
+    token.cancel();
+
+    assert!(
+        types.contains(&"alpha::work"),
+        "alpha::work should be in active tasks; got: {types:?}"
+    );
+    assert!(
+        types.contains(&"beta::work"),
+        "beta::work should be in active tasks; got: {types:?}"
+    );
+}
+
+/// Cross-module cancel-by-tag via `modules()` iteration cancels matching tasks
+/// in all modules and leaves untagged tasks untouched.
+/// Tasks stay pending (no run loop) so we verify the return IDs directly.
+#[tokio::test]
+async fn cross_module_cancel_by_tag_via_modules_iterator() {
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .module(Module::new("alpha").executor("work", Arc::new(NoopExecutor)))
+        .module(Module::new("beta").executor("work", Arc::new(NoopExecutor)))
+        .max_concurrency(8)
+        .build()
+        .await
+        .unwrap();
+
+    // Tagged tasks — targets for cross-module cancel.
+    let alpha_tagged = sched
+        .module("alpha")
+        .submit(
+            TaskSubmission::new("work")
+                .key("a-tagged")
+                .tag("job_id", "job-1"),
+        )
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+    let beta_tagged = sched
+        .module("beta")
+        .submit(
+            TaskSubmission::new("work")
+                .key("b-tagged")
+                .tag("job_id", "job-1"),
+        )
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+    // Untagged task — must survive.
+    let alpha_untagged = sched
+        .module("alpha")
+        .submit(TaskSubmission::new("work").key("a-untagged"))
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
+
+    // Cancel "job-1" tasks across all modules (tasks are still pending).
+    let mut cancelled_ids: Vec<i64> = Vec::new();
+    for handle in sched.modules() {
+        let ids = handle
+            .cancel_where(|t| t.tags.get("job_id").map(String::as_str) == Some("job-1"))
+            .await
+            .unwrap();
+        cancelled_ids.extend(ids);
+    }
+
+    assert!(
+        cancelled_ids.contains(&alpha_tagged),
+        "alpha tagged task should have been cancelled; got: {cancelled_ids:?}"
+    );
+    assert!(
+        cancelled_ids.contains(&beta_tagged),
+        "beta tagged task should have been cancelled; got: {cancelled_ids:?}"
+    );
+    assert_eq!(
+        cancelled_ids.len(),
+        2,
+        "exactly 2 tasks should be cancelled"
+    );
+
+    // Untagged task must still be in the active store (cancelled tasks move to history).
+    assert!(
+        sched
+            .store()
+            .task_by_id(alpha_untagged)
+            .await
+            .unwrap()
+            .is_some(),
+        "untagged task should still be in the active store, not moved to history"
+    );
+}
+
 /// `.parent()` on `SubmitBuilder` inherits remaining parent TTL and tags.
 /// No scheduler run needed — just verify the stored child record.
 #[tokio::test]
