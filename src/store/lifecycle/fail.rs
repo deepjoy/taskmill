@@ -4,7 +4,7 @@ use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{BackoffStrategy, IoBudget};
 
-use super::{compute_duration_ms, insert_history};
+use super::{compute_duration_ms, insert_history, HistoryStatus};
 
 /// Backoff parameters for retry delay computation.
 ///
@@ -160,7 +160,11 @@ impl TaskStore {
         } else {
             // Terminal failure — move to history.
             // Distinguish: retryable + exhausted → dead_letter; non-retryable → failed.
-            let status = if retryable { "dead_letter" } else { "failed" };
+            let status = if retryable {
+                HistoryStatus::DeadLetter
+            } else {
+                HistoryStatus::Failed
+            };
             let duration_ms = compute_duration_ms(task);
 
             insert_history(conn, task, status, metrics, duration_ms, Some(error)).await?;

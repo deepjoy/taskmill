@@ -4,7 +4,7 @@ use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::IoBudget;
 
-use super::{compute_duration_ms, insert_history};
+use super::{compute_duration_ms, insert_history, HistoryStatus};
 
 impl TaskStore {
     /// Mark a task as completed and move it to history.
@@ -74,7 +74,7 @@ impl TaskStore {
         insert_history(
             conn,
             task,
-            "completed",
+            HistoryStatus::Completed,
             metrics,
             duration_ms,
             task.last_error.as_deref(),

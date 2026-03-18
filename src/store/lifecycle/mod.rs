@@ -16,6 +16,37 @@ use crate::task::{IoBudget, TaskRecord};
 
 use super::StoreError;
 
+/// Terminal status values for tasks moved to history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryStatus {
+    Completed,
+    Failed,
+    DeadLetter,
+    Cancelled,
+    Expired,
+    Superseded,
+    DependencyFailed,
+}
+
+impl HistoryStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::DeadLetter => "dead_letter",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+            Self::Superseded => "superseded",
+            Self::DependencyFailed => "dependency_failed",
+        }
+    }
+
+    /// Whether this status increments `retry_count` in history.
+    pub fn increments_retries(self) -> bool {
+        matches!(self, Self::Failed | Self::DeadLetter)
+    }
+}
+
 /// Insert a task record into the history table.
 ///
 /// Shared by `complete()`, `fail()`, and `cancel_to_history()` to eliminate
@@ -23,13 +54,13 @@ use super::StoreError;
 pub(crate) async fn insert_history(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     task: &TaskRecord,
-    status: &str,
+    status: HistoryStatus,
     metrics: &IoBudget,
     duration_ms: Option<i64>,
     last_error: Option<&str>,
 ) -> Result<(), StoreError> {
     let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
-    let retry_count = if status == "failed" || status == "dead_letter" {
+    let retry_count = if status.increments_retries() {
         task.retry_count + 1
     } else {
         task.retry_count
@@ -46,7 +77,7 @@ pub(crate) async fn insert_history(
     .bind(&task.key)
     .bind(&task.label)
     .bind(task.priority.value() as i32)
-    .bind(status)
+    .bind(status.as_str())
     .bind(&task.payload)
     .bind(task.expected_io.disk_read)
     .bind(task.expected_io.disk_write)

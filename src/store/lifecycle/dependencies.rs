@@ -4,7 +4,7 @@ use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{DependencyFailurePolicy, IoBudget};
 
-use super::insert_history;
+use super::{insert_history, HistoryStatus};
 
 impl TaskStore {
     /// After a task completes, check if any blocked tasks are now unblocked.
@@ -126,7 +126,7 @@ impl TaskStore {
                             insert_history(
                                 conn,
                                 &task,
-                                "dependency_failed",
+                                HistoryStatus::DependencyFailed,
                                 &IoBudget::default(),
                                 None,
                                 Some(&format!("dependency task {} failed", failed_task_id)),
