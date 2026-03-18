@@ -2,15 +2,20 @@
 //!
 //! Run with: `cargo bench -p taskmill`
 
-use std::sync::Arc;
-
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
-    Module, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor,
+    TaskStore, TaskSubmission,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+
+// ── Domain Key ─────────────────────────────────────────────────────
+
+struct BenchDomain;
+impl DomainKey for BenchDomain {
+    const NAME: &'static str = "bench";
+}
 
 // ── Test Executors ──────────────────────────────────────────────────
 
@@ -46,7 +51,7 @@ impl TaskExecutor for ByteProgressExecutor {
 async fn build_scheduler(max_concurrency: usize) -> Scheduler {
     Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
         .max_concurrency(max_concurrency)
         .poll_interval(std::time::Duration::from_millis(10))
         .build()
@@ -301,12 +306,12 @@ fn bench_byte_progress_overhead(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let sched = Scheduler::builder()
                 .store(TaskStore::open_memory().await.unwrap())
-                .module(Module::new("bench").executor(
+                .domain(Domain::<BenchDomain>::new().raw_executor(
                     "byte-test",
-                    Arc::new(ByteProgressExecutor {
+                    ByteProgressExecutor {
                         total: 1_048_576,
                         chunk_size: 1024,
-                    }),
+                    },
                 ))
                 .max_concurrency(8)
                 .poll_interval(std::time::Duration::from_millis(10))
@@ -352,12 +357,12 @@ fn bench_byte_progress_snapshot(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let sched = Scheduler::builder()
                 .store(TaskStore::open_memory().await.unwrap())
-                .module(Module::new("bench").executor(
+                .domain(Domain::<BenchDomain>::new().raw_executor(
                     "byte-test",
-                    Arc::new(ByteProgressExecutor {
+                    ByteProgressExecutor {
                         total: 10_485_760,
                         chunk_size: 65_536,
-                    }),
+                    },
                 ))
                 .max_concurrency(100)
                 .poll_interval(std::time::Duration::from_millis(10))

@@ -255,11 +255,17 @@ async fn submit_typed_enqueues_task() {
         path: String,
     }
 
+    struct TestDomain;
+    impl crate::domain::DomainKey for TestDomain {
+        const NAME: &'static str = "test";
+    }
+
     impl crate::task::TypedTask for Thumb {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "test";
 
-        fn expected_io(&self) -> crate::task::IoBudget {
-            crate::task::IoBudget::disk(4096, 512)
+        fn config() -> crate::domain::TaskTypeConfig {
+            crate::domain::TaskTypeConfig::new().expected_io(crate::task::IoBudget::disk(4096, 512))
         }
     }
 
@@ -456,7 +462,13 @@ async fn lookup_typed_works() {
         path: String,
     }
 
+    struct TestDomain2;
+    impl crate::domain::DomainKey for TestDomain2 {
+        const NAME: &'static str = "test";
+    }
+
     impl crate::task::TypedTask for Thumb {
+        type Domain = TestDomain2;
         const TASK_TYPE: &'static str = "test";
     }
 
@@ -1091,7 +1103,7 @@ async fn cancel_parent_cascade_records_history() {
     // All tasks should be recorded as cancelled in history.
     let hist = sched.store().history(100, 0).await.unwrap();
     assert!(
-        hist.len() >= 1,
+        !hist.is_empty(),
         "expected at least parent in history, got {}",
         hist.len()
     );
@@ -1452,8 +1464,10 @@ async fn retry_dead_letter_resubmits_with_reset_retry_count() {
     let store = TaskStore::open_memory().await.unwrap();
     let mut registry = TaskTypeRegistry::new();
     registry.register_erased("test", arc_erased(FailingExecutor));
-    let mut config = SchedulerConfig::default();
-    config.max_retries = 0;
+    let config = SchedulerConfig {
+        max_retries: 0,
+        ..SchedulerConfig::default()
+    };
 
     let sched = Scheduler::new(
         store,

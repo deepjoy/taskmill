@@ -2,16 +2,22 @@
 //!
 //! Run with: `cargo bench --bench retry`
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
-    BackoffStrategy, Module, RetryPolicy, Scheduler, SchedulerEvent, TaskContext, TaskError,
-    TaskExecutor, TaskStore, TaskSubmission,
+    BackoffStrategy, Domain, DomainKey, RetryPolicy, Scheduler, SchedulerEvent, TaskContext,
+    TaskError, TaskExecutor, TaskStore, TaskSubmission,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
+
+// ── Domain Key ─────────────────────────────────────────────────────
+
+struct BenchDomain;
+impl DomainKey for BenchDomain {
+    const NAME: &'static str = "bench";
+}
 
 // ── Executors ───────────────────────────────────────────────────────
 
@@ -95,7 +101,7 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let sched = Scheduler::builder()
                 .store(TaskStore::open_memory().await.unwrap())
-                .module(Module::new("bench").executor("fail", Arc::new(FailPermanentExecutor)))
+                .domain(Domain::<BenchDomain>::new().raw_executor("fail", FailPermanentExecutor))
                 .max_concurrency(8)
                 .max_retries(0)
                 .poll_interval(Duration::from_millis(10))
@@ -183,11 +189,11 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
                 async move {
                     let sched = Scheduler::builder()
                         .store(TaskStore::open_memory().await.unwrap())
-                        .module(Module::new("bench").executor_with_retry_policy(
-                            "fail",
-                            Arc::new(FailRetryableExecutor),
-                            policy,
-                        ))
+                        .domain(
+                            Domain::<BenchDomain>::new()
+                                .raw_executor("fail", FailRetryableExecutor)
+                                .default_retry(policy),
+                        )
                         .max_concurrency(8)
                         .poll_interval(Duration::from_millis(10))
                         .build()

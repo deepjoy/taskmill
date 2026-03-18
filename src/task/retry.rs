@@ -94,6 +94,55 @@ pub struct RetryPolicy {
     pub max_retries: i32,
 }
 
+impl RetryPolicy {
+    /// Fixed delay between every retry.
+    pub fn constant(max_retries: u32, delay: Duration) -> Self {
+        Self {
+            strategy: BackoffStrategy::Constant { delay },
+            max_retries: max_retries as i32,
+        }
+    }
+
+    /// Linearly increasing delay: `initial + (retry_count * increment)`, capped at `max`.
+    pub fn linear(max_retries: u32, initial: Duration, increment: Duration, max: Duration) -> Self {
+        Self {
+            strategy: BackoffStrategy::Linear {
+                initial,
+                increment,
+                max,
+            },
+            max_retries: max_retries as i32,
+        }
+    }
+
+    /// Exponential delay: `initial * 2^retry_count`, capped at `max`.
+    pub fn exponential(max_retries: u32, initial: Duration, max: Duration) -> Self {
+        Self {
+            strategy: BackoffStrategy::Exponential {
+                initial,
+                max,
+                multiplier: 2.0,
+            },
+            max_retries: max_retries as i32,
+        }
+    }
+
+    /// Exponential with full jitter: uniform random in `[0, computed_delay]`.
+    ///
+    /// Recommended for tasks hitting the same endpoint — decorrelates retry
+    /// storms.
+    pub fn exponential_jitter(max_retries: u32, initial: Duration, max: Duration) -> Self {
+        Self {
+            strategy: BackoffStrategy::ExponentialJitter {
+                initial,
+                max,
+                multiplier: 2.0,
+            },
+            max_retries: max_retries as i32,
+        }
+    }
+}
+
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {

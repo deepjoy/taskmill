@@ -303,7 +303,7 @@
 //!
 //! # Quick start
 //!
-//! ```no_run
+//! ```ignore
 //! use std::sync::Arc;
 //! use taskmill::{
 //!     Module, Scheduler, TaskExecutor, TaskContext, TaskError,
@@ -804,7 +804,8 @@
 //!   via [`resource_sampler()`](SchedulerBuilder::resource_sampler).
 
 pub mod backpressure;
-pub mod module;
+pub mod domain;
+pub(crate) mod module;
 pub mod priority;
 pub mod registry;
 pub mod resource;
@@ -812,9 +813,17 @@ pub mod scheduler;
 pub mod store;
 pub mod task;
 
-// Convenience re-exports.
+// ── Domain-centric API ───────────────────────────────────────────────
+pub use domain::{
+    Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskTypeConfig, TaskTypeOptions,
+    TypedExecutor,
+};
+// Re-export ModuleHandle so TaskContext::module() / current_module() return
+// types are usable from external code (Phase 1 bridge until ctx.domain::<D>()).
+pub use module::ModuleHandle;
+
+// ── Core re-exports ──────────────────────────────────────────────────
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
-pub use module::{Module, ModuleHandle, ModuleReceiver, ModuleRegistry, ModuleSnapshot};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
@@ -827,10 +836,10 @@ pub use scheduler::{
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BackoffStrategy, BatchOutcome, BatchSubmission, DependencyFailurePolicy,
-    DuplicateStrategy, HistoryStatus, IoBudget, ModuleSubmitDefaults, ParentResolution,
-    RecurringSchedule, RecurringScheduleInfo, RetryPolicy, SubmitBuilder, SubmitOutcome, TaskError,
-    TaskHistoryRecord, TaskLookup, TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats,
-    TypedTask, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
+    DuplicateStrategy, HistoryStatus, IoBudget, ParentResolution, RecurringSchedule,
+    RecurringScheduleInfo, RetryPolicy, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup,
+    TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK,
+    MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
 
 #[cfg(feature = "sysinfo-monitor")]

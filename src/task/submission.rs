@@ -670,32 +670,39 @@ impl TaskSubmission {
     }
 
     /// Create a submission from a [`TypedTask`], serializing the payload and
-    /// pulling task type, priority, IO estimates, key, label, group key,
-    /// scheduling delay, and recurring schedule from the trait.
+    /// pulling configuration from [`TypedTask::config()`] and instance methods.
     pub fn from_typed<T: TypedTask>(task: &T) -> Self {
-        let mut sub = Self::new(T::TASK_TYPE)
-            .priority(task.priority())
-            .payload_json(task)
-            .expected_io(task.expected_io())
-            .on_duplicate(task.on_duplicate())
-            .ttl_from(task.ttl_from());
-        if let Some(t) = task.ttl() {
+        let config = T::config();
+        let mut sub = Self::new(T::TASK_TYPE).payload_json(task);
+        if let Some(p) = config.priority {
+            sub = sub.priority(p);
+        }
+        if let Some(io) = config.expected_io {
+            sub = sub.expected_io(io);
+        }
+        if let Some(od) = config.on_duplicate {
+            sub = sub.on_duplicate(od);
+        }
+        if let Some(tf) = config.ttl_from {
+            sub = sub.ttl_from(tf);
+        }
+        if let Some(t) = config.ttl {
             sub = sub.ttl(t);
+        }
+        if let Some(g) = config.group_key {
+            sub = sub.group(g);
+        }
+        if let Some(delay) = config.run_after {
+            sub = sub.run_after(delay);
+        }
+        if let Some(sched) = config.recurring {
+            sub = sub.recurring_schedule(sched);
         }
         if let Some(k) = task.key() {
             sub = sub.key(k);
         }
         if let Some(l) = task.label() {
             sub = sub.label(l);
-        }
-        if let Some(g) = task.group_key() {
-            sub = sub.group(g);
-        }
-        if let Some(delay) = task.run_after() {
-            sub = sub.run_after(delay);
-        }
-        if let Some(sched) = task.recurring() {
-            sub = sub.recurring_schedule(sched);
         }
         let task_tags = task.tags();
         if !task_tags.is_empty() {

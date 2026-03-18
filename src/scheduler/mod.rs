@@ -258,32 +258,44 @@ impl Scheduler {
         &self.inner.module_registry
     }
 
-    /// Get a scoped handle for the named module.
+    /// Get a typed domain handle.
     ///
     /// The handle exposes submission, cancellation, pause/resume, and query
-    /// methods that are automatically scoped to this module's task type prefix.
+    /// methods that are automatically scoped to this domain's task type prefix.
     ///
     /// # Panics
     ///
-    /// Panics if `name` was not registered with [`SchedulerBuilder::module`].
-    /// For dynamic / runtime lookup, use [`try_module`](Self::try_module) instead.
-    pub fn module(&self, name: &str) -> crate::module::ModuleHandle {
-        self.try_module(name)
-            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .module(...) to the SchedulerBuilder?"))
+    /// Panics if `D` was not registered with [`SchedulerBuilder::domain`].
+    /// For fallible lookup, use [`try_domain`](Self::try_domain) instead.
+    pub fn domain<D: crate::domain::DomainKey>(&self) -> crate::domain::DomainHandle<D> {
+        self.try_domain::<D>()
+            .unwrap_or_else(|| panic!("domain '{}' is not registered — did you forget to add .domain(...) to the SchedulerBuilder?", D::NAME))
     }
 
-    /// Get a scoped handle for the named module, returning `None` if it is not registered.
-    pub fn try_module(&self, name: &str) -> Option<crate::module::ModuleHandle> {
+    /// Get a typed domain handle, returning `None` if the domain is not registered.
+    pub fn try_domain<D: crate::domain::DomainKey>(
+        &self,
+    ) -> Option<crate::domain::DomainHandle<D>> {
+        let handle = self.try_module(D::NAME)?;
+        Some(crate::domain::DomainHandle::new(handle))
+    }
+
+    /// Get an untyped module handle by name (internal).
+    #[allow(dead_code)]
+    pub(crate) fn module(&self, name: &str) -> crate::module::ModuleHandle {
+        self.try_module(name)
+            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .domain(...) to the SchedulerBuilder?"))
+    }
+
+    /// Get an untyped module handle, returning `None` if not registered (internal).
+    pub(crate) fn try_module(&self, name: &str) -> Option<crate::module::ModuleHandle> {
         let entry = self.inner.module_registry.get(name)?;
         Some(crate::module::ModuleHandle::new(self.clone(), entry))
     }
 
-    /// All registered module handles, in registration order.
-    ///
-    /// Useful for cross-cutting operations that span every module, such as
-    /// cancelling tasks by tag across all modules or building a per-module
-    /// dashboard snapshot.
-    pub fn modules(&self) -> Vec<crate::module::ModuleHandle> {
+    /// All registered module handles, in registration order (internal).
+    #[allow(dead_code)]
+    pub(crate) fn modules(&self) -> Vec<crate::module::ModuleHandle> {
         self.inner
             .module_registry
             .entries()

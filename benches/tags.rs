@@ -2,14 +2,18 @@
 //!
 //! Run with: `cargo bench --bench tags`
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
-    Module, Scheduler, TaskContext, TaskError, TaskExecutor, TaskStore, TaskSubmission,
+    Domain, DomainKey, Scheduler, TaskContext, TaskError, TaskExecutor, TaskStore, TaskSubmission,
 };
 use tokio::runtime::Runtime;
+
+struct BenchDomain;
+impl DomainKey for BenchDomain {
+    const NAME: &'static str = "bench";
+}
 
 struct NoopExecutor;
 
@@ -51,7 +55,7 @@ fn bench_submit_with_tags(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async move {
                     let sched = Scheduler::builder()
                         .store(TaskStore::open_memory().await.unwrap())
-                        .module(Module::new("bench").executor("test", Arc::new(NoopExecutor)))
+                        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                         .max_concurrency(4)
                         .poll_interval(Duration::from_millis(10))
                         .build()

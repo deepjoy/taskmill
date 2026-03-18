@@ -88,6 +88,7 @@ pub struct Module {
     pub(crate) app_state_entries: Vec<(TypeId, Arc<dyn Any + Send + Sync>)>,
 }
 
+#[allow(dead_code)]
 impl Module {
     /// Create a new module with the given name.
     ///
@@ -457,31 +458,35 @@ impl ModuleHandle {
     ///
     /// Uses the 5-layer precedence chain: module defaults override TypedTask
     /// values, and SubmitBuilder per-call overrides trump everything.
-    pub fn submit_typed<T: TypedTask>(&self, task: &T) -> SubmitBuilder {
-        // Build the base submission without the layered fields (priority, group,
-        // ttl, tags). Those go into TypedTaskDefaults so that resolve() can
-        // apply module defaults on top of them (module wins over TypedTask).
-        let mut sub = TaskSubmission::new(T::TASK_TYPE)
-            .payload_json(task)
-            .expected_io(task.expected_io())
-            .on_duplicate(task.on_duplicate())
-            .ttl_from(task.ttl_from());
+    #[allow(dead_code)]
+    pub(crate) fn submit_typed<T: TypedTask>(&self, task: &T) -> SubmitBuilder {
+        let config = T::config();
+        let mut sub = TaskSubmission::new(T::TASK_TYPE).payload_json(task);
+        if let Some(io) = config.expected_io {
+            sub = sub.expected_io(io);
+        }
+        if let Some(od) = config.on_duplicate {
+            sub = sub.on_duplicate(od);
+        }
+        if let Some(tf) = config.ttl_from {
+            sub = sub.ttl_from(tf);
+        }
         if let Some(k) = task.key() {
             sub = sub.key(k);
         }
         if let Some(l) = task.label() {
             sub = sub.label(l);
         }
-        if let Some(delay) = task.run_after() {
+        if let Some(delay) = config.run_after {
             sub = sub.run_after(delay);
         }
-        if let Some(sched) = task.recurring() {
+        if let Some(sched) = config.recurring {
             sub = sub.recurring_schedule(sched);
         }
         let typed_defaults = TypedTaskDefaults {
-            priority: task.priority(),
-            group: task.group_key(),
-            ttl: task.ttl(),
+            priority: config.priority.unwrap_or(Priority::NORMAL),
+            group: config.group_key,
+            ttl: config.ttl,
             tags: task.tags(),
         };
         self.submit(sub).with_typed_defaults(typed_defaults)
@@ -948,7 +953,13 @@ mod tests {
         path: String,
     }
 
+    struct TestDomain;
+    impl crate::domain::DomainKey for TestDomain {
+        const NAME: &'static str = "test";
+    }
+
     impl TypedTask for ThumbTask {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "thumbnail";
     }
 

@@ -186,35 +186,17 @@ impl TaskContext {
     // ── Module access ─────────────────────────────────────────────────
 
     /// Returns a scoped handle for this task's owning module.
-    ///
-    /// The handle auto-prefixes task types and applies the module's defaults.
-    /// Use this for same-module follow-up submissions:
-    ///
-    /// ```ignore
-    /// ctx.current_module().submit_typed(&NextStep { ... }).await?;
-    /// ```
     pub fn current_module(&self) -> ModuleHandle {
         self.module(&self.owning_module)
     }
 
     /// Returns a scoped handle for the named module.
-    ///
-    /// Use this for cross-module submissions from within an executor:
-    ///
-    /// ```ignore
-    /// ctx.module("analytics").submit_typed(&TrackEvent { ... }).await?;
-    /// ```
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` is not a registered module or the scheduler has shut down.
     pub fn module(&self, name: &str) -> ModuleHandle {
         self.try_module(name)
-            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .module(...) to the SchedulerBuilder?"))
+            .unwrap_or_else(|| panic!("module '{name}' is not registered — did you forget to add .domain(...) to the SchedulerBuilder?"))
     }
 
-    /// Returns a scoped handle for the named module, or `None` if the module is
-    /// not registered or the scheduler has shut down.
+    /// Returns a scoped handle for the named module, or `None` if not registered.
     pub fn try_module(&self, name: &str) -> Option<ModuleHandle> {
         let entry = self.module_registry.get(name)?;
         let scheduler = self.scheduler.upgrade()?;

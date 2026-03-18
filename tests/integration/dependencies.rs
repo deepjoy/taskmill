@@ -4,10 +4,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskmill::{Module, Scheduler, TaskStore, TaskSubmission};
+use taskmill::{Domain, DomainKey, Scheduler, TaskStore, TaskSubmission};
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
+
+struct TestDomain;
+impl DomainKey for TestDomain {
+    const NAME: &'static str = "test";
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // M. Task Dependencies
@@ -428,22 +433,25 @@ async fn dep_blocked_count_in_snapshot() {
     let store = TaskStore::open_memory().await.unwrap();
     let sched = Scheduler::builder()
         .store(store)
-        .module(
-            Module::new("test").executor("test", Arc::new(DelayExecutor(Duration::from_secs(60)))),
+        .domain(
+            Domain::<TestDomain>::new()
+                .raw_executor("test", DelayExecutor(Duration::from_secs(60))),
         )
         .build()
         .await
         .unwrap();
 
-    let outcome_a = sched
-        .submit(&TaskSubmission::new("test::test").key("snap-a"))
+    let handle = sched.domain::<TestDomain>();
+
+    let outcome_a = handle
+        .submit_raw(TaskSubmission::new("test::test").key("snap-a"))
         .await
         .unwrap();
     let id_a = outcome_a.id().unwrap();
 
-    sched
-        .submit(
-            &TaskSubmission::new("test::test")
+    handle
+        .submit_raw(
+            TaskSubmission::new("test::test")
                 .key("snap-b")
                 .depends_on(id_a),
         )
@@ -465,48 +473,41 @@ async fn dep_full_chain_with_scheduler() {
 
     let sched = Scheduler::builder()
         .store(store)
-        .module(Module::new("test").executor(
+        .domain(Domain::<TestDomain>::new().raw_executor(
             "step",
-            Arc::new(CountingExecutor {
+            CountingExecutor {
                 count: counter.clone(),
-            }),
+            },
         ))
         .build()
         .await
         .unwrap();
 
-    let mut rx = sched.subscribe();
+    let domain_handle = sched.domain::<TestDomain>();
+    let mut rx = domain_handle.events();
 
     // Start the scheduler run loop.
     let token = CancellationToken::new();
     let sched_clone = sched.clone();
     let token_clone = token.clone();
-    let handle = tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         sched_clone.run(token_clone).await;
     });
 
-    let outcome_a = sched
-        .submit(&TaskSubmission::new("test::step").key("chain-a"))
+    let outcome_a = domain_handle
+        .submit_raw(TaskSubmission::new("step").key("chain-a"))
         .await
         .unwrap();
     let id_a = outcome_a.id().unwrap();
 
-    let outcome_b = sched
-        .submit(
-            &TaskSubmission::new("test::step")
-                .key("chain-b")
-                .depends_on(id_a),
-        )
+    let outcome_b = domain_handle
+        .submit_raw(TaskSubmission::new("step").key("chain-b").depends_on(id_a))
         .await
         .unwrap();
     let id_b = outcome_b.id().unwrap();
 
-    let outcome_c = sched
-        .submit(
-            &TaskSubmission::new("test::step")
-                .key("chain-c")
-                .depends_on(id_b),
-        )
+    let outcome_c = domain_handle
+        .submit_raw(TaskSubmission::new("step").key("chain-c").depends_on(id_b))
         .await
         .unwrap();
     let _id_c = outcome_c.id().unwrap();
@@ -522,7 +523,7 @@ async fn dep_full_chain_with_scheduler() {
     }
 
     token.cancel();
-    let _ = handle.await;
+    let _ = join_handle.await;
 
     assert_eq!(completed, 3);
     assert_eq!(counter.load(Ordering::SeqCst), 3);

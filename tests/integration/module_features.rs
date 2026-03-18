@@ -6,23 +6,45 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    Module, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor,
+    TaskStore, TaskSubmission, TaskTypeConfig,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
 
+// ── Domain key structs ──────────────────────────────────────────────
+
+struct MediaDomain;
+impl DomainKey for MediaDomain {
+    const NAME: &'static str = "media";
+}
+
+struct SyncDomain;
+impl DomainKey for SyncDomain {
+    const NAME: &'static str = "sync";
+}
+
+struct ADomain;
+impl DomainKey for ADomain {
+    const NAME: &'static str = "a";
+}
+
+struct BDomain;
+impl DomainKey for BDomain {
+    const NAME: &'static str = "b";
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // P. Default Layering (Step 5)
 // ═══════════════════════════════════════════════════════════════════
 
-/// Full 5-layer precedence chain exercised through `submit_typed()`:
+/// Full 5-layer precedence chain exercised through `submit_with()`:
 ///
 /// Layer 1 (SubmitBuilder override) > Layer 3 (module defaults) >
 /// Layer 4 (TypedTask defaults) > Layer 5 (scheduler global defaults).
 ///
-/// Layer 2 (explicit TaskSubmission field) is not relevant for `submit_typed()`
+/// Layer 2 (explicit TaskSubmission field) is not relevant for `submit_with()`
 /// since the submission is always built from the TypedTask.
 #[tokio::test]
 async fn submit_typed_five_layer_precedence_chain() {
@@ -30,15 +52,13 @@ async fn submit_typed_five_layer_precedence_chain() {
     struct LayeredTask;
 
     impl taskmill::TypedTask for LayeredTask {
+        type Domain = MediaDomain;
         const TASK_TYPE: &'static str = "layered";
-        fn priority(&self) -> Priority {
-            Priority::HIGH // layer 4: should be overridden by module (layer 3)
-        }
-        fn group_key(&self) -> Option<String> {
-            Some("typed-group".into()) // layer 4: should be overridden by module
-        }
-        fn ttl(&self) -> Option<std::time::Duration> {
-            Some(std::time::Duration::from_secs(7200)) // layer 4: overridden by module
+        fn config() -> TaskTypeConfig {
+            TaskTypeConfig::new()
+                .priority(Priority::HIGH) // layer 4: should be overridden by module (layer 3)
+                .group("typed-group") // layer 4: should be overridden by module
+                .ttl(std::time::Duration::from_secs(7200)) // layer 4: overridden by module
         }
         fn tags(&self) -> std::collections::HashMap<String, String> {
             [("source".into(), "typed".into())].into()
@@ -48,9 +68,9 @@ async fn submit_typed_five_layer_precedence_chain() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
         .default_ttl(std::time::Duration::from_secs(14400)) // layer 5 (not reached)
-        .module(
-            Module::new("media")
-                .executor("layered", Arc::new(NoopExecutor))
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor("layered", NoopExecutor)
                 .default_priority(Priority::BACKGROUND) // layer 3: overrides TypedTask HIGH
                 .default_group("module-group") // layer 3: overrides typed-group
                 .default_ttl(std::time::Duration::from_secs(10800)) // layer 3: 3 h
@@ -60,11 +80,11 @@ async fn submit_typed_five_layer_precedence_chain() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
+    let media = sched.domain::<MediaDomain>();
 
     // Layer 1: SubmitBuilder overrides trump everything.
     let outcome = media
-        .submit_typed(&LayeredTask)
+        .submit_with(LayeredTask)
         .priority(Priority::REALTIME) // beats module's BACKGROUND
         .ttl(std::time::Duration::from_secs(3600)) // beats module's 3 h
         .await
@@ -119,15 +139,15 @@ async fn module_cap_limits_concurrency_to_2() {
         .store(TaskStore::open_memory().await.unwrap())
         .max_concurrency(10) // global cap high — module cap should bind
         .poll_interval(Duration::from_millis(20))
-        .module(
-            Module::new("media")
-                .executor(
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: current.clone(),
                         max_seen: max_seen.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(2),
         )
@@ -135,10 +155,10 @@ async fn module_cap_limits_concurrency_to_2() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
+    let media = sched.domain::<MediaDomain>();
     for i in 0..5 {
         media
-            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
             .await
             .unwrap();
     }
@@ -182,15 +202,15 @@ async fn module_cap_and_group_cap_are_independent() {
         .max_concurrency(10)
         .poll_interval(Duration::from_millis(20))
         .group_concurrency("gpu", 2) // group cap = 2
-        .module(
-            Module::new("media")
-                .executor(
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: current.clone(),
                         max_seen: max_seen.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(4), // module cap = 4
         )
@@ -198,11 +218,11 @@ async fn module_cap_and_group_cap_are_independent() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
+    let media = sched.domain::<MediaDomain>();
     // Submit 6 tasks all in the "gpu" group — group cap is the binding constraint.
     for i in 0..6 {
         media
-            .submit(
+            .submit_raw(
                 TaskSubmission::new("work")
                     .key(format!("t{i}"))
                     .group("gpu"),
@@ -248,15 +268,15 @@ async fn ungrouped_task_respects_module_cap() {
         .store(TaskStore::open_memory().await.unwrap())
         .max_concurrency(10)
         .poll_interval(Duration::from_millis(20))
-        .module(
-            Module::new("media")
-                .executor(
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: current.clone(),
                         max_seen: max_seen.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(3),
         )
@@ -264,10 +284,10 @@ async fn ungrouped_task_respects_module_cap() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
+    let media = sched.domain::<MediaDomain>();
     for i in 0..7 {
         media
-            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
             .await
             .unwrap();
     }
@@ -310,27 +330,27 @@ async fn global_cap_is_hard_ceiling_over_module_caps() {
         .store(TaskStore::open_memory().await.unwrap())
         .max_concurrency(4) // global ceiling — should bind at 4 even though 3+3=6
         .poll_interval(Duration::from_millis(20))
-        .module(
-            Module::new("media")
-                .executor(
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: total_current.clone(),
                         max_seen: total_max.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(3),
         )
-        .module(
-            Module::new("sync")
-                .executor(
+        .domain(
+            Domain::<SyncDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: total_current.clone(),
                         max_seen: total_max.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(3),
         )
@@ -338,14 +358,14 @@ async fn global_cap_is_hard_ceiling_over_module_caps() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
-    let sync = sched.module("sync");
+    let media = sched.domain::<MediaDomain>();
+    let sync = sched.domain::<SyncDomain>();
     for i in 0..5 {
         media
-            .submit(TaskSubmission::new("work").key(format!("m{i}")))
+            .submit_raw(TaskSubmission::new("work").key(format!("m{i}")))
             .await
             .unwrap();
-        sync.submit(TaskSubmission::new("work").key(format!("s{i}")))
+        sync.submit_raw(TaskSubmission::new("work").key(format!("s{i}")))
             .await
             .unwrap();
     }
@@ -387,15 +407,15 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
         .store(TaskStore::open_memory().await.unwrap())
         .max_concurrency(10)
         .poll_interval(Duration::from_millis(20))
-        .module(
-            Module::new("media")
-                .executor(
+        .domain(
+            Domain::<MediaDomain>::new()
+                .raw_executor(
                     "work",
-                    Arc::new(ConcurrencyTrackingExecutor {
+                    ConcurrencyTrackingExecutor {
                         current: current.clone(),
                         max_seen: max_seen.clone(),
                         delay: Duration::from_millis(100),
-                    }),
+                    },
                 )
                 .max_concurrency(4), // initial cap — will be narrowed at runtime
         )
@@ -403,7 +423,7 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
         .await
         .unwrap();
 
-    let media = sched.module("media");
+    let media = sched.domain::<MediaDomain>();
 
     // Narrow the cap to 2 before dispatching anything.
     media.set_max_concurrency(2);
@@ -415,7 +435,7 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
 
     for i in 0..6 {
         media
-            .submit(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
             .await
             .unwrap();
     }
@@ -476,29 +496,29 @@ async fn module_state_is_scoped_to_module() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
         .poll_interval(Duration::from_millis(20))
-        .module(
-            Module::new("a")
-                .executor(
+        .domain(
+            Domain::<ADomain>::new()
+                .raw_executor(
                     "task",
-                    Arc::new(CheckerExec {
+                    CheckerExec {
                         saw_a: Arc::clone(&saw_a),
                         no_b: Arc::clone(&no_b),
-                    }),
+                    },
                 )
-                .app_state(ConfigA("a-config".into())),
+                .state(ConfigA("a-config".into())),
         )
-        .module(
-            Module::new("b")
-                .executor("task", Arc::new(NoopExecutor))
-                .app_state(ConfigB("b-config".into())),
+        .domain(
+            Domain::<BDomain>::new()
+                .raw_executor("task", NoopExecutor)
+                .state(ConfigB("b-config".into())),
         )
         .build()
         .await
         .unwrap();
 
     sched
-        .module("a")
-        .submit(TaskSubmission::new("task").key("t1"))
+        .domain::<ADomain>()
+        .submit_raw(TaskSubmission::new("task").key("t1"))
         .await
         .unwrap();
 
@@ -552,20 +572,20 @@ async fn global_state_accessible_from_all_modules() {
         .store(TaskStore::open_memory().await.unwrap())
         .poll_interval(Duration::from_millis(20))
         .app_state(SharedConfig("global".into()))
-        .module(Module::new("a").executor("task", Arc::new(GlobalChecker(Arc::clone(&a_saw)))))
-        .module(Module::new("b").executor("task", Arc::new(GlobalChecker(Arc::clone(&b_saw)))))
+        .domain(Domain::<ADomain>::new().raw_executor("task", GlobalChecker(Arc::clone(&a_saw))))
+        .domain(Domain::<BDomain>::new().raw_executor("task", GlobalChecker(Arc::clone(&b_saw))))
         .build()
         .await
         .unwrap();
 
     sched
-        .module("a")
-        .submit(TaskSubmission::new("task").key("ta"))
+        .domain::<ADomain>()
+        .submit_raw(TaskSubmission::new("task").key("ta"))
         .await
         .unwrap();
     sched
-        .module("b")
-        .submit(TaskSubmission::new("task").key("tb"))
+        .domain::<BDomain>()
+        .submit_raw(TaskSubmission::new("task").key("tb"))
         .await
         .unwrap();
 
@@ -618,24 +638,24 @@ async fn module_state_shadows_global_state() {
         .store(TaskStore::open_memory().await.unwrap())
         .poll_interval(Duration::from_millis(20))
         .app_state(Config("global".into()))
-        .module(
-            Module::new("a")
-                .executor("task", Arc::new(ValueCapture(Arc::clone(&a_value))))
-                .app_state(Config("module-a".into())),
+        .domain(
+            Domain::<ADomain>::new()
+                .raw_executor("task", ValueCapture(Arc::clone(&a_value)))
+                .state(Config("module-a".into())),
         )
-        .module(Module::new("b").executor("task", Arc::new(ValueCapture(Arc::clone(&b_value)))))
+        .domain(Domain::<BDomain>::new().raw_executor("task", ValueCapture(Arc::clone(&b_value))))
         .build()
         .await
         .unwrap();
 
     sched
-        .module("a")
-        .submit(TaskSubmission::new("task").key("ta"))
+        .domain::<ADomain>()
+        .submit_raw(TaskSubmission::new("task").key("ta"))
         .await
         .unwrap();
     sched
-        .module("b")
-        .submit(TaskSubmission::new("task").key("tb"))
+        .domain::<BDomain>()
+        .submit_raw(TaskSubmission::new("task").key("tb"))
         .await
         .unwrap();
 

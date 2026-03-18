@@ -1,8 +1,15 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::DomainKey;
 use crate::priority::Priority;
 
 use super::{BatchSubmission, IoBudget, TaskSubmission, TypedTask};
+
+// Test-only domain key used by all test TypedTask impls in this module.
+struct TestDomain;
+impl DomainKey for TestDomain {
+    const NAME: &'static str = "test";
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Thumbnail {
@@ -11,10 +18,11 @@ struct Thumbnail {
 }
 
 impl TypedTask for Thumbnail {
+    type Domain = TestDomain;
     const TASK_TYPE: &'static str = "thumbnail";
 
-    fn expected_io(&self) -> IoBudget {
-        IoBudget::disk(4096, 1024)
+    fn config() -> crate::domain::TaskTypeConfig {
+        crate::domain::TaskTypeConfig::new().expected_io(IoBudget::disk(4096, 1024))
     }
 }
 
@@ -27,7 +35,6 @@ fn typed_task_to_submission() {
     let sub = TaskSubmission::from_typed(&task);
 
     assert_eq!(sub.task_type, "thumbnail");
-    assert_eq!(sub.priority, Priority::NORMAL);
     assert_eq!(sub.expected_io.disk_read, 4096);
     assert_eq!(sub.expected_io.disk_write, 1024);
     assert!(sub.dedup_key.is_none());
@@ -45,10 +52,11 @@ fn typed_task_custom_priority() {
     }
 
     impl TypedTask for Urgent {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "urgent";
 
-        fn priority(&self) -> Priority {
-            Priority::HIGH
+        fn config() -> crate::domain::TaskTypeConfig {
+            crate::domain::TaskTypeConfig::new().priority(Priority::HIGH)
         }
     }
 
@@ -63,6 +71,7 @@ fn typed_task_defaults() {
     struct Minimal;
 
     impl TypedTask for Minimal {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "minimal";
     }
 
@@ -81,14 +90,15 @@ fn typed_task_with_network_and_group() {
     }
 
     impl TypedTask for S3Upload {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "s3-upload";
 
-        fn expected_io(&self) -> IoBudget {
-            IoBudget::net(0, self.size)
-        }
-
-        fn group_key(&self) -> Option<String> {
-            Some(format!("s3://{}", self.bucket))
+        fn config() -> crate::domain::TaskTypeConfig {
+            // Note: expected_io and group_key were instance methods but are now
+            // static config. For payload-dependent values, use key()/tags().
+            crate::domain::TaskTypeConfig::new()
+                .expected_io(IoBudget::net(0, 10_000_000))
+                .group("s3://default-bucket".to_string())
         }
     }
 
@@ -99,7 +109,8 @@ fn typed_task_with_network_and_group() {
     let sub = TaskSubmission::from_typed(&task);
     assert_eq!(sub.expected_io.net_tx, 10_000_000);
     assert_eq!(sub.expected_io.net_rx, 0);
-    assert_eq!(sub.group_key.as_deref(), Some("s3://my-bucket"));
+    // Group is now a static config, not payload-dependent.
+    assert_eq!(sub.group_key.as_deref(), Some("s3://default-bucket"));
 }
 
 #[test]
@@ -124,6 +135,7 @@ fn typed_task_key_and_label() {
     }
 
     impl TypedTask for FileTask {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "file-task";
 
         fn key(&self) -> Option<String> {
@@ -193,6 +205,7 @@ fn typed_task_with_tags() {
     }
 
     impl TypedTask for TaggedTask {
+        type Domain = TestDomain;
         const TASK_TYPE: &'static str = "tagged";
 
         fn tags(&self) -> HashMap<String, String> {

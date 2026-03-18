@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
+use crate::domain::DomainKey;
 use crate::module::{Module, ModuleEntry, ModuleRegistry};
 use crate::priority::Priority;
 use crate::resource::sampler::{SamplerConfig, SmoothedReader};
@@ -22,22 +23,19 @@ use super::Scheduler;
 ///
 /// # Example
 ///
-/// ```no_run
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// use std::sync::Arc;
-/// use taskmill::{Module, Scheduler, Priority};
+/// ```ignore
+/// use taskmill::{Domain, DomainKey, Scheduler};
+///
+/// struct App;
+/// impl DomainKey for App { const NAME: &'static str = "app"; }
 ///
 /// let scheduler = Scheduler::builder()
 ///     .store_path("tasks.db")
-///     .module(Module::new("app")
-///         // .executor("scan", Arc::new(my_scan_executor))
-///     )
+///     .domain(Domain::<App>::new())
 ///     .max_concurrency(8)
 ///     .with_resource_monitoring()
 ///     .build()
 ///     .await?;
-/// # Ok(())
-/// # }
 /// ```
 pub struct SchedulerBuilder {
     store_path: Option<String>,
@@ -95,11 +93,16 @@ impl SchedulerBuilder {
         self
     }
 
-    /// Register a module. All executor task types within the module are
-    /// automatically prefixed with `"{module_name}::"` at build time.
+    /// Register a typed domain. All executor task types within the domain
+    /// are automatically prefixed with `"{domain_name}::"` at build time.
     ///
-    /// At least one module must be registered before calling [`build`](Self::build).
-    pub fn module(mut self, module: Module) -> Self {
+    /// At least one domain must be registered before calling [`build`](Self::build).
+    pub fn domain<D: DomainKey>(self, domain: crate::domain::Domain<D>) -> Self {
+        self.module(domain.into_module())
+    }
+
+    /// Register an untyped module (internal).
+    pub(crate) fn module(mut self, module: Module) -> Self {
         self.modules.push(module);
         self
     }

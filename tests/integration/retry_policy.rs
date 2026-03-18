@@ -1,17 +1,100 @@
 //! Integration tests: Phase 6 — Dispatch Loop / Adaptive Retry Integration
 
-use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use taskmill::{
-    Module, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    BackoffStrategy, Domain, DomainKey, RetryPolicy, Scheduler, SchedulerEvent, TaskContext,
+    TaskError, TaskExecutor, TaskStore, TaskSubmission, TaskTypeConfig, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
-// ── Local Executors ──────────────────────────────────────────────────
+// ── Domain Key ─────────────────────────────────────────────────────
 
-/// Always fails with a retryable error.
+struct TestDomain;
+impl DomainKey for TestDomain {
+    const NAME: &'static str = "test";
+}
+
+// ── Typed Tasks ────────────────────────────────────────────────────
+
+/// Task type with a per-type constant retry policy (max_retries=5).
+#[derive(Serialize, Deserialize)]
+struct TypeATask;
+
+impl TypedTask for TypeATask {
+    type Domain = TestDomain;
+    const TASK_TYPE: &'static str = "type-a";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new().retry(RetryPolicy {
+            strategy: BackoffStrategy::Constant {
+                delay: Duration::ZERO,
+            },
+            max_retries: 5,
+        })
+    }
+}
+
+/// Task type with no per-type retry policy (uses global default).
+#[derive(Serialize, Deserialize)]
+struct TypeBTask;
+
+impl TypedTask for TypeBTask {
+    type Domain = TestDomain;
+    const TASK_TYPE: &'static str = "type-b";
+}
+
+/// Task type with an exponential backoff retry policy.
+#[derive(Serialize, Deserialize)]
+struct BackoffTestTask;
+
+impl TypedTask for BackoffTestTask {
+    type Domain = TestDomain;
+    const TASK_TYPE: &'static str = "backoff-test";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new().retry(RetryPolicy {
+            strategy: BackoffStrategy::Exponential {
+                initial: Duration::from_millis(200),
+                max: Duration::from_secs(10),
+                multiplier: 2.0,
+            },
+            max_retries: 3,
+        })
+    }
+}
+
+/// Task type with a constant 5s retry policy.
+#[derive(Serialize, Deserialize)]
+struct RetryEventTask;
+
+impl TypedTask for RetryEventTask {
+    type Domain = TestDomain;
+    const TASK_TYPE: &'static str = "retry-event";
+
+    fn config() -> TaskTypeConfig {
+        TaskTypeConfig::new().retry(RetryPolicy {
+            strategy: BackoffStrategy::Constant {
+                delay: Duration::from_secs(5),
+            },
+            max_retries: 2,
+        })
+    }
+}
+
+// ── Typed Executors ────────────────────────────────────────────────
+
+/// Always fails with a retryable error. Works as a TypedExecutor for any task type.
+struct AlwaysRetryableTypedExec;
+
+impl<T: TypedTask> TypedExecutor<T> for AlwaysRetryableTypedExec {
+    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+        Err(TaskError::retryable("transient"))
+    }
+}
+
+/// Always fails with a retryable error (untyped, for raw_executor).
 struct AlwaysRetryableExecutor;
 
 impl TaskExecutor for AlwaysRetryableExecutor {
@@ -20,7 +103,7 @@ impl TaskExecutor for AlwaysRetryableExecutor {
     }
 }
 
-/// Fails with a retryable error and requests a specific retry delay.
+/// Fails with a retryable error and requests a specific retry delay (untyped).
 struct RetryAfterExecutor(Duration);
 
 impl TaskExecutor for RetryAfterExecutor {
@@ -40,21 +123,12 @@ impl TaskExecutor for RetryAfterExecutor {
 /// B should exhaust 3 retries.
 #[tokio::test]
 async fn per_type_retry_policy_overrides_global_default() {
-    use taskmill::{BackoffStrategy, RetryPolicy};
-
-    let policy_a = RetryPolicy {
-        strategy: BackoffStrategy::Constant {
-            delay: Duration::ZERO,
-        },
-        max_retries: 5,
-    };
-
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(
-            Module::new("test")
-                .executor_with_retry_policy("type-a", Arc::new(AlwaysRetryableExecutor), policy_a)
-                .executor("type-b", Arc::new(AlwaysRetryableExecutor)),
+        .domain(
+            Domain::<TestDomain>::new()
+                .task::<TypeATask>(AlwaysRetryableTypedExec)
+                .task::<TypeBTask>(AlwaysRetryableTypedExec),
         )
         .max_retries(3)
         .max_concurrency(2)
@@ -71,14 +145,9 @@ async fn per_type_retry_policy_overrides_global_default() {
         async move { s.run(t).await }
     });
 
-    sched
-        .submit(&TaskSubmission::new("test::type-a").key("a1"))
-        .await
-        .unwrap();
-    sched
-        .submit(&TaskSubmission::new("test::type-b").key("b1"))
-        .await
-        .unwrap();
+    let test_handle = sched.domain::<TestDomain>();
+    test_handle.submit(TypeATask).await.unwrap();
+    test_handle.submit(TypeBTask).await.unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut dead_a = false;
@@ -133,24 +202,9 @@ async fn per_type_retry_policy_overrides_global_default() {
 /// dispatches grow according to the backoff schedule.
 #[tokio::test]
 async fn exponential_backoff_delays_redispatch() {
-    use taskmill::{BackoffStrategy, RetryPolicy};
-
-    let policy = RetryPolicy {
-        strategy: BackoffStrategy::Exponential {
-            initial: Duration::from_millis(200),
-            max: Duration::from_secs(10),
-            multiplier: 2.0,
-        },
-        max_retries: 3,
-    };
-
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("test").executor_with_retry_policy(
-            "backoff-test",
-            Arc::new(AlwaysRetryableExecutor),
-            policy,
-        ))
+        .domain(Domain::<TestDomain>::new().task::<BackoffTestTask>(AlwaysRetryableTypedExec))
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -165,10 +219,8 @@ async fn exponential_backoff_delays_redispatch() {
         async move { s.run(t).await }
     });
 
-    sched
-        .submit(&TaskSubmission::new("test::backoff-test").key("bk1"))
-        .await
-        .unwrap();
+    let test_handle = sched.domain::<TestDomain>();
+    test_handle.submit(BackoffTestTask).await.unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut dispatch_times: Vec<tokio::time::Instant> = Vec::new();
@@ -197,7 +249,7 @@ async fn exponential_backoff_delays_redispatch() {
         dispatch_times.len()
     );
 
-    // Gap between dispatch 1→2 should be ≥150ms (backoff=200ms, allow some slack).
+    // Gap between dispatch 1->2 should be >=150ms (backoff=200ms, allow some slack).
     if dispatch_times.len() >= 2 {
         let gap = dispatch_times[1] - dispatch_times[0];
         assert!(
@@ -206,7 +258,7 @@ async fn exponential_backoff_delays_redispatch() {
             gap
         );
     }
-    // Gap between dispatch 2→3 should be ≥300ms (backoff=400ms=200*2^1).
+    // Gap between dispatch 2->3 should be >=300ms (backoff=400ms=200*2^1).
     if dispatch_times.len() >= 3 {
         let gap = dispatch_times[2] - dispatch_times[1];
         assert!(
@@ -220,22 +272,9 @@ async fn exponential_backoff_delays_redispatch() {
 /// 6.7: `SchedulerEvent::Failed` includes correct `retry_after` duration.
 #[tokio::test]
 async fn failed_event_includes_retry_after_duration() {
-    use taskmill::{BackoffStrategy, RetryPolicy};
-
-    let policy = RetryPolicy {
-        strategy: BackoffStrategy::Constant {
-            delay: Duration::from_secs(5),
-        },
-        max_retries: 2,
-    };
-
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("test").executor_with_retry_policy(
-            "retry-event",
-            Arc::new(AlwaysRetryableExecutor),
-            policy,
-        ))
+        .domain(Domain::<TestDomain>::new().task::<RetryEventTask>(AlwaysRetryableTypedExec))
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -250,10 +289,8 @@ async fn failed_event_includes_retry_after_duration() {
         async move { s.run(t).await }
     });
 
-    sched
-        .submit(&TaskSubmission::new("test::retry-event").key("re1"))
-        .await
-        .unwrap();
+    let test_handle = sched.domain::<TestDomain>();
+    test_handle.submit(RetryEventTask).await.unwrap();
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut found_retry_after = None;
@@ -285,9 +322,9 @@ async fn failed_event_includes_retry_after_duration() {
 async fn failed_event_includes_executor_retry_after_override() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("test").executor(
+        .domain(Domain::<TestDomain>::new().raw_executor(
             "retry-override",
-            Arc::new(RetryAfterExecutor(Duration::from_secs(42))),
+            RetryAfterExecutor(Duration::from_secs(42)),
         ))
         .max_retries(3)
         .max_concurrency(1)
@@ -342,7 +379,7 @@ async fn failed_event_includes_executor_retry_after_override() {
 async fn null_max_retries_uses_global_default() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(Module::new("test").executor("legacy", Arc::new(AlwaysRetryableExecutor)))
+        .domain(Domain::<TestDomain>::new().raw_executor("legacy", AlwaysRetryableExecutor))
         .max_retries(2)
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
