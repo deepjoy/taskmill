@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
-use crate::registry::{ChildSpawner, IoTracker, ParentContext, TaskContext};
+use crate::registry::{
+    ChildSpawner, IoTracker, ParentContext, StateMap, StateSnapshot, TaskContext,
+};
 use crate::store::TaskStore;
 use crate::task::{IoBudget, ParentResolution, TaskRecord};
 
@@ -349,6 +351,8 @@ pub(crate) struct SpawnContext {
     pub cancel_hook_timeout: tokio::time::Duration,
     /// Per-module live running counts. Incremented on dispatch; decremented on terminal.
     pub module_running: Arc<HashMap<String, AtomicUsize>>,
+    /// Per-module state maps. A snapshot for the task's module is taken at dispatch time.
+    pub module_state: Arc<HashMap<String, StateMap>>,
 }
 
 /// Spawn a task executor and wire up completion/failure handling.
@@ -372,7 +376,20 @@ pub(crate) async fn spawn_task(
         scheduler,
         cancel_hook_timeout: _,
         module_running,
+        module_state,
     } = ctx;
+
+    // Snapshot the per-module state for this task's owning module.
+    let module_state_snapshot: StateSnapshot =
+        if let Some(name) = task.task_type.split_once("::").map(|(n, _)| n) {
+            if let Some(state_map) = module_state.get(name) {
+                state_map.snapshot().await
+            } else {
+                StateSnapshot::default()
+            }
+        } else {
+            StateSnapshot::default()
+        };
     let child_token = CancellationToken::new();
 
     // Build execution context.
@@ -422,6 +439,7 @@ pub(crate) async fn spawn_task(
         ),
         scheduler,
         app_state,
+        module_state: module_state_snapshot,
         child_spawner: Some(child_spawner),
         io: io.clone(),
     };

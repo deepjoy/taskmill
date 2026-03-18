@@ -1,6 +1,7 @@
 //! Ergonomic builder for constructing a [`Scheduler`].
 
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::time::Duration;
@@ -329,9 +330,11 @@ impl SchedulerBuilder {
         // Build registry, prefixing all task types with "{module_name}::".
         let mut registry = crate::registry::TaskTypeRegistry::new();
         let mut module_entries: Vec<ModuleEntry> = Vec::new();
+        let mut module_state_map: HashMap<String, crate::registry::StateMap> = HashMap::new();
 
         for module in self.modules {
             let prefix = module.prefix(); // e.g. "media::"
+            let module_name = module.name.clone();
 
             for exec in &module.executors {
                 let prefixed = format!("{}{}", prefix, exec.task_type);
@@ -362,6 +365,9 @@ impl SchedulerBuilder {
                 }
             }
 
+            // Extract per-module state entries before the push moves `module.name`.
+            let app_state_entries = module.app_state_entries;
+
             module_entries.push(ModuleEntry {
                 prefix: prefix.clone(),
                 default_priority: module.default_priority,
@@ -372,9 +378,15 @@ impl SchedulerBuilder {
                 max_concurrency: module.max_concurrency,
                 name: module.name,
             });
+
+            module_state_map.insert(
+                module_name,
+                crate::registry::StateMap::from_entries(app_state_entries),
+            );
         }
 
         let module_registry = ModuleRegistry::new(module_entries);
+        let module_state = Arc::new(module_state_map);
 
         // Prepare resource monitoring reader early so NetworkPressure can
         // reference it before the gate is boxed.
@@ -415,6 +427,7 @@ impl SchedulerBuilder {
             gate,
             app_state,
             module_registry,
+            module_state,
         );
 
         // Apply group concurrency limits.

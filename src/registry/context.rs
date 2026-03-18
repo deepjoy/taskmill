@@ -30,6 +30,9 @@ pub struct TaskContext {
     pub(crate) progress: ProgressReporter,
     pub(crate) scheduler: WeakScheduler,
     pub(crate) app_state: StateSnapshot,
+    /// Module-scoped state snapshot, taken at dispatch time for the task's owning module.
+    /// Checked before `app_state` in [`state`](Self::state).
+    pub(crate) module_state: StateSnapshot,
     pub(crate) child_spawner: Option<ChildSpawner>,
     pub(crate) io: Arc<IoTracker>,
 }
@@ -114,7 +117,9 @@ impl TaskContext {
     /// svc.db.query("...").await?;
     /// ```
     pub fn state<T: Send + Sync + 'static>(&self) -> Option<&T> {
-        self.app_state.get::<T>()
+        self.module_state
+            .get::<T>()
+            .or_else(|| self.app_state.get::<T>())
     }
 
     // ── IO tracking ──────────────────────────────────────────────────

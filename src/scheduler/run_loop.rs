@@ -28,6 +28,7 @@ impl Scheduler {
             scheduler: self.downgrade(),
             cancel_hook_timeout: self.inner.cancel_hook_timeout,
             module_running: Arc::clone(&self.inner.module_running),
+            module_state: Arc::clone(&self.inner.module_state),
         }
     }
 

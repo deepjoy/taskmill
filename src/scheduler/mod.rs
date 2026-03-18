@@ -100,6 +100,10 @@ pub(crate) struct SchedulerInner {
     pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
     /// Registry of all registered modules (empty for schedulers built without the module API).
     pub(crate) module_registry: crate::module::ModuleRegistry,
+    /// Per-module app state (module name → state map). Populated at build time from
+    /// each module's `.app_state()` calls. Executors access it via
+    /// [`TaskContext::state`], which checks module state before falling back to global.
+    pub(crate) module_state: Arc<HashMap<String, crate::registry::StateMap>>,
     /// Per-module pause flags. Keys are module names; values are `true` when that
     /// module has been explicitly paused via [`ModuleHandle::pause`].
     /// Initialized to `false` for every module at build time.
@@ -174,6 +178,7 @@ impl Scheduler {
             gate,
             Arc::new(crate::registry::StateMap::new()),
             crate::module::ModuleRegistry::empty(),
+            Arc::new(HashMap::new()),
         )
     }
 
@@ -185,6 +190,7 @@ impl Scheduler {
         gate: Box<dyn gate::DispatchGate>,
         app_state: Arc<crate::registry::StateMap>,
         module_registry: crate::module::ModuleRegistry,
+        module_state: Arc<HashMap<String, crate::registry::StateMap>>,
     ) -> Self {
         let module_paused: HashMap<String, AtomicBool> = module_registry
             .entries()
@@ -232,6 +238,7 @@ impl Scheduler {
                 expiry_sweep_interval: config.expiry_sweep_interval,
                 last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
                 module_registry,
+                module_state,
                 module_paused,
                 module_caps: RwLock::new(module_caps),
                 module_running,

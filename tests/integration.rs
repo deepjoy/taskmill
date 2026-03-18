@@ -3057,3 +3057,224 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
         max_seen.load(Ordering::SeqCst)
     );
 }
+
+// ── Step 7: Namespaced StateMap ──────────────────────────────────────────────
+
+/// Module A's executor sees its own scoped state but not module B's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_state_is_scoped_to_module() {
+    struct ConfigA(#[allow(dead_code)] String);
+    struct ConfigB(#[allow(dead_code)] String);
+
+    let saw_a = Arc::new(AtomicBool::new(false));
+    let no_b = Arc::new(AtomicBool::new(true)); // true = "never saw B"
+
+    struct CheckerExec {
+        saw_a: Arc<AtomicBool>,
+        no_b: Arc<AtomicBool>,
+    }
+    impl TaskExecutor for CheckerExec {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            self.saw_a
+                .store(ctx.state::<ConfigA>().is_some(), Ordering::SeqCst);
+            if ctx.state::<ConfigB>().is_some() {
+                self.no_b.store(false, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .poll_interval(Duration::from_millis(20))
+        .module(
+            Module::new("a")
+                .executor(
+                    "task",
+                    Arc::new(CheckerExec {
+                        saw_a: Arc::clone(&saw_a),
+                        no_b: Arc::clone(&no_b),
+                    }),
+                )
+                .app_state(ConfigA("a-config".into())),
+        )
+        .module(
+            Module::new("b")
+                .executor("task", Arc::new(NoopExecutor))
+                .app_state(ConfigB("b-config".into())),
+        )
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("a")
+        .submit(TaskSubmission::new("task").key("t1"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            break;
+        }
+    }
+    token.cancel();
+
+    assert!(
+        saw_a.load(Ordering::SeqCst),
+        "module A executor should see ConfigA"
+    );
+    assert!(
+        no_b.load(Ordering::SeqCst),
+        "module A executor should NOT see ConfigB"
+    );
+}
+
+/// Global state registered on the builder is accessible from executors in all modules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_state_accessible_from_all_modules() {
+    struct SharedConfig(#[allow(dead_code)] String);
+
+    let a_saw = Arc::new(AtomicBool::new(false));
+    let b_saw = Arc::new(AtomicBool::new(false));
+
+    struct GlobalChecker(Arc<AtomicBool>);
+    impl TaskExecutor for GlobalChecker {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            self.0
+                .store(ctx.state::<SharedConfig>().is_some(), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .poll_interval(Duration::from_millis(20))
+        .app_state(SharedConfig("global".into()))
+        .module(Module::new("a").executor("task", Arc::new(GlobalChecker(Arc::clone(&a_saw)))))
+        .module(Module::new("b").executor("task", Arc::new(GlobalChecker(Arc::clone(&b_saw)))))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("a")
+        .submit(TaskSubmission::new("task").key("ta"))
+        .await
+        .unwrap();
+    sched
+        .module("b")
+        .submit(TaskSubmission::new("task").key("tb"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 2 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+    token.cancel();
+
+    assert!(
+        a_saw.load(Ordering::SeqCst),
+        "module A executor should see global SharedConfig"
+    );
+    assert!(
+        b_saw.load(Ordering::SeqCst),
+        "module B executor should see global SharedConfig"
+    );
+}
+
+/// Module-scoped state shadows global state of the same type for that module's executors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn module_state_shadows_global_state() {
+    struct Config(String);
+
+    let a_value = Arc::new(std::sync::Mutex::new(String::new()));
+    let b_value = Arc::new(std::sync::Mutex::new(String::new()));
+
+    struct ValueCapture(Arc<std::sync::Mutex<String>>);
+    impl TaskExecutor for ValueCapture {
+        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+            if let Some(cfg) = ctx.state::<Config>() {
+                *self.0.lock().unwrap() = cfg.0.clone();
+            }
+            Ok(())
+        }
+    }
+
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .poll_interval(Duration::from_millis(20))
+        .app_state(Config("global".into()))
+        .module(
+            Module::new("a")
+                .executor("task", Arc::new(ValueCapture(Arc::clone(&a_value))))
+                .app_state(Config("module-a".into())),
+        )
+        .module(Module::new("b").executor("task", Arc::new(ValueCapture(Arc::clone(&b_value)))))
+        .build()
+        .await
+        .unwrap();
+
+    sched
+        .module("a")
+        .submit(TaskSubmission::new("task").key("ta"))
+        .await
+        .unwrap();
+    sched
+        .module("b")
+        .submit(TaskSubmission::new("task").key("tb"))
+        .await
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let sched_clone = sched.clone();
+    let token_clone = token.clone();
+    let mut rx = sched.subscribe();
+    tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while tokio::time::Instant::now() < deadline && completed < 2 {
+        if let Ok(Ok(SchedulerEvent::Completed(..))) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
+            completed += 1;
+        }
+    }
+    token.cancel();
+
+    assert_eq!(
+        a_value.lock().unwrap().as_str(),
+        "module-a",
+        "module A executor should see its scoped Config, not global"
+    );
+    assert_eq!(
+        b_value.lock().unwrap().as_str(),
+        "global",
+        "module B executor (no module state) should fall back to global Config"
+    );
+}

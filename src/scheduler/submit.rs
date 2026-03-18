@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::priority::Priority;
-use crate::registry::{IoTracker, TaskContext};
+use crate::registry::{IoTracker, StateSnapshot, TaskContext};
 use crate::store::StoreError;
 use crate::task::{
     generate_dedup_key, BatchOutcome, BatchSubmission, HistoryStatus, SubmitOutcome, TaskLookup,
@@ -486,6 +486,7 @@ impl Scheduler {
                 ),
                 scheduler,
                 app_state,
+                module_state: StateSnapshot::default(),
                 child_spawner: None,
                 io,
             };
