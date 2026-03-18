@@ -118,7 +118,10 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
 
             let mut terminal = 0;
             while terminal < 500 {
-                if let Ok(SchedulerEvent::Failed { will_retry: false, .. }) = rx.recv().await {
+                if let Ok(SchedulerEvent::Failed {
+                    will_retry: false, ..
+                }) = rx.recv().await
+                {
                     terminal += 1;
                 }
             }
@@ -137,7 +140,12 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
     let mut group = c.benchmark_group("retryable_dead_letter");
 
     let strategies: &[(&str, BackoffStrategy)] = &[
-        ("constant", BackoffStrategy::Constant { delay: Duration::ZERO }),
+        (
+            "constant",
+            BackoffStrategy::Constant {
+                delay: Duration::ZERO,
+            },
+        ),
         (
             "linear",
             BackoffStrategy::Linear {
@@ -175,13 +183,11 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
                 async move {
                     let sched = Scheduler::builder()
                         .store(TaskStore::open_memory().await.unwrap())
-                        .module(
-                            Module::new("bench").executor_with_retry_policy(
-                                "fail",
-                                Arc::new(FailRetryableExecutor),
-                                policy,
-                            ),
-                        )
+                        .module(Module::new("bench").executor_with_retry_policy(
+                            "fail",
+                            Arc::new(FailRetryableExecutor),
+                            policy,
+                        ))
                         .max_concurrency(8)
                         .poll_interval(Duration::from_millis(10))
                         .build()
@@ -199,8 +205,7 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
                     let token = CancellationToken::new();
                     let sched_clone = sched.clone();
                     let token_clone = token.clone();
-                    let handle =
-                        tokio::spawn(async move { sched_clone.run(token_clone).await });
+                    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
 
                     let mut dead_lettered = 0;
                     while dead_lettered < 100 {

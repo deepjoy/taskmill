@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use taskmill::{Module, Scheduler, TaskContext, TaskError, TaskExecutor, TaskStore, TaskSubmission};
+use taskmill::{
+    Module, Scheduler, TaskContext, TaskError, TaskExecutor, TaskStore, TaskSubmission,
+};
 use tokio::runtime::Runtime;
 
 struct NoopExecutor;
@@ -57,8 +59,7 @@ fn bench_submit_with_tags(c: &mut Criterion) {
                         .unwrap();
 
                     for i in 0..500 {
-                        let mut sub =
-                            TaskSubmission::new("bench::test").key(format!("st-{i}"));
+                        let mut sub = TaskSubmission::new("bench::test").key(format!("st-{i}"));
                         for t in 0..tag_count {
                             sub = sub.tag(format!("key-{t}"), format!("val-{i}-{t}"));
                         }
