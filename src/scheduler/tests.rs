@@ -385,14 +385,14 @@ async fn app_state_accessible_from_executor() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .executor("test", Arc::new(StateCheckExecutor))
+        .module(crate::module::Module::new("test").executor("test", Arc::new(StateCheckExecutor)))
         .app_state(MyState { flag: flag.clone() })
         .build()
         .await
         .unwrap();
 
     sched
-        .submit(&TaskSubmission::new("test").key("state-test"))
+        .submit(&TaskSubmission::new("test::test").key("state-test"))
         .await
         .unwrap();
 

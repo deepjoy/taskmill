@@ -62,6 +62,10 @@ pub struct SchedulerSnapshot {
 pub struct TaskEventHeader {
     pub task_id: i64,
     pub task_type: String,
+    /// Module name extracted from the `task_type` prefix (everything before
+    /// `"::"`, e.g. `"media"` for `"media::thumbnail"`).
+    /// Empty string for task types that have no module prefix.
+    pub module: String,
     pub key: String,
     pub label: String,
     /// Key-value metadata tags from the task record.

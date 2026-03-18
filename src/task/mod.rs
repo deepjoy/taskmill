@@ -34,6 +34,7 @@ pub mod dedup;
 mod error;
 pub mod retry;
 mod submission;
+pub mod submit_builder;
 #[cfg(test)]
 mod tests;
 pub mod typed;
@@ -52,6 +53,7 @@ pub use submission::{
     BatchOutcome, BatchSubmission, DependencyFailurePolicy, DuplicateStrategy, RecurringSchedule,
     SubmitOutcome, TaskSubmission, MAX_TAGS_PER_TASK, MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,
 };
+pub use submit_builder::{ModuleSubmitDefaults, SubmitBuilder};
 pub use typed::TypedTask;
 
 /// When the TTL clock starts ticking.
@@ -260,6 +262,11 @@ impl TaskRecord {
     pub fn event_header(&self) -> crate::scheduler::event::TaskEventHeader {
         crate::scheduler::event::TaskEventHeader {
             task_id: self.id,
+            module: self
+                .task_type
+                .split_once("::")
+                .map(|(n, _)| n.to_string())
+                .unwrap_or_default(),
             task_type: self.task_type.clone(),
             key: self.key.clone(),
             label: self.label.clone(),

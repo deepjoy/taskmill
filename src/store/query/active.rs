@@ -193,6 +193,45 @@ impl TaskStore {
         Ok(records)
     }
 
+    /// All active tasks whose `task_type` starts with `prefix` (module-scoped query).
+    ///
+    /// Uses `task_type LIKE '{prefix}%'` against the indexed `task_type` column.
+    pub async fn tasks_by_type_prefix(&self, prefix: &str) -> Result<Vec<TaskRecord>, StoreError> {
+        let pattern = format!("{prefix}%");
+        let rows =
+            sqlx::query("SELECT * FROM tasks WHERE task_type LIKE ? ORDER BY priority ASC, id ASC")
+                .bind(&pattern)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    /// Count of pending tasks whose `task_type` starts with `prefix`.
+    pub async fn pending_count_by_prefix(&self, prefix: &str) -> Result<i64, StoreError> {
+        let pattern = format!("{prefix}%");
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tasks WHERE task_type LIKE ? AND status = 'pending'",
+        )
+        .bind(&pattern)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0)
+    }
+
+    /// Count of paused tasks whose `task_type` starts with `prefix`.
+    pub async fn paused_count_by_prefix(&self, prefix: &str) -> Result<i64, StoreError> {
+        let pattern = format!("{prefix}%");
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tasks WHERE task_type LIKE ? AND status = 'paused'",
+        )
+        .bind(&pattern)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0)
+    }
+
     /// Return the dependency edges for a given task (what it depends on).
     pub async fn task_dependencies(&self, task_id: i64) -> Result<Vec<i64>, StoreError> {
         let rows: Vec<(i64,)> =

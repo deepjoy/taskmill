@@ -17,7 +17,7 @@ Add taskmill to your Tauri app's `Cargo.toml`:
 
 ```toml
 [dependencies]
-taskmill = "0.3"
+taskmill = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio-util = "0.7"
@@ -119,6 +119,23 @@ impl TaskExecutor for UploadExecutor {
 }
 ```
 
+## Define the upload module
+
+Bundle the executor into a `Module` with bandwidth-aware defaults:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use taskmill::{Module, Priority};
+
+pub fn uploads_module() -> Module {
+    Module::new("uploads")
+        .typed_executor::<UploadTask, _>(Arc::new(UploadExecutor))
+        .default_priority(Priority::NORMAL)
+        .max_concurrency(8)
+}
+```
+
 ## Wire up the scheduler
 
 Build the scheduler in your Tauri setup with bandwidth limiting and per-bucket concurrency:
@@ -139,8 +156,7 @@ fn main() {
             let scheduler = tauri::async_runtime::block_on(async {
                 Scheduler::builder()
                     .store_path(db_path.to_str().unwrap())
-                    .executor("upload", Arc::new(UploadExecutor))
-                    .max_concurrency(8)
+                    .module(uploads_module())
                     .group_concurrency("my-bucket", 3)  // max 3 uploads to this bucket
                     .bandwidth_limit(50_000_000.0)       // 50 MB/s cap
                     .with_resource_monitoring()
@@ -195,7 +211,7 @@ async fn submit_upload(
     bucket: String,
 ) -> Result<String, StoreError> {
     let task = UploadTask { file_path, file_size, bucket };
-    let outcome = scheduler.submit_typed(&task).await?;
+    let outcome = scheduler.module("uploads").submit_typed(&task).await?;
     Ok(format!("{:?}", outcome))
 }
 
@@ -207,10 +223,10 @@ async fn prioritize_upload(
     bucket: String,
 ) -> Result<String, StoreError> {
     // Re-submit at HIGH priority — dedup will upgrade the existing task
-    let sub = TaskSubmission::new("upload")
-        .payload_json(&UploadTask { file_path, file_size, bucket })
-        .priority(Priority::HIGH);
-    let outcome = scheduler.submit(&sub).await?;
+    let outcome = scheduler.module("uploads")
+        .submit_typed(&UploadTask { file_path, file_size, bucket })
+        .priority(Priority::HIGH)
+        .await?;
     Ok(format!("{:?}", outcome))
 }
 
@@ -219,7 +235,7 @@ async fn cancel_upload(
     scheduler: tauri::State<'_, Scheduler>,
     task_id: i64,
 ) -> Result<bool, StoreError> {
-    scheduler.cancel(task_id).await
+    scheduler.module("uploads").cancel(task_id).await
 }
 
 #[tauri::command]

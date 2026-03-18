@@ -27,6 +27,9 @@ impl Scheduler {
             work_notify: Arc::clone(&self.inner.work_notify),
             scheduler: self.downgrade(),
             cancel_hook_timeout: self.inner.cancel_hook_timeout,
+            module_running: Arc::clone(&self.inner.module_running),
+            module_state: Arc::clone(&self.inner.module_state),
+            module_registry: Arc::clone(&self.inner.module_registry),
         }
     }
 
@@ -70,6 +73,8 @@ impl Scheduler {
             store: &self.inner.store,
             resource_reader: reader_guard.as_ref(),
             group_limits: Some(&self.inner.group_limits),
+            module_caps: &self.inner.module_caps,
+            module_running: &self.inner.module_running,
         };
 
         // Admission check while the task is still pending — no running

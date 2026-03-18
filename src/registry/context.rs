@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::module::{ModuleHandle, ModuleRegistry};
 use crate::scheduler::{ProgressReporter, WeakScheduler};
 use crate::store::StoreError;
 use crate::task::{SubmitOutcome, TaskError, TaskRecord, TaskSubmission, TypedTask};
@@ -16,13 +17,13 @@ use super::state::StateSnapshot;
 /// Execution context passed to a [`TaskExecutor`](super::TaskExecutor).
 ///
 /// Provides access to the task record, cancellation token, progress reporter,
-/// shared application state, and scoped task submission. Use the accessor
+/// shared application state, and module-scoped task submission. Use the accessor
 /// methods rather than accessing fields directly:
 ///
 /// - [`record()`](Self::record) — the full [`TaskRecord`] with payload, priority, etc.
 /// - [`token()`](Self::token) — [`CancellationToken`] for preemption support
 /// - [`progress()`](Self::progress) — [`ProgressReporter`] for reporting progress
-/// - [`submit()`](Self::submit) / [`submit_typed()`](Self::submit_typed) — submit continuation tasks
+/// - [`current_module()`](Self::current_module) / [`module()`](Self::module) — submit tasks via module handles
 /// - [`spawn_child()`](Self::spawn_child) — spawn hierarchical child tasks
 pub struct TaskContext {
     pub(crate) record: TaskRecord,
@@ -30,8 +31,16 @@ pub struct TaskContext {
     pub(crate) progress: ProgressReporter,
     pub(crate) scheduler: WeakScheduler,
     pub(crate) app_state: StateSnapshot,
+    /// Module-scoped state snapshot, taken at dispatch time for the task's owning module.
+    /// Checked before `app_state` in [`state`](Self::state).
+    pub(crate) module_state: StateSnapshot,
     pub(crate) child_spawner: Option<ChildSpawner>,
     pub(crate) io: Arc<IoTracker>,
+    /// Registry of all registered modules — used to construct [`ModuleHandle`] instances.
+    pub(crate) module_registry: Arc<ModuleRegistry>,
+    /// Name of the module that owns this task (e.g. `"media"`). Empty string for
+    /// tasks running outside the module system (via `Scheduler::new`).
+    pub(crate) owning_module: String,
 }
 
 impl TaskContext {
@@ -114,7 +123,9 @@ impl TaskContext {
     /// svc.db.query("...").await?;
     /// ```
     pub fn state<T: Send + Sync + 'static>(&self) -> Option<&T> {
-        self.app_state.get::<T>()
+        self.module_state
+            .get::<T>()
+            .or_else(|| self.app_state.get::<T>())
     }
 
     // ── IO tracking ──────────────────────────────────────────────────
@@ -172,68 +183,95 @@ impl TaskContext {
         self.progress.report_bytes(completed, total);
     }
 
-    // ── Task submission (scoped scheduler access) ────────────────────
+    // ── Module access ─────────────────────────────────────────────────
 
-    /// Submit a continuation or follow-up task.
+    /// Returns a scoped handle for this task's owning module.
     ///
-    /// This is the primary way to enqueue new work from inside an executor
-    /// without exposing the full [`Scheduler`](crate::Scheduler) handle.
-    pub async fn submit(&self, sub: &TaskSubmission) -> Result<SubmitOutcome, StoreError> {
-        let scheduler = self
-            .scheduler
-            .upgrade()
-            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
-        scheduler.submit(sub).await
+    /// The handle auto-prefixes task types and applies the module's defaults.
+    /// Use this for same-module follow-up submissions:
+    ///
+    /// ```ignore
+    /// ctx.current_module().submit_typed(&NextStep { ... }).await?;
+    /// ```
+    pub fn current_module(&self) -> ModuleHandle {
+        self.module(&self.owning_module)
     }
 
-    /// Submit a [`TypedTask`], handling serialization automatically.
+    /// Returns a scoped handle for the named module.
     ///
-    /// Uses the priority from [`TypedTask::priority()`].
-    pub async fn submit_typed<T: TypedTask>(&self, task: &T) -> Result<SubmitOutcome, StoreError> {
-        let scheduler = self
-            .scheduler
-            .upgrade()
-            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
-        scheduler.submit_typed(task).await
+    /// Use this for cross-module submissions from within an executor:
+    ///
+    /// ```ignore
+    /// ctx.module("analytics").submit_typed(&TrackEvent { ... }).await?;
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is not a registered module or the scheduler has shut down.
+    pub fn module(&self, name: &str) -> ModuleHandle {
+        self.try_module(name)
+            .unwrap_or_else(|| panic!("module '{name}' is not registered"))
     }
 
-    /// Submit a [`TypedTask`] with an explicit priority override.
-    pub async fn submit_typed_at<T: TypedTask>(
-        &self,
-        task: &T,
-        priority: crate::Priority,
-    ) -> Result<SubmitOutcome, StoreError> {
-        let scheduler = self
-            .scheduler
-            .upgrade()
-            .ok_or_else(|| StoreError::Database("scheduler has been shut down".into()))?;
-        scheduler.submit_typed_at(task, priority).await
+    /// Returns a scoped handle for the named module, or `None` if the module is
+    /// not registered or the scheduler has shut down.
+    pub fn try_module(&self, name: &str) -> Option<ModuleHandle> {
+        let entry = self.module_registry.get(name)?;
+        let scheduler = self.scheduler.upgrade()?;
+        Some(ModuleHandle::new(scheduler, entry))
     }
 
     // ── Child tasks ──────────────────────────────────────────────────
 
     /// Spawn a child task that will be tracked under this task as parent.
     ///
-    /// The child's `parent_id` is set automatically. Returns the submit
-    /// outcome, or `None` if this context was not created with hierarchy
-    /// support (should not happen in normal scheduler operation).
+    /// The child's `parent_id` is set automatically, and it inherits the
+    /// parent's remaining TTL and tags. The child's task type is auto-prefixed
+    /// with the owning module's namespace (same-module child).
+    ///
+    /// For cross-module children, use `ctx.module("other").submit_typed(...).parent(id).await`.
     pub async fn spawn_child(&self, sub: TaskSubmission) -> Result<SubmitOutcome, StoreError> {
         let spawner = self
             .child_spawner
             .as_ref()
             .expect("spawn_child called on a context without ChildSpawner");
-        spawner.spawn(sub).await
+
+        if self.owning_module.is_empty() {
+            // Legacy path — no module system (Scheduler::new), use ChildSpawner directly.
+            return spawner.spawn(sub).await;
+        }
+
+        // Module-aware path: inherit TTL/tags then route through the module handle
+        // so the task type is auto-prefixed and module defaults are applied.
+        let sub = spawner.prepare(sub);
+        self.current_module().submit(sub).await
     }
 
-    /// Spawn multiple child tasks in a single transaction.
+    /// Spawn multiple child tasks, each tracked under this task as parent.
+    ///
+    /// Each submission inherits the parent's remaining TTL and tags, and is
+    /// auto-prefixed with the owning module's namespace.
     pub async fn spawn_children(
         &self,
-        mut submissions: Vec<TaskSubmission>,
+        submissions: Vec<TaskSubmission>,
     ) -> Result<Vec<SubmitOutcome>, StoreError> {
         let spawner = self
             .child_spawner
             .as_ref()
             .expect("spawn_children called on a context without ChildSpawner");
-        spawner.spawn_batch(&mut submissions).await
+
+        if self.owning_module.is_empty() {
+            // Legacy path — no module system.
+            let mut submissions = submissions;
+            return spawner.spawn_batch(&mut submissions).await;
+        }
+
+        // Module-aware path: prepare each submission then submit via module handle.
+        let mut outcomes = Vec::with_capacity(submissions.len());
+        for sub in submissions {
+            let sub = spawner.prepare(sub);
+            outcomes.push(self.current_module().submit(sub).await?);
+        }
+        Ok(outcomes)
     }
 }

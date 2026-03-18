@@ -32,8 +32,9 @@ mod submit;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
@@ -97,6 +98,24 @@ pub(crate) struct SchedulerInner {
     pub(crate) expiry_sweep_interval: Option<Duration>,
     /// Last time the expiry sweep ran.
     pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
+    /// Registry of all registered modules (empty for schedulers built without the module API).
+    pub(crate) module_registry: Arc<crate::module::ModuleRegistry>,
+    /// Per-module app state (module name → state map). Populated at build time from
+    /// each module's `.app_state()` calls. Executors access it via
+    /// [`TaskContext::state`], which checks module state before falling back to global.
+    pub(crate) module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
+    /// Per-module pause flags. Keys are module names; values are `true` when that
+    /// module has been explicitly paused via [`ModuleHandle::pause`].
+    /// Initialized to `false` for every module at build time.
+    pub(crate) module_paused: HashMap<String, AtomicBool>,
+    /// Per-module concurrency caps (module name → cap).
+    /// Initialized from `Module::max_concurrency` at build time.
+    /// Updated at runtime by `ModuleHandle::set_max_concurrency`.
+    pub(crate) module_caps: RwLock<HashMap<String, usize>>,
+    /// Per-module live running counts (module name → count).
+    /// Incremented when a task is dispatched; decremented on every terminal transition.
+    /// Shared with spawned tasks via `Arc` so they can decrement on completion.
+    pub(crate) module_running: Arc<HashMap<String, AtomicUsize>>,
 }
 
 /// IO-aware priority scheduler.
@@ -158,6 +177,8 @@ impl Scheduler {
             registry,
             gate,
             Arc::new(crate::registry::StateMap::new()),
+            Arc::new(crate::module::ModuleRegistry::empty()),
+            Arc::new(HashMap::new()),
         )
     }
 
@@ -168,7 +189,26 @@ impl Scheduler {
         registry: Arc<TaskTypeRegistry>,
         gate: Box<dyn gate::DispatchGate>,
         app_state: Arc<crate::registry::StateMap>,
+        module_registry: Arc<crate::module::ModuleRegistry>,
+        module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
     ) -> Self {
+        let module_paused: HashMap<String, AtomicBool> = module_registry
+            .entries()
+            .iter()
+            .map(|e| (e.name.clone(), AtomicBool::new(false)))
+            .collect();
+        let module_caps: HashMap<String, usize> = module_registry
+            .entries()
+            .iter()
+            .filter_map(|e| e.max_concurrency.map(|cap| (e.name.clone(), cap)))
+            .collect();
+        let module_running: Arc<HashMap<String, AtomicUsize>> = Arc::new(
+            module_registry
+                .entries()
+                .iter()
+                .map(|e| (e.name.clone(), AtomicUsize::new(0)))
+                .collect(),
+        );
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
@@ -197,6 +237,11 @@ impl Scheduler {
                 default_ttl: config.default_ttl,
                 expiry_sweep_interval: config.expiry_sweep_interval,
                 last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
+                module_registry,
+                module_state,
+                module_paused,
+                module_caps: RwLock::new(module_caps),
+                module_running,
             }),
         }
     }
@@ -204,6 +249,57 @@ impl Scheduler {
     /// Create a [`SchedulerBuilder`] for ergonomic construction.
     pub fn builder() -> SchedulerBuilder {
         SchedulerBuilder::new()
+    }
+
+    /// Returns the module registry for this scheduler.
+    ///
+    /// Contains metadata for all modules registered at build time.
+    pub fn module_registry(&self) -> &crate::module::ModuleRegistry {
+        &self.inner.module_registry
+    }
+
+    /// Get a scoped handle for the named module.
+    ///
+    /// The handle exposes submission, cancellation, pause/resume, and query
+    /// methods that are automatically scoped to this module's task type prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` was not registered with [`SchedulerBuilder::module`].
+    /// For dynamic / runtime lookup, use [`try_module`](Self::try_module) instead.
+    pub fn module(&self, name: &str) -> crate::module::ModuleHandle {
+        self.try_module(name)
+            .unwrap_or_else(|| panic!("module '{name}' is not registered"))
+    }
+
+    /// Get a scoped handle for the named module, returning `None` if it is not registered.
+    pub fn try_module(&self, name: &str) -> Option<crate::module::ModuleHandle> {
+        let entry = self.inner.module_registry.get(name)?;
+        Some(crate::module::ModuleHandle::new(self.clone(), entry))
+    }
+
+    /// All registered module handles, in registration order.
+    ///
+    /// Useful for cross-cutting operations that span every module, such as
+    /// cancelling tasks by tag across all modules or building a per-module
+    /// dashboard snapshot.
+    pub fn modules(&self) -> Vec<crate::module::ModuleHandle> {
+        self.inner
+            .module_registry
+            .entries()
+            .iter()
+            .map(|e| crate::module::ModuleHandle::new(self.clone(), e))
+            .collect()
+    }
+
+    /// Look up an active task by ID, regardless of which module owns it.
+    ///
+    /// Returns `None` if no active task with that ID exists.
+    pub async fn task(
+        &self,
+        task_id: i64,
+    ) -> Result<Option<crate::task::TaskRecord>, crate::store::StoreError> {
+        self.inner.store.task_by_id(task_id).await
     }
 
     /// Subscribe to scheduler lifecycle events.

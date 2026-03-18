@@ -5,11 +5,15 @@
 For most Tauri desktop apps, the defaults work well. Here's what you might want to change:
 
 ```rust
+use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Scheduler, ShutdownMode, StoreConfig, RetentionPolicy};
+use taskmill::{Module, Scheduler, ShutdownMode, StoreConfig, RetentionPolicy};
 
 let scheduler = Scheduler::builder()
     .store_path("tasks.db")
+    .module(Module::new("app")
+        .executor("my-task", Arc::new(MyExecutor))
+        .default_ttl(Duration::from_secs(3600)))
     .max_concurrency(8)                  // match your IO parallelism
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
     .with_resource_monitoring()
@@ -39,10 +43,12 @@ Controls scheduling behavior. Set via builder methods or pass directly to `Sched
 ### Builder methods
 
 ```rust
+use std::sync::Arc;
 use std::time::Duration;
-use taskmill::{Scheduler, Priority, ShutdownMode};
+use taskmill::{Module, Scheduler, Priority, ShutdownMode};
 
 let scheduler = Scheduler::builder()
+    .module(Module::new("app").executor("my-task", Arc::new(MyExecutor)))
     .max_concurrency(8)
     .max_retries(5)
     .preempt_priority(Priority::HIGH)
@@ -156,18 +162,28 @@ let sub = TaskSubmission::new("sync")
 
 ### Per-type TTL
 
-Register a default TTL for all tasks of a given type:
+Register a default TTL for all tasks of a given type via the module:
 
 ```rust
+use std::sync::Arc;
 use std::time::Duration;
 
 let scheduler = Scheduler::builder()
-    .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600))
+    .module(Module::new("media")
+        .executor_with_ttl("thumbnail", Arc::new(ThumbExec), Duration::from_secs(600)))
     .build()
     .await?;
 ```
 
-Tasks submitted with an explicit `.ttl()` override the per-type default.
+Or set a module-wide default TTL that applies to all types in the module:
+
+```rust
+Module::new("media")
+    .executor("thumbnail", Arc::new(ThumbExec))
+    .default_ttl(Duration::from_secs(600))
+```
+
+Tasks submitted with an explicit `.ttl()` override the module default.
 
 ### Global default TTL
 
@@ -222,20 +238,41 @@ Set per-submission with `.on_dependency_failure(DependencyFailurePolicy::Ignore)
 
 ## Application state
 
-Executors often need shared services (HTTP clients, database connections, caches). Rather than capturing `Arc<T>` per executor, register state on the builder:
+Executors often need shared services (HTTP clients, database connections, caches). Register state either globally on the builder or scoped to a specific module.
+
+### Module-scoped state
+
+Module state is visible only to executors within that module:
 
 ```rust
 let scheduler = Scheduler::builder()
-    .app_state(MyServices { http, db, cache })
-    .app_state(FeatureFlags { dark_mode: true })  // multiple types can coexist
+    .module(Module::new("media")
+        .executor("thumbnail", Arc::new(ThumbExec))
+        .app_state(MediaConfig { cdn_url: "...".into() }))
+    .module(Module::new("sync")
+        .executor("remote-sync", Arc::new(SyncExec))
+        .app_state(SyncConfig { endpoint: "...".into() }))
     .build()
     .await?;
 
-// In any executor:
-let svc = ctx.state::<MyServices>().expect("state not registered");
+// Inside a media executor — checks module state first, then global:
+let cfg = ctx.state::<MediaConfig>().expect("MediaConfig not registered");
 ```
 
-State is keyed by `TypeId` — each type has one instance, shared across all tasks. Libraries that embed a shared scheduler can inject their own state after build:
+### Global state
+
+Registered on the builder, visible to all modules as a fallback:
+
+```rust
+let scheduler = Scheduler::builder()
+    .app_state(SharedDb::new())          // all modules can access this
+    .app_state(FeatureFlags { dark_mode: true })
+    .module(...)
+    .build()
+    .await?;
+```
+
+State is keyed by `TypeId` — `ctx.state::<T>()` checks module state first, then falls back to global. Libraries that receive a pre-built scheduler can inject global state after construction:
 
 ```rust
 scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
@@ -249,10 +286,27 @@ scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
 
 ```toml
 # Disable platform monitoring
-taskmill = { version = "0.3", default-features = false }
+taskmill = { version = "0.4", default-features = false }
 ```
 
 When disabled, you can still provide a custom `ResourceSampler` via `.resource_sampler()`.
+
+## Module-level concurrency
+
+Each module can have its own concurrency cap, independent of the global limit. Both caps must have headroom for a task to dispatch.
+
+```rust
+Module::new("media")
+    .executor("thumbnail", Arc::new(ThumbExec))
+    .max_concurrency(4)   // at most 4 media tasks running at once
+```
+
+Adjust at runtime via the module handle:
+
+```rust
+scheduler.module("media").set_max_concurrency(8);
+let current = scheduler.module("media").max_concurrency();
+```
 
 ## Tuning for specific workloads
 
@@ -260,7 +314,9 @@ When disabled, you can still provide a custom `ResourceSampler` via `.resource_s
 
 ```rust
 Scheduler::builder()
-    .max_concurrency(4)          // don't overwhelm the disk
+    .module(Module::new("files")
+        .executor("thumbnail", Arc::new(ThumbExec))
+        .max_concurrency(4))     // don't overwhelm the disk
     .with_resource_monitoring()  // auto-defer when disk is busy
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(10)))
     .store_config(StoreConfig {
@@ -273,10 +329,12 @@ Scheduler::builder()
 
 ```rust
 Scheduler::builder()
-    .max_concurrency(16)         // network tasks can run in parallel
+    .module(Module::new("uploads")
+        .executor("upload", Arc::new(UploadExec))
+        .max_concurrency(16))    // network tasks can run in parallel
     .with_resource_monitoring()
     .bandwidth_limit(50_000_000.0)  // 50 MB/s cap
-    .group_concurrency("uploads", 4)  // per-endpoint limits
+    .group_concurrency("s3-bucket", 4)  // per-endpoint limits
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(30)))
 ```
 
@@ -284,7 +342,9 @@ Scheduler::builder()
 
 ```rust
 Scheduler::builder()
-    .max_concurrency(2)          // stay out of the way
+    .module(Module::new("indexer")
+        .executor("index", Arc::new(IndexExec))
+        .max_concurrency(2))     // stay out of the way
     .with_resource_monitoring()
     .sampler_config(SamplerConfig {
         ewma_alpha: 0.2,         // smooth — don't react to spikes
@@ -295,22 +355,20 @@ Scheduler::builder()
 
 ## Builder reference
 
-All `SchedulerBuilder` methods:
+### `SchedulerBuilder` methods
 
 | Method | Description |
 |--------|-------------|
 | `store_path(path)` | Path to the SQLite database file. |
 | `store(store)` | Use a pre-opened `TaskStore`. |
 | `store_config(config)` | Pool size and retention settings. |
-| `executor(name, executor)` | Register a `TaskExecutor` by name. |
-| `executor_with_ttl(name, executor, ttl)` | Register with a per-type default TTL. |
-| `typed_executor::<T>(executor)` | Register using `T::TASK_TYPE` as the name. |
-| `max_concurrency(n)` | Set initial max concurrent tasks. |
-| `max_retries(n)` | Set retry limit. |
+| `module(module)` | Register a `Module` (required; at least one must be registered). |
+| `max_concurrency(n)` | Set initial global max concurrent tasks. |
+| `max_retries(n)` | Set global retry limit. |
 | `preempt_priority(p)` | Set preemption threshold. |
 | `poll_interval(d)` | Set dispatch cycle interval. |
 | `shutdown_mode(mode)` | Set shutdown behavior. |
-| `default_ttl(d)` | Global TTL for tasks without per-task or per-type TTL. |
+| `default_ttl(d)` | Global TTL for tasks without a per-task or module-level TTL. |
 | `expiry_sweep_interval(opt_d)` | How often to sweep for expired tasks (`None` to disable). |
 | `cancel_hook_timeout(d)` | Timeout for `on_cancel` hooks. |
 | `pressure_source(source)` | Add a `PressureSource` to the composite. |
@@ -321,6 +379,25 @@ All `SchedulerBuilder` methods:
 | `bandwidth_limit(bytes_per_sec)` | Set a network bandwidth cap; registers a built-in `NetworkPressure` source. |
 | `default_group_concurrency(n)` | Default concurrency limit for grouped tasks (0 = unlimited). |
 | `group_concurrency(group, n)` | Per-group concurrency limit override. |
-| `app_state(state)` | Register a state type (multiple types can coexist). |
-| `app_state_arc(arc)` | Register a state type from a pre-existing `Arc`. |
+| `app_state(state)` | Register global state visible to all modules. |
+| `app_state_arc(arc)` | Register global state from a pre-existing `Arc`. |
 | `build()` | Build and return the `Scheduler`. |
+
+### `Module` builder methods
+
+| Method | Description |
+|--------|-------------|
+| `Module::new(name)` | Create a module with the given name. Task types are prefixed `"{name}::"`. |
+| `executor(name, executor)` | Register a `TaskExecutor` by type name. |
+| `typed_executor::<T>(executor)` | Register using `T::TASK_TYPE` as the name. |
+| `executor_with_ttl(name, executor, ttl)` | Register with a per-type default TTL. |
+| `executor_with_retry_policy(name, executor, policy)` | Register with a per-type retry policy. |
+| `executor_with_options(name, executor, ttl, policy)` | Register with both TTL and retry policy. |
+| `default_priority(p)` | Module-wide priority for all submissions. |
+| `default_retry_policy(policy)` | Module-wide retry policy. |
+| `default_group(group)` | Module-wide group key. |
+| `default_ttl(d)` | Module-wide TTL (overridden by per-task TTL). |
+| `default_tag(key, value)` | Tag applied to all submissions through this module's handle. |
+| `max_concurrency(n)` | Module-level concurrency cap (independent of global). |
+| `app_state(state)` | Register module-scoped state (checked before global state). |
+| `app_state_arc(arc)` | Register module-scoped state from a pre-existing `Arc`. |

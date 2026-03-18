@@ -1,29 +1,20 @@
 //! Ergonomic builder for constructing a [`Scheduler`].
 
 use std::any::TypeId;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::time::Duration;
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
+use crate::module::{Module, ModuleEntry, ModuleRegistry};
 use crate::priority::Priority;
-use crate::registry::TaskExecutor;
 use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
-use crate::task::retry::RetryPolicy;
-use crate::task::TypedTask;
 
 use super::event::{SchedulerConfig, ShutdownMode};
 use super::Scheduler;
-
-/// A registered executor with its optional per-type TTL and retry policy.
-type ExecutorEntry = (
-    String,
-    Arc<dyn crate::registry::ErasedExecutor>,
-    Option<Duration>,
-    Option<RetryPolicy>,
-);
 
 /// Ergonomic builder for constructing a [`Scheduler`] with all its dependencies.
 ///
@@ -34,11 +25,13 @@ type ExecutorEntry = (
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::sync::Arc;
-/// use taskmill::{Scheduler, Priority};
+/// use taskmill::{Module, Scheduler, Priority};
 ///
 /// let scheduler = Scheduler::builder()
 ///     .store_path("tasks.db")
-///     // .executor("scan", Arc::new(my_scan_executor))
+///     .module(Module::new("app")
+///         // .executor("scan", Arc::new(my_scan_executor))
+///     )
 ///     .max_concurrency(8)
 ///     .with_resource_monitoring()
 ///     .build()
@@ -50,7 +43,7 @@ pub struct SchedulerBuilder {
     store_path: Option<String>,
     store_config: StoreConfig,
     store: Option<TaskStore>,
-    executors: Vec<ExecutorEntry>,
+    modules: Vec<Module>,
     config: SchedulerConfig,
     pressure_sources: Vec<Box<dyn crate::backpressure::PressureSource + 'static>>,
     policy: Option<ThrottlePolicy>,
@@ -70,7 +63,7 @@ impl SchedulerBuilder {
             store_path: None,
             store_config: StoreConfig::default(),
             store: None,
-            executors: Vec::new(),
+            modules: Vec::new(),
             config: SchedulerConfig::default(),
             pressure_sources: Vec::new(),
             policy: None,
@@ -102,77 +95,13 @@ impl SchedulerBuilder {
         self
     }
 
-    /// Register a task executor for a named type.
-    pub fn executor<E: TaskExecutor>(mut self, name: &str, executor: Arc<E>) -> Self {
-        self.executors.push((
-            name.to_string(),
-            executor as Arc<dyn crate::registry::ErasedExecutor>,
-            None,
-            None,
-        ));
-        self
-    }
-
-    /// Register a task executor with a per-type default TTL.
+    /// Register a module. All executor task types within the module are
+    /// automatically prefixed with `"{module_name}::"` at build time.
     ///
-    /// Tasks of this type that don't specify their own TTL will use this
-    /// duration as their TTL.
-    pub fn executor_with_ttl<E: TaskExecutor>(
-        mut self,
-        name: &str,
-        executor: Arc<E>,
-        ttl: Duration,
-    ) -> Self {
-        self.executors.push((
-            name.to_string(),
-            executor as Arc<dyn crate::registry::ErasedExecutor>,
-            Some(ttl),
-            None,
-        ));
+    /// At least one module must be registered before calling [`build`](Self::build).
+    pub fn module(mut self, module: Module) -> Self {
+        self.modules.push(module);
         self
-    }
-
-    /// Register a task executor with a per-type retry policy.
-    ///
-    /// Tasks of this type will use this policy's backoff strategy and
-    /// max_retries instead of the global default.
-    pub fn executor_with_retry_policy<E: TaskExecutor>(
-        mut self,
-        name: &str,
-        executor: Arc<E>,
-        policy: RetryPolicy,
-    ) -> Self {
-        self.executors.push((
-            name.to_string(),
-            executor as Arc<dyn crate::registry::ErasedExecutor>,
-            None,
-            Some(policy),
-        ));
-        self
-    }
-
-    /// Register an executor with both a TTL and a retry policy.
-    pub fn executor_with_options<E: TaskExecutor>(
-        mut self,
-        name: &str,
-        executor: Arc<E>,
-        ttl: Option<Duration>,
-        retry_policy: Option<RetryPolicy>,
-    ) -> Self {
-        self.executors.push((
-            name.to_string(),
-            executor as Arc<dyn crate::registry::ErasedExecutor>,
-            ttl,
-            retry_policy,
-        ));
-        self
-    }
-
-    /// Register an executor using the task type name from a [`TypedTask`].
-    ///
-    /// Equivalent to `.executor(T::TASK_TYPE, executor)`.
-    pub fn typed_executor<T: TypedTask, E: TaskExecutor>(self, executor: Arc<E>) -> Self {
-        self.executor(T::TASK_TYPE, executor)
     }
 
     /// Set maximum concurrent tasks. Default: 4.
@@ -356,6 +285,14 @@ impl SchedulerBuilder {
 
     /// Build the scheduler. Opens the database and wires all components.
     ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - No store was configured (neither `store_path` nor `store`).
+    /// - No modules were registered (use `.module()` to register at least one).
+    /// - Duplicate module names were registered.
+    /// - Two modules register the same prefixed task type.
+    ///
     /// If resource monitoring is enabled, the sampler background loop is
     /// started and will be stopped automatically when the scheduler shuts
     /// down (via the token passed to [`Scheduler::run`]).
@@ -371,28 +308,87 @@ impl SchedulerBuilder {
             ));
         };
 
-        // Build registry.
-        let mut registry = crate::registry::TaskTypeRegistry::new();
-        for (name, executor, ttl, retry_policy) in self.executors {
-            if registry.get(&name).is_some() {
-                panic!("task type '{name}' already registered");
-            }
-            match (ttl, retry_policy) {
-                (Some(ttl), Some(policy)) => {
-                    registry.register_erased_with_ttl(&name, executor, ttl);
-                    registry.set_retry_policy(&name, policy);
-                }
-                (Some(ttl), None) => {
-                    registry.register_erased_with_ttl(&name, executor, ttl);
-                }
-                (None, Some(policy)) => {
-                    registry.register_erased_with_retry_policy(&name, executor, policy);
-                }
-                (None, None) => {
-                    registry.register_erased(&name, executor);
-                }
+        // Validate: at least one module required.
+        if self.modules.is_empty() {
+            return Err(StoreError::Database(
+                "SchedulerBuilder requires at least one module — use .module() to register one"
+                    .into(),
+            ));
+        }
+
+        // Validate: no duplicate module names.
+        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for m in &self.modules {
+            if !seen_names.insert(m.name()) {
+                return Err(StoreError::Database(format!(
+                    "duplicate module name '{}'",
+                    m.name()
+                )));
             }
         }
+
+        // Build registry, prefixing all task types with "{module_name}::".
+        let mut registry = crate::registry::TaskTypeRegistry::new();
+        let mut module_entries: Vec<ModuleEntry> = Vec::new();
+        let mut module_state_map: HashMap<String, crate::registry::StateSnapshot> = HashMap::new();
+
+        for module in self.modules {
+            let prefix = module.prefix(); // e.g. "media::"
+            let module_name = module.name.clone();
+
+            for exec in &module.executors {
+                let prefixed = format!("{}{}", prefix, exec.task_type);
+                if registry.get(&prefixed).is_some() {
+                    return Err(StoreError::Database(format!(
+                        "task type collision: '{}' is registered by multiple modules",
+                        prefixed
+                    )));
+                }
+                match (&exec.options.ttl, &exec.options.retry_policy) {
+                    (Some(ttl), Some(policy)) => {
+                        registry.register_erased_with_ttl(&prefixed, exec.executor.clone(), *ttl);
+                        registry.set_retry_policy(&prefixed, policy.clone());
+                    }
+                    (Some(ttl), None) => {
+                        registry.register_erased_with_ttl(&prefixed, exec.executor.clone(), *ttl);
+                    }
+                    (None, Some(policy)) => {
+                        registry.register_erased_with_retry_policy(
+                            &prefixed,
+                            exec.executor.clone(),
+                            policy.clone(),
+                        );
+                    }
+                    (None, None) => {
+                        registry.register_erased(&prefixed, exec.executor.clone());
+                    }
+                }
+            }
+
+            // Extract per-module state entries before the push moves `module.name`.
+            let app_state_entries = module.app_state_entries;
+
+            module_entries.push(ModuleEntry {
+                prefix: prefix.clone(),
+                default_priority: module.default_priority,
+                default_retry_policy: module.default_retry_policy,
+                default_group: module.default_group,
+                default_ttl: module.default_ttl,
+                default_tags: module.default_tags,
+                max_concurrency: module.max_concurrency,
+                name: module.name,
+            });
+
+            module_state_map.insert(
+                module_name,
+                crate::registry::StateMap::from_entries(app_state_entries)
+                    .snapshot()
+                    .await,
+            );
+        }
+
+        let module_registry = Arc::new(ModuleRegistry::new(module_entries));
+        let module_state = Arc::new(module_state_map);
 
         // Prepare resource monitoring reader early so NetworkPressure can
         // reference it before the gate is boxed.
@@ -426,8 +422,15 @@ impl SchedulerBuilder {
             self.app_state_entries,
         ));
 
-        let scheduler =
-            Scheduler::with_gate(store, self.config, Arc::new(registry), gate, app_state);
+        let scheduler = Scheduler::with_gate(
+            store,
+            self.config,
+            Arc::new(registry),
+            gate,
+            app_state,
+            module_registry,
+            module_state,
+        );
 
         // Apply group concurrency limits.
         if self.default_group_concurrency > 0 {

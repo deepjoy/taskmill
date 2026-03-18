@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock as StdRwLock};
 
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::resource::ResourceReader;
@@ -31,6 +31,10 @@ pub struct GateContext<'a> {
     pub resource_reader: Option<&'a Arc<dyn ResourceReader>>,
     /// Group concurrency limits (if configured).
     pub group_limits: Option<&'a GroupLimits>,
+    /// Per-module concurrency caps (module name → cap).
+    pub module_caps: &'a StdRwLock<HashMap<String, usize>>,
+    /// Per-module live running counts (module name → AtomicUsize).
+    pub module_running: &'a HashMap<String, AtomicUsize>,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -164,6 +168,27 @@ impl DispatchGate for DefaultDispatchGate {
                 }
             }
 
+            // Module concurrency check.
+            if let Some(module_name) = task.task_type.split_once("::").map(|(n, _)| n) {
+                let cap = ctx.module_caps.read().unwrap().get(module_name).copied();
+                if let Some(cap) = cap {
+                    let running = ctx
+                        .module_running
+                        .get(module_name)
+                        .map_or(0, |c| c.load(Ordering::Relaxed));
+                    if running >= cap {
+                        tracing::trace!(
+                            task_type = task.task_type,
+                            module = module_name,
+                            running,
+                            cap,
+                            "task deferred — module concurrency saturated — requeuing"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+
             Ok(true)
         })
     }
@@ -271,7 +296,7 @@ pub async fn has_net_io_headroom(
 /// groups without explicit overrides.
 pub struct GroupLimits {
     default: AtomicUsize,
-    overrides: RwLock<HashMap<String, usize>>,
+    overrides: StdRwLock<HashMap<String, usize>>,
 }
 
 impl Default for GroupLimits {
@@ -285,7 +310,7 @@ impl GroupLimits {
     pub fn new() -> Self {
         Self {
             default: AtomicUsize::new(0),
-            overrides: RwLock::new(HashMap::new()),
+            overrides: StdRwLock::new(HashMap::new()),
         }
     }
 

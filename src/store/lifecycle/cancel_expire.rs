@@ -115,6 +115,36 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Pause all pending tasks whose `task_type` starts with `prefix`.
+    ///
+    /// Updates their status from `pending` to `paused` in a single SQL statement.
+    /// Returns the number of tasks paused.
+    pub async fn pause_pending_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
+        let pattern = format!("{prefix}%");
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'paused' WHERE task_type LIKE ? AND status = 'pending'",
+        )
+        .bind(&pattern)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Resume all paused tasks whose `task_type` starts with `prefix`.
+    ///
+    /// Updates their status from `paused` to `pending` in a single SQL statement.
+    /// Returns the number of tasks resumed.
+    pub async fn resume_paused_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
+        let pattern = format!("{prefix}%");
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'pending' WHERE task_type LIKE ? AND status = 'paused'",
+        )
+        .bind(&pattern)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Sweep for expired tasks and move them to history.
     ///
     /// Finds tasks whose `expires_at` has passed and that are still pending
