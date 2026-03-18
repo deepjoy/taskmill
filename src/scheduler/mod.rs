@@ -32,6 +32,7 @@ mod submit;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 
@@ -99,6 +100,10 @@ pub(crate) struct SchedulerInner {
     pub(crate) last_expiry_sweep: std::sync::Mutex<tokio::time::Instant>,
     /// Registry of all registered modules (empty for schedulers built without the module API).
     pub(crate) module_registry: crate::module::ModuleRegistry,
+    /// Per-module pause flags. Keys are module names; values are `true` when that
+    /// module has been explicitly paused via [`ModuleHandle::pause`].
+    /// Initialized to `false` for every module at build time.
+    pub(crate) module_paused: HashMap<String, AtomicBool>,
 }
 
 /// IO-aware priority scheduler.
@@ -173,6 +178,11 @@ impl Scheduler {
         app_state: Arc<crate::registry::StateMap>,
         module_registry: crate::module::ModuleRegistry,
     ) -> Self {
+        let module_paused: HashMap<String, AtomicBool> = module_registry
+            .entries()
+            .iter()
+            .map(|e| (e.name.clone(), AtomicBool::new(false)))
+            .collect();
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
@@ -202,6 +212,7 @@ impl Scheduler {
                 expiry_sweep_interval: config.expiry_sweep_interval,
                 last_expiry_sweep: std::sync::Mutex::new(tokio::time::Instant::now()),
                 module_registry,
+                module_paused,
             }),
         }
     }
@@ -216,6 +227,36 @@ impl Scheduler {
     /// Contains metadata for all modules registered at build time.
     pub fn module_registry(&self) -> &crate::module::ModuleRegistry {
         &self.inner.module_registry
+    }
+
+    /// Get a scoped handle for the named module.
+    ///
+    /// The handle exposes submission, cancellation, pause/resume, and query
+    /// methods that are automatically scoped to this module's task type prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` was not registered with [`SchedulerBuilder::module`].
+    /// For dynamic / runtime lookup, use [`try_module`](Self::try_module) instead.
+    pub fn module(&self, name: &str) -> crate::module::ModuleHandle {
+        self.try_module(name)
+            .unwrap_or_else(|| panic!("module '{name}' is not registered"))
+    }
+
+    /// Get a scoped handle for the named module, returning `None` if it is not registered.
+    pub fn try_module(&self, name: &str) -> Option<crate::module::ModuleHandle> {
+        let entry = self.inner.module_registry.get(name)?;
+        Some(crate::module::ModuleHandle::new(self.clone(), entry))
+    }
+
+    /// Look up an active task by ID, regardless of which module owns it.
+    ///
+    /// Returns `None` if no active task with that ID exists.
+    pub async fn task(
+        &self,
+        task_id: i64,
+    ) -> Result<Option<crate::task::TaskRecord>, crate::store::StoreError> {
+        self.inner.store.task_by_id(task_id).await
     }
 
     /// Subscribe to scheduler lifecycle events.

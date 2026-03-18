@@ -228,6 +228,80 @@ impl ActiveTaskMap {
         handles
     }
 
+    /// Snapshot of all active task records whose `task_type` starts with `prefix`.
+    pub fn records_with_prefix(&self, prefix: &str) -> Vec<TaskRecord> {
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .filter(|at| at.record.task_type.starts_with(prefix))
+            .map(|at| at.record.clone())
+            .collect()
+    }
+
+    /// Snapshot of progress data for active tasks matching `prefix`.
+    pub fn progress_snapshots_with_prefix(
+        &self,
+        prefix: &str,
+    ) -> Vec<(
+        TaskRecord,
+        Option<f32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> {
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .filter(|at| at.record.task_type.starts_with(prefix))
+            .map(|at| (at.record.clone(), at.reported_progress, at.reported_at))
+            .collect()
+    }
+
+    /// Snapshot of byte-level progress for active tasks matching `prefix`.
+    pub fn byte_progress_snapshots_with_prefix(&self, prefix: &str) -> Vec<ByteProgressSnapshot> {
+        let map = self.inner.lock().unwrap();
+        map.values()
+            .filter(|at| at.record.task_type.starts_with(prefix))
+            .map(|at| {
+                let (completed, total) = at.io.progress_snapshot();
+                (
+                    at.record.id,
+                    at.record.task_type.clone(),
+                    at.record.key.clone(),
+                    at.record.label.clone(),
+                    completed,
+                    total,
+                    at.record.parent_id,
+                    at.started_at,
+                )
+            })
+            .collect()
+    }
+
+    /// Pause active tasks whose `task_type` starts with `prefix`: cancel their
+    /// tokens and move them to paused state in the store. Returns count paused.
+    pub async fn pause_module(
+        &self,
+        prefix: &str,
+        store: &TaskStore,
+        event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    ) -> usize {
+        let to_pause: Vec<(i64, ActiveTask)> = {
+            let mut map = self.inner.lock().unwrap();
+            let ids: Vec<i64> = map
+                .iter()
+                .filter(|(_, at)| at.record.task_type.starts_with(prefix))
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| map.remove(&id).map(|at| (id, at)))
+                .collect()
+        };
+        let count = to_pause.len();
+        for (id, at) in to_pause {
+            at.token.cancel();
+            let _ = store.pause(id).await;
+            let _ = event_tx.send(SchedulerEvent::Preempted(at.record.event_header()));
+        }
+        count
+    }
+
     /// Pause all active tasks: cancel their tokens and move them to paused
     /// state in the store. Returns the number of tasks paused.
     ///

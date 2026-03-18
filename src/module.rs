@@ -8,13 +8,19 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::priority::Priority;
 use crate::registry::{ErasedExecutor, TaskExecutor};
+use crate::scheduler::progress::{EstimatedProgress, TaskProgress};
+use crate::store::StoreError;
 use crate::task::retry::RetryPolicy;
-use crate::task::TypedTask;
+use crate::task::{ModuleSubmitDefaults, SubmitBuilder};
+use crate::task::{
+    SubmitOutcome, TaskHistoryRecord, TaskRecord, TaskStatus, TaskSubmission, TypedTask,
+};
 
 /// Per-executor options for task type registration within a module.
 #[derive(Default, Clone)]
@@ -296,6 +302,548 @@ impl ModuleRegistry {
     /// All registered module entries.
     pub fn entries(&self) -> &[ModuleEntry] {
         &self.entries
+    }
+}
+
+// ── ModuleSnapshot ────────────────────────────────────────────────
+
+/// Status snapshot for a single module — a scoped subset of [`SchedulerSnapshot`].
+#[derive(Debug, Clone)]
+pub struct ModuleSnapshot {
+    /// Tasks from this module that are currently running.
+    pub running: Vec<TaskRecord>,
+    /// Number of this module's tasks in `pending` status.
+    pub pending_count: i64,
+    /// Number of this module's tasks in `paused` status.
+    pub paused_count: i64,
+    /// Estimated progress for each running task in this module.
+    pub progress: Vec<EstimatedProgress>,
+    /// Byte-level progress for tasks in this module reporting transfer progress.
+    pub byte_progress: Vec<TaskProgress>,
+    /// Whether this module is currently paused via [`ModuleHandle::pause`].
+    pub is_paused: bool,
+}
+
+// ── ModuleReceiver ────────────────────────────────────────────────
+
+/// Filtered broadcast receiver that only surfaces events belonging to one module.
+///
+/// Wraps a global [`broadcast::Receiver`](tokio::sync::broadcast::Receiver) and
+/// filters in `recv()` — no background forwarder is spawned. Events for other
+/// modules are silently dropped. Module-global events (`Paused`, `Resumed`) are
+/// always forwarded.
+pub struct ModuleReceiver<E> {
+    inner: tokio::sync::broadcast::Receiver<E>,
+    prefix: Arc<str>,
+}
+
+impl ModuleReceiver<crate::scheduler::SchedulerEvent> {
+    /// Receive the next event for this module, blocking until one arrives.
+    ///
+    /// Events belonging to other modules are discarded. `Paused` and `Resumed`
+    /// global events are always forwarded. Returns [`RecvError`] on channel
+    /// closure or lag.
+    pub async fn recv(
+        &mut self,
+    ) -> Result<crate::scheduler::SchedulerEvent, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.inner.recv().await?;
+            if event
+                .header()
+                .is_some_and(|h| h.task_type.starts_with(self.prefix.as_ref()))
+            {
+                return Ok(event);
+            }
+            if matches!(
+                event,
+                crate::scheduler::SchedulerEvent::Paused
+                    | crate::scheduler::SchedulerEvent::Resumed
+            ) {
+                return Ok(event);
+            }
+        }
+    }
+}
+
+impl ModuleReceiver<TaskProgress> {
+    /// Receive the next progress event for this module, discarding others.
+    pub async fn recv(&mut self) -> Result<TaskProgress, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.inner.recv().await?;
+            if event.task_type.starts_with(self.prefix.as_ref()) {
+                return Ok(event);
+            }
+        }
+    }
+}
+
+// ── ModuleHandle ──────────────────────────────────────────────────
+
+/// Scoped handle to a registered module.
+///
+/// Obtained via [`Scheduler::module`](crate::Scheduler::module) or
+/// [`Scheduler::try_module`](crate::Scheduler::try_module).
+///
+/// All submission methods auto-prefix the task type with `"{name}::"`, merge
+/// module defaults, and inject a `_module` tag. All query and control methods
+/// are scoped to this module's tasks using `task_type LIKE '{prefix}%'` at the
+/// SQL level.
+#[derive(Clone)]
+pub struct ModuleHandle {
+    pub(crate) scheduler: crate::scheduler::Scheduler,
+    /// Module name, e.g. `"media"`.
+    name: Arc<str>,
+    /// Task type prefix, e.g. `"media::"`.
+    prefix: Arc<str>,
+    /// Module-level submission defaults applied to every `SubmitBuilder`.
+    defaults: ModuleSubmitDefaults,
+}
+
+impl ModuleHandle {
+    pub(crate) fn new(scheduler: crate::scheduler::Scheduler, entry: &ModuleEntry) -> Self {
+        let mut defaults = ModuleSubmitDefaults {
+            priority: entry.default_priority,
+            group: entry.default_group.clone(),
+            ttl: entry.default_ttl,
+            tags: entry.default_tags.clone(),
+        };
+        // Ensure the `_module` tag is always present in the module defaults.
+        defaults
+            .tags
+            .entry("_module".to_string())
+            .or_insert_with(|| entry.name.clone());
+        Self {
+            scheduler,
+            name: entry.name.as_str().into(),
+            prefix: entry.prefix.as_str().into(),
+            defaults,
+        }
+    }
+
+    /// The module name (e.g. `"media"`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The task type prefix (e.g. `"media::"`).
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    // ── Submission ────────────────────────────────────────────────
+
+    /// Submit a raw [`TaskSubmission`].
+    ///
+    /// The task type is **not yet prefixed** — prefixing happens inside
+    /// [`SubmitBuilder`] at resolve time. Bare `.await` submits with all
+    /// module defaults applied.
+    pub fn submit(&self, sub: TaskSubmission) -> SubmitBuilder {
+        SubmitBuilder::new(
+            sub,
+            self.scheduler.clone(),
+            self.name.as_ref(),
+            self.defaults.clone(),
+        )
+    }
+
+    /// Submit a [`TypedTask`].
+    ///
+    /// Serializes the task and wraps it in a [`SubmitBuilder`]. Bare `.await`
+    /// applies module defaults; chain override methods for per-call overrides.
+    pub fn submit_typed<T: TypedTask>(&self, task: &T) -> SubmitBuilder {
+        let sub = TaskSubmission::from_typed(task);
+        self.submit(sub)
+    }
+
+    // ── Single-task operations ────────────────────────────────────
+
+    /// Cancel a task by ID.
+    ///
+    /// Returns `Ok(false)` if the task does not exist or does not belong to
+    /// this module (validated by checking `task_type` prefix).
+    pub async fn cancel(&self, task_id: i64) -> Result<bool, StoreError> {
+        if !self.task_belongs(task_id).await? {
+            return Ok(false);
+        }
+        self.scheduler.cancel(task_id).await
+    }
+
+    /// Look up an active task by ID, validating it belongs to this module.
+    ///
+    /// Returns `None` if not found or if the task's type does not start with
+    /// this module's prefix.
+    pub async fn task(&self, task_id: i64) -> Result<Option<TaskRecord>, StoreError> {
+        let record = self.scheduler.inner.store.task_by_id(task_id).await?;
+        Ok(record.filter(|r| r.task_type.starts_with(self.prefix.as_ref())))
+    }
+
+    /// Re-submit a dead-lettered task belonging to this module.
+    ///
+    /// Returns `Err(StoreError::InvalidState)` if the history record exists
+    /// but belongs to a different module.
+    pub async fn retry_dead_letter(&self, history_id: i64) -> Result<SubmitOutcome, StoreError> {
+        let record = self
+            .scheduler
+            .inner
+            .store
+            .history_by_id(history_id)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("history record {history_id}")))?;
+        if !record.task_type.starts_with(self.prefix.as_ref()) {
+            return Err(StoreError::InvalidState(format!(
+                "history record {history_id} belongs to a different module (task_type = '{}')",
+                record.task_type
+            )));
+        }
+        self.scheduler.retry_dead_letter(history_id).await
+    }
+
+    // ── Bulk cancellation ─────────────────────────────────────────
+
+    /// Cancel all tasks belonging to this module.
+    ///
+    /// Queries with `task_type LIKE '{prefix}%'` and cancels each task.
+    /// Returns the IDs that were successfully cancelled.
+    pub async fn cancel_all(&self) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .scheduler
+            .inner
+            .store
+            .tasks_by_type_prefix(&self.prefix)
+            .await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.scheduler.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    /// Cancel module tasks matching a predicate.
+    ///
+    /// Queries with `task_type LIKE '{prefix}%'` first, then applies the
+    /// predicate client-side. Does not load all active tasks globally.
+    pub async fn cancel_where(
+        &self,
+        predicate: impl Fn(&TaskRecord) -> bool,
+    ) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .scheduler
+            .inner
+            .store
+            .tasks_by_type_prefix(&self.prefix)
+            .await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if predicate(task) && self.scheduler.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
+    // ── Pause / resume ────────────────────────────────────────────
+
+    /// Pause all tasks in this module.
+    ///
+    /// - Sets the per-module `is_paused` flag.
+    /// - Pauses pending tasks in the database (status → `paused`).
+    /// - Cancels running tasks' tokens and moves them to `paused` in the DB.
+    ///
+    /// Returns the total number of tasks paused (pending + running).
+    pub async fn pause(&self) -> Result<usize, StoreError> {
+        // Mark the module as paused.
+        if let Some(flag) = self.scheduler.inner.module_paused.get(self.name.as_ref()) {
+            flag.store(true, AtomicOrdering::Release);
+        }
+
+        // Pause running tasks (cancel their tokens, move to paused in DB).
+        let running_paused = self
+            .scheduler
+            .inner
+            .active
+            .pause_module(
+                &self.prefix,
+                &self.scheduler.inner.store,
+                &self.scheduler.inner.event_tx,
+            )
+            .await;
+
+        // Pause pending tasks in the database.
+        let pending_paused = self
+            .scheduler
+            .inner
+            .store
+            .pause_pending_by_type_prefix(&self.prefix)
+            .await? as usize;
+
+        Ok(running_paused + pending_paused)
+    }
+
+    /// Resume all paused tasks in this module.
+    ///
+    /// Clears the per-module `is_paused` flag. If the global scheduler is
+    /// also paused, the database tasks remain `paused` — they will be
+    /// picked up when the global scheduler is resumed.
+    ///
+    /// Returns the number of tasks moved back to `pending`.
+    pub async fn resume(&self) -> Result<usize, StoreError> {
+        // Clear the module pause flag.
+        if let Some(flag) = self.scheduler.inner.module_paused.get(self.name.as_ref()) {
+            flag.store(false, AtomicOrdering::Release);
+        }
+
+        // Do not resume DB tasks if the global scheduler is paused.
+        if self.scheduler.is_paused() {
+            return Ok(0);
+        }
+
+        let count = self
+            .scheduler
+            .inner
+            .store
+            .resume_paused_by_type_prefix(&self.prefix)
+            .await? as usize;
+
+        if count > 0 {
+            self.scheduler.inner.work_notify.notify_one();
+        }
+
+        Ok(count)
+    }
+
+    /// Returns `true` if this module has been explicitly paused via
+    /// [`pause`](Self::pause).
+    ///
+    /// **Note:** this reflects only module-level pauses. Individual tasks
+    /// paused by other means (e.g. preemption) are not reflected here.
+    pub fn is_paused(&self) -> bool {
+        self.scheduler
+            .inner
+            .module_paused
+            .get(self.name.as_ref())
+            .is_some_and(|f| f.load(AtomicOrdering::Acquire))
+    }
+
+    // ── Scoped queries ────────────────────────────────────────────
+
+    /// All active tasks in this module (any status).
+    pub fn active_tasks(&self) -> Vec<TaskRecord> {
+        self.scheduler
+            .inner
+            .active
+            .records_with_prefix(&self.prefix)
+    }
+
+    /// Dead-lettered tasks in this module, newest first.
+    pub async fn dead_letter_tasks(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<TaskHistoryRecord>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .dead_letter_tasks_by_prefix(&self.prefix, limit, offset)
+            .await
+    }
+
+    /// Find module tasks matching all specified tag filters (AND semantics).
+    pub async fn tasks_by_tags(
+        &self,
+        filters: &[(&str, &str)],
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .tasks_by_tags_with_prefix(&self.prefix, filters, status)
+            .await
+    }
+
+    /// Count module tasks grouped by a tag key's values.
+    pub async fn count_by_tag(
+        &self,
+        key: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .count_by_tag_with_prefix(&self.prefix, key, status)
+            .await
+    }
+
+    /// Distinct values for a tag key across module tasks, with counts.
+    pub async fn tag_values(&self, key: &str) -> Result<Vec<(String, i64)>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .tag_values_with_prefix(&self.prefix, key)
+            .await
+    }
+
+    /// Estimated progress for all running tasks in this module.
+    pub async fn estimated_progress(&self) -> Vec<EstimatedProgress> {
+        let snapshots = self
+            .scheduler
+            .inner
+            .active
+            .progress_snapshots_with_prefix(&self.prefix);
+        let mut results = Vec::with_capacity(snapshots.len());
+        for (record, reported, reported_at) in snapshots {
+            results.push(
+                crate::scheduler::progress::extrapolate(
+                    &record,
+                    reported,
+                    reported_at,
+                    &self.scheduler.inner.store,
+                )
+                .await,
+            );
+        }
+        results
+    }
+
+    /// Byte-level progress for module tasks reporting transfer progress.
+    pub fn byte_progress(&self) -> Vec<TaskProgress> {
+        let snapshots = self
+            .scheduler
+            .inner
+            .active
+            .byte_progress_snapshots_with_prefix(&self.prefix);
+        snapshots
+            .into_iter()
+            .filter(|(_, _, _, _, completed, _, _, _)| *completed > 0)
+            .map(
+                |(
+                    task_id,
+                    task_type,
+                    key,
+                    label,
+                    bytes_completed,
+                    bytes_total,
+                    _parent_id,
+                    started_at,
+                )| {
+                    TaskProgress {
+                        task_id,
+                        task_type,
+                        key,
+                        label,
+                        bytes_completed,
+                        bytes_total,
+                        throughput_bps: 0.0,
+                        elapsed: started_at.elapsed(),
+                        eta: None,
+                    }
+                },
+            )
+            .collect()
+    }
+
+    /// Capture a status snapshot for this module.
+    pub async fn snapshot(&self) -> Result<ModuleSnapshot, StoreError> {
+        let running = self.active_tasks();
+        let pending_count = self
+            .scheduler
+            .inner
+            .store
+            .pending_count_by_prefix(&self.prefix)
+            .await?;
+        let paused_count = self
+            .scheduler
+            .inner
+            .store
+            .paused_count_by_prefix(&self.prefix)
+            .await?;
+        let progress = self.estimated_progress().await;
+        let byte_progress = self.byte_progress();
+        Ok(ModuleSnapshot {
+            running,
+            pending_count,
+            paused_count,
+            progress,
+            byte_progress,
+            is_paused: self.is_paused(),
+        })
+    }
+
+    // ── Event subscription ────────────────────────────────────────
+
+    /// Subscribe to scheduler lifecycle events for this module.
+    ///
+    /// Returns a [`ModuleReceiver`] that filters the global event stream,
+    /// surfacing only events whose `task_type` belongs to this module.
+    /// `Paused` / `Resumed` global events are always forwarded.
+    pub fn subscribe(&self) -> ModuleReceiver<crate::scheduler::SchedulerEvent> {
+        ModuleReceiver {
+            inner: self.scheduler.inner.event_tx.subscribe(),
+            prefix: self.prefix.clone(),
+        }
+    }
+
+    /// Subscribe to byte-level progress events for this module.
+    ///
+    /// Returns a [`ModuleReceiver`] that filters the global progress stream.
+    pub fn subscribe_progress(&self) -> ModuleReceiver<TaskProgress> {
+        ModuleReceiver {
+            inner: self.scheduler.inner.progress_tx.subscribe(),
+            prefix: self.prefix.clone(),
+        }
+    }
+
+    // ── Recurring task control ────────────────────────────────────
+
+    /// Pause a recurring schedule. Validates the task belongs to this module.
+    pub async fn pause_recurring(&self, task_id: i64) -> Result<(), StoreError> {
+        self.validate_ownership(task_id).await?;
+        self.scheduler.pause_recurring(task_id).await
+    }
+
+    /// Resume a paused recurring schedule. Validates the task belongs to this module.
+    pub async fn resume_recurring(&self, task_id: i64) -> Result<(), StoreError> {
+        self.validate_ownership(task_id).await?;
+        self.scheduler.resume_recurring(task_id).await
+    }
+
+    /// Cancel a recurring schedule entirely. Validates the task belongs to this module.
+    pub async fn cancel_recurring(&self, task_id: i64) -> Result<bool, StoreError> {
+        if !self.task_belongs(task_id).await? {
+            return Ok(false);
+        }
+        self.scheduler.cancel_recurring(task_id).await
+    }
+
+    // ── Private helpers ───────────────────────────────────────────
+
+    /// Returns `true` if the active task with `task_id` has a `task_type`
+    /// that starts with this module's prefix. Returns `false` if the task
+    /// doesn't exist or belongs to a different module.
+    async fn task_belongs(&self, task_id: i64) -> Result<bool, StoreError> {
+        // Fast path: check the in-memory active map first.
+        let records = self.scheduler.inner.active.records();
+        if let Some(r) = records.iter().find(|r| r.id == task_id) {
+            return Ok(r.task_type.starts_with(self.prefix.as_ref()));
+        }
+        // Fall back to DB (pending / paused tasks not in the active map).
+        match self.scheduler.inner.store.task_by_id(task_id).await? {
+            Some(r) => Ok(r.task_type.starts_with(self.prefix.as_ref())),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate that a task belongs to this module, returning an error otherwise.
+    async fn validate_ownership(&self, task_id: i64) -> Result<(), StoreError> {
+        if self.task_belongs(task_id).await? {
+            Ok(())
+        } else {
+            Err(StoreError::InvalidState(format!(
+                "task {task_id} does not belong to module '{}'",
+                self.name
+            )))
+        }
     }
 }
 

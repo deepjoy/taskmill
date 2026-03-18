@@ -789,7 +789,7 @@ pub mod task;
 
 // Convenience re-exports.
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
-pub use module::{Module, ModuleRegistry};
+pub use module::{Module, ModuleHandle, ModuleReceiver, ModuleRegistry, ModuleSnapshot};
 pub use priority::Priority;
 pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
