@@ -72,8 +72,12 @@ pub(crate) async fn handle_success(
         }
     }
 
-    match deps.store.complete_with_record(task, metrics).await {
-        Ok(recurring_info) => {
+    match deps
+        .store
+        .complete_with_record_and_resolve(task, metrics)
+        .await
+    {
+        Ok((recurring_info, unblocked)) => {
             // Emit recurring event if this was a recurring task.
             if task.recurring_interval_secs.is_some() {
                 let (next_run, exec_count) = match recurring_info {
@@ -86,22 +90,15 @@ pub(crate) async fn handle_success(
                     next_run,
                 });
             }
-        }
-        Err(e) => {
-            tracing::error!(task_id, error = %e, "failed to record task completion");
-        }
-    }
 
-    // Remove from active tracking AFTER the store write completes.
-    decrement_module();
-    deps.active.remove(task_id);
-    let _ = deps
-        .event_tx
-        .send(SchedulerEvent::Completed(task.event_header()));
+            // Remove from active tracking AFTER the store write completes.
+            decrement_module();
+            deps.active.remove(task_id);
+            let _ = deps
+                .event_tx
+                .send(SchedulerEvent::Completed(task.event_header()));
 
-    // Resolve dependency edges: unblock tasks waiting on this one.
-    match deps.store.resolve_dependents(task_id).await {
-        Ok(unblocked) => {
+            // Emit unblocked events for resolved dependents.
             for uid in &unblocked {
                 let _ = deps
                     .event_tx
@@ -109,7 +106,9 @@ pub(crate) async fn handle_success(
             }
         }
         Err(e) => {
-            tracing::error!(task_id, error = %e, "failed to resolve dependents");
+            tracing::error!(task_id, error = %e, "failed to complete task and resolve dependents");
+            decrement_module();
+            deps.active.remove(task_id);
         }
     }
 

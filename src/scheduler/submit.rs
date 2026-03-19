@@ -73,10 +73,16 @@ impl Scheduler {
         if !matches!(outcome, SubmitOutcome::Duplicate | SubmitOutcome::Rejected) {
             // Preempt if this is a high-priority task.
             if sub.priority.value() <= self.inner.preempt_priority.value() {
-                self.inner
+                let preempted = self
+                    .inner
                     .active
                     .preempt_below(sub.priority, &self.inner.store, &self.inner.event_tx)
                     .await;
+                if !preempted.is_empty() {
+                    self.inner
+                        .has_paused_tasks
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
 
             // Wake the scheduler loop so it picks up the new/upgraded task.
@@ -147,10 +153,16 @@ impl Scheduler {
 
         if let Some(priority) = best_priority {
             if priority.value() <= self.inner.preempt_priority.value() {
-                self.inner
+                let preempted = self
+                    .inner
                     .active
                     .preempt_below(priority, &self.inner.store, &self.inner.event_tx)
                     .await;
+                if !preempted.is_empty() {
+                    self.inner
+                        .has_paused_tasks
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
 

@@ -5,6 +5,7 @@
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(feature = "profile")]
 use pprof::criterion::{Output, PProfProfiler};
 use taskmill::{
     Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
@@ -211,12 +212,15 @@ fn bench_dep_fan_in_dispatch(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "profile")]
 criterion_group! {
     name = submit_benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(1000, Output::Flamegraph(None)));
     targets = bench_dep_chain_submit
 }
+#[cfg(not(feature = "profile"))]
+criterion_group!(submit_benches, bench_dep_chain_submit);
 criterion_group!(
     dispatch_benches,
     bench_dep_chain_dispatch,

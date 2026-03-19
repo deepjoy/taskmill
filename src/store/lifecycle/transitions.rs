@@ -79,6 +79,29 @@ impl TaskStore {
         Ok(record)
     }
 
+    /// Atomically claim a pending task by id, returning `true` if claimed.
+    ///
+    /// The caller is expected to already hold the full [`TaskRecord`] from a
+    /// prior `peek_next` and will update its in-memory fields directly. This
+    /// avoids the `RETURNING *` round-trip of [`pop_by_id`](Self::pop_by_id).
+    pub(crate) async fn claim_task(&self, id: i64) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE tasks SET
+                status = 'running',
+                started_at = datetime('now'),
+                expires_at = CASE
+                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    ELSE expires_at
+                END
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Pop the highest-priority pending task and mark it as running.
     /// Returns `None` if the queue is empty. Tasks with a future `run_after`
     /// timestamp are excluded.
@@ -182,6 +205,32 @@ impl TaskStore {
         self.maybe_prune().await;
 
         Ok(recurring_info)
+    }
+
+    /// Mark a task as completed and resolve its dependents in a single transaction.
+    ///
+    /// Combines `complete_with_record` and `resolve_dependents` to avoid
+    /// two separate `BEGIN IMMEDIATE` / `COMMIT` cycles.
+    ///
+    /// Returns `(recurring_info, unblocked_ids)`.
+    pub async fn complete_with_record_and_resolve(
+        &self,
+        task: &crate::task::TaskRecord,
+        metrics: &IoBudget,
+    ) -> Result<(Option<(chrono::DateTime<chrono::Utc>, i64)>, Vec<i64>), StoreError> {
+        tracing::debug!(task_id = task.id, "store.complete_and_resolve: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+
+        let recurring_info = Self::complete_inner(&mut conn, task, metrics).await?;
+        let unblocked = Self::resolve_dependents_inner(&mut conn, task.id).await?;
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(task_id = task.id, "store.complete_and_resolve: COMMIT ok");
+
+        self.maybe_prune().await;
+
+        Ok((recurring_info, unblocked))
     }
 
     /// Shared completion logic: insert history, handle recurring next instance,

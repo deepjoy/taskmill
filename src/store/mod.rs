@@ -31,7 +31,7 @@ mod submit;
 
 pub use lifecycle::FailBackoff;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -165,6 +165,9 @@ pub struct TaskStore {
     pub(crate) retention_policy: Option<RetentionPolicy>,
     pub(crate) prune_interval: u64,
     pub(crate) completion_count: std::sync::Arc<AtomicU64>,
+    /// Fast-path flag: `false` means no tags have been inserted into
+    /// `task_tags`, so `populate_tags` can skip the query entirely.
+    pub(crate) has_tags: std::sync::Arc<AtomicBool>,
 }
 
 impl TaskStore {
@@ -192,6 +195,8 @@ impl TaskStore {
             retention_policy: config.retention_policy,
             prune_interval: config.prune_interval,
             completion_count: std::sync::Arc::new(AtomicU64::new(0)),
+            // Conservative for file-backed stores that may have existing tags.
+            has_tags: std::sync::Arc::new(AtomicBool::new(true)),
         };
         store.migrate().await?;
         store.recover_running().await?;
@@ -216,6 +221,8 @@ impl TaskStore {
             retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
             prune_interval: 100,
             completion_count: std::sync::Arc::new(AtomicU64::new(0)),
+            // In-memory stores start empty — no tags to query.
+            has_tags: std::sync::Arc::new(AtomicBool::new(false)),
         };
         store.migrate().await?;
         Ok(store)
@@ -503,4 +510,17 @@ pub(crate) async fn insert_tags(
             .await?;
     }
     Ok(())
+}
+
+/// Insert tags and mark the store's `has_tags` flag if non-empty.
+pub(crate) async fn insert_tags_flagged(
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    task_id: i64,
+    tags: &std::collections::HashMap<String, String>,
+    has_tags_flag: &AtomicBool,
+) -> Result<(), StoreError> {
+    if !tags.is_empty() {
+        has_tags_flag.store(true, Ordering::Relaxed);
+    }
+    insert_tags(conn, task_id, tags).await
 }
