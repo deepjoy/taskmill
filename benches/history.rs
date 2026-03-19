@@ -68,18 +68,22 @@ fn bench_history_query(c: &mut Criterion) {
     group.sample_size(20);
 
     for history_size in [100usize, 1000, 5000] {
+        let sched = rt.block_on(build_scheduler_with_history(history_size));
+        let store = sched.store().clone();
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
-            |b, &history_size| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let sched = build_scheduler_with_history(history_size).await;
-                    let store = sched.store();
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store.history(50, 0).await.unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = store.history(50, 0).await.unwrap();
+                        }
+                        start.elapsed()
                     }
-                    start.elapsed()
                 });
             },
         );
@@ -95,18 +99,22 @@ fn bench_history_stats(c: &mut Criterion) {
     group.sample_size(20);
 
     for history_size in [100usize, 1000, 5000] {
+        let sched = rt.block_on(build_scheduler_with_history(history_size));
+        let store = sched.store().clone();
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
-            |b, &history_size| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let sched = build_scheduler_with_history(history_size).await;
-                    let store = sched.store();
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store.history_stats("bench::test").await.unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = store.history_stats("bench::test").await.unwrap();
+                        }
+                        start.elapsed()
                     }
-                    start.elapsed()
                 });
             },
         );
@@ -122,18 +130,22 @@ fn bench_history_by_type(c: &mut Criterion) {
     group.sample_size(20);
 
     for history_size in [100usize, 1000, 5000] {
+        let sched = rt.block_on(build_scheduler_with_history(history_size));
+        let store = sched.store().clone();
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
-            |b, &history_size| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let sched = build_scheduler_with_history(history_size).await;
-                    let store = sched.store();
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store.history_by_type("bench::test", 100).await.unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = store.history_by_type("bench::test", 100).await.unwrap();
+                        }
+                        start.elapsed()
                     }
-                    start.elapsed()
                 });
             },
         );
