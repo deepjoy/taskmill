@@ -4,7 +4,7 @@ use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{DependencyFailurePolicy, IoBudget};
 
-use super::{insert_history, HistoryStatus};
+use super::lifecycle::{insert_history, HistoryStatus};
 
 impl TaskStore {
     /// After a task completes, check if any blocked tasks are now unblocked.

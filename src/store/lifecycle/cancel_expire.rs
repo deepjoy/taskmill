@@ -1,10 +1,16 @@
 //! Pause, resume, cancellation, and TTL expiry.
+//!
+//! Both cancellation (user-initiated) and expiry (time-driven) share the same
+//! terminal transition pattern: record in history → clean up edges/tags → delete.
+//! They are kept together because of this shared structure.
 
 use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{IoBudget, TaskRecord};
 
 use super::{compute_duration_ms, insert_history, HistoryStatus};
+
+// ── Pause / Resume ──────────────────────────────────────────────────
 
 impl TaskStore {
     /// Pause a running task (for preemption). Sets status to paused.
@@ -24,6 +30,8 @@ impl TaskStore {
             .await?;
         Ok(())
     }
+
+    // ── Cancellation (user-initiated) ──────────────────────────────
 
     /// Move a task to history as cancelled and delete it from the active queue.
     /// Also cleans up dependency edges and cascades failure to dependents.
@@ -115,6 +123,8 @@ impl TaskStore {
         Ok(())
     }
 
+    // ── Bulk pause / resume by type prefix ─────────────────────────
+
     /// Pause all pending tasks whose `task_type` starts with `prefix`.
     ///
     /// Updates their status from `pending` to `paused` in a single SQL statement.
@@ -144,6 +154,8 @@ impl TaskStore {
         .await?;
         Ok(result.rows_affected())
     }
+
+    // ── Expiry (time-driven) ───────────────────────────────────────
 
     /// Sweep for expired tasks and move them to history.
     ///
