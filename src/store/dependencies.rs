@@ -130,6 +130,7 @@ impl TaskStore {
                                 &IoBudget::default(),
                                 None,
                                 Some(&format!("dependency task {} failed", failed_task_id)),
+                                false,
                             )
                             .await?;
 

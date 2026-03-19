@@ -208,6 +208,37 @@ impl Scheduler {
         Ok(true)
     }
 
+    /// Dispatch pending tasks using batch pop on the fast path (no gate
+    /// checks), falling back to one-at-a-time dispatch on the slow path.
+    async fn dispatch_pending(&self) -> Result<(), StoreError> {
+        if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
+            loop {
+                let active_count = self.inner.active.count();
+                let max = self.inner.max_concurrency.load(AtomicOrdering::Relaxed);
+                if active_count >= max {
+                    break;
+                }
+                let available = max - active_count;
+                let tasks = self.inner.store.pop_next_batch(available).await?;
+                if tasks.is_empty() {
+                    break;
+                }
+                for task in tasks {
+                    self.spawn_dispatched_task(task).await?;
+                }
+            }
+        } else {
+            loop {
+                match self.try_dispatch().await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run the scheduler loop until the cancellation token is triggered.
     ///
     /// This is the main entry point. The loop wakes on three conditions:
@@ -385,16 +416,10 @@ impl Scheduler {
             }
         }
 
-        // Try to dispatch tasks until we can't.
-        loop {
-            match self.try_dispatch().await {
-                Ok(true) => continue,
-                Ok(false) => break,
-                Err(e) => {
-                    tracing::error!(error = %e, "scheduler dispatch error");
-                    break;
-                }
-            }
+        // Dispatch pending tasks — batch pop on the fast path, one-at-a-time
+        // with gate checks on the slow path.
+        if let Err(e) = self.dispatch_pending().await {
+            tracing::error!(error = %e, "scheduler dispatch error");
         }
     }
 

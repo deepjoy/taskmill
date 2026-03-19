@@ -60,6 +60,7 @@ impl TaskStore {
             &IoBudget::default(),
             duration_ms,
             None,
+            false,
         )
         .await?;
 
@@ -99,6 +100,7 @@ impl TaskStore {
             &IoBudget::default(),
             duration_ms,
             None,
+            false,
         )
         .await?;
 
@@ -193,6 +195,7 @@ impl TaskStore {
                 &IoBudget::default(),
                 None,
                 None,
+                false,
             )
             .await?;
 
@@ -215,6 +218,7 @@ impl TaskStore {
                     &IoBudget::default(),
                     None,
                     None,
+                    false,
                 )
                 .await?;
                 crate::store::delete_task_tags(&mut conn, child.id).await?;
@@ -286,6 +290,7 @@ impl TaskStore {
             &IoBudget::default(),
             None,
             None,
+            false,
         )
         .await?;
 

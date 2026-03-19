@@ -48,6 +48,11 @@ impl HistoryStatus {
 ///
 /// Shared by `complete()`, `fail()`, and `cancel_to_history()` to eliminate
 /// the duplicated 22-column INSERT statement.
+///
+/// When `skip_tags` is `true` the history-tag copy (`INSERT INTO
+/// task_history_tags … SELECT FROM task_tags`) is skipped. Callers that
+/// know no tags have been inserted (e.g. via the `has_tags` fast-path
+/// flag) can set this to avoid an unnecessary SQL round-trip.
 pub(crate) async fn insert_history(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     task: &TaskRecord,
@@ -55,6 +60,7 @@ pub(crate) async fn insert_history(
     metrics: &IoBudget,
     duration_ms: Option<i64>,
     last_error: Option<&str>,
+    skip_tags: bool,
 ) -> Result<(), StoreError> {
     let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
     let retry_count = if status.increments_retries() {
@@ -110,15 +116,17 @@ pub(crate) async fn insert_history(
     .await?;
 
     // Copy tags from task_tags to task_history_tags.
-    let history_rowid = result.last_insert_rowid();
-    sqlx::query(
-        "INSERT INTO task_history_tags (history_rowid, key, value)
-         SELECT ?, key, value FROM task_tags WHERE task_id = ?",
-    )
-    .bind(history_rowid)
-    .bind(task.id)
-    .execute(&mut **conn)
-    .await?;
+    if !skip_tags {
+        let history_rowid = result.last_insert_rowid();
+        sqlx::query(
+            "INSERT INTO task_history_tags (history_rowid, key, value)
+             SELECT ?, key, value FROM task_tags WHERE task_id = ?",
+        )
+        .bind(history_rowid)
+        .bind(task.id)
+        .execute(&mut **conn)
+        .await?;
+    }
 
     Ok(())
 }

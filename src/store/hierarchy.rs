@@ -108,6 +108,7 @@ impl TaskStore {
                     &crate::task::IoBudget::default(),
                     None,
                     None,
+                    false,
                 )
                 .await?;
             }

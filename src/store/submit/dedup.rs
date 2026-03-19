@@ -82,6 +82,7 @@ pub(crate) async fn supersede_existing(
             .started_at
             .map(|s| (chrono::Utc::now() - s).num_milliseconds()),
         None,
+        false,
     )
     .await?;
 
