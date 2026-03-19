@@ -1,6 +1,5 @@
 /// One-shot timing breakdown of dep_chain_submit to identify where time is spent.
 /// Run with: cargo run --release --example profile_dep_chain
-
 use std::time::{Duration, Instant};
 
 use taskmill::{
@@ -69,19 +68,16 @@ async fn run(depth: usize, iters: u32) {
         chain_submit_times.push(t2.elapsed());
     }
 
-    let avg = |v: &[Duration]| -> Duration {
-        v.iter().sum::<Duration>() / v.len() as u32
-    };
+    let avg = |v: &[Duration]| -> Duration { v.iter().sum::<Duration>() / v.len() as u32 };
     let med = |v: &mut Vec<Duration>| -> Duration {
         v.sort();
         v[v.len() / 2]
     };
 
-    let total_avg = avg(&build_times)
-        + avg(&first_submit_times)
-        + avg(&chain_submit_times);
-    let per_chained_submit_avg =
-        avg(&chain_submit_times).checked_div((depth - 1) as u32).unwrap_or_default();
+    let total_avg = avg(&build_times) + avg(&first_submit_times) + avg(&chain_submit_times);
+    let per_chained_submit_avg = avg(&chain_submit_times)
+        .checked_div((depth - 1) as u32)
+        .unwrap_or_default();
 
     println!("depth={depth}  iters={iters}");
     println!(

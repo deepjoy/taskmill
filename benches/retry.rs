@@ -215,9 +215,7 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
 
                         for i in 0..100 {
                             sched
-                                .submit(
-                                    &TaskSubmission::new("bench::fail").key(format!("rf-{i}")),
-                                )
+                                .submit(&TaskSubmission::new("bench::fail").key(format!("rf-{i}")))
                                 .await
                                 .unwrap();
                         }

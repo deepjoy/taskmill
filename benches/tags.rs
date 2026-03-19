@@ -57,9 +57,7 @@ fn bench_submit_with_tags(c: &mut Criterion) {
                     for _ in 0..iters {
                         let sched = Scheduler::builder()
                             .store(TaskStore::open_memory().await.unwrap())
-                            .domain(
-                                Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor),
-                            )
+                            .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                             .max_concurrency(4)
                             .poll_interval(Duration::from_millis(10))
                             .build()
@@ -67,8 +65,7 @@ fn bench_submit_with_tags(c: &mut Criterion) {
                             .unwrap();
                         let start = Instant::now();
                         for i in 0..500 {
-                            let mut sub =
-                                TaskSubmission::new("bench::test").key(format!("st-{i}"));
+                            let mut sub = TaskSubmission::new("bench::test").key(format!("st-{i}"));
                             for t in 0..tag_count {
                                 sub = sub.tag(format!("key-{t}"), format!("val-{i}-{t}"));
                             }

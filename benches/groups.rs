@@ -138,9 +138,7 @@ fn bench_dispatch_group_scaling(c: &mut Criterion) {
 
                         let mut builder = Scheduler::builder()
                             .store(TaskStore::open_memory().await.unwrap())
-                            .domain(
-                                Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor),
-                            )
+                            .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
                             .max_concurrency(8)
                             .poll_interval(Duration::from_millis(10));
 

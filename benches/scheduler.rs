@@ -204,9 +204,7 @@ fn bench_concurrency_scaling(c: &mut Criterion) {
 
                         for i in 0..500 {
                             sched
-                                .submit(
-                                    &TaskSubmission::new("bench::test").key(format!("cs-{i}")),
-                                )
+                                .submit(&TaskSubmission::new("bench::test").key(format!("cs-{i}")))
                                 .await
                                 .unwrap();
                         }
@@ -327,9 +325,7 @@ fn bench_byte_progress_overhead(c: &mut Criterion) {
 
                 for i in 0..500 {
                     sched
-                        .submit(
-                            &TaskSubmission::new("bench::test").key(format!("bp-noop-{i}")),
-                        )
+                        .submit(&TaskSubmission::new("bench::test").key(format!("bp-noop-{i}")))
                         .await
                         .unwrap();
                 }
@@ -381,9 +377,7 @@ fn bench_byte_progress_overhead(c: &mut Criterion) {
 
                 for i in 0..500 {
                     sched
-                        .submit(
-                            &TaskSubmission::new("bench::byte-test").key(format!("bp-{i}")),
-                        )
+                        .submit(&TaskSubmission::new("bench::byte-test").key(format!("bp-{i}")))
                         .await
                         .unwrap();
                 }
@@ -439,9 +433,7 @@ fn bench_byte_progress_snapshot(c: &mut Criterion) {
                 // Submit and dispatch 100 tasks.
                 for i in 0..100 {
                     sched
-                        .submit(
-                            &TaskSubmission::new("bench::byte-test").key(format!("snap-{i}")),
-                        )
+                        .submit(&TaskSubmission::new("bench::byte-test").key(format!("snap-{i}")))
                         .await
                         .unwrap();
                 }

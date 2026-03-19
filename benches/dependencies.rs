@@ -217,5 +217,9 @@ criterion_group! {
         .with_profiler(PProfProfiler::new(1000, Output::Flamegraph(None)));
     targets = bench_dep_chain_submit
 }
-criterion_group!(dispatch_benches, bench_dep_chain_dispatch, bench_dep_fan_in_dispatch);
+criterion_group!(
+    dispatch_benches,
+    bench_dep_chain_dispatch,
+    bench_dep_fan_in_dispatch
+);
 criterion_main!(submit_benches, dispatch_benches);
