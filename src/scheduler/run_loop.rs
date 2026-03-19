@@ -94,12 +94,10 @@ impl Scheduler {
         task.status = crate::task::TaskStatus::Running;
         task.started_at = Some(chrono::Utc::now());
         // Mirror the SQL TTL logic for first-attempt tasks.
-        if task.ttl_from == crate::task::TtlFrom::FirstAttempt
-            && task.ttl_seconds.is_some()
-            && task.expires_at.is_none()
-        {
-            task.expires_at =
-                Some(chrono::Utc::now() + chrono::Duration::seconds(task.ttl_seconds.unwrap()));
+        if task.ttl_from == crate::task::TtlFrom::FirstAttempt && task.expires_at.is_none() {
+            if let Some(ttl) = task.ttl_seconds {
+                task.expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(ttl));
+            }
         }
 
         // Look up executor.
