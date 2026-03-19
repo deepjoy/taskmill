@@ -1,7 +1,5 @@
 //! Dependency resolution and cycle detection for task submission.
 
-use std::collections::{HashSet, VecDeque};
-
 use crate::store::StoreError;
 use crate::task::DependencyFailurePolicy;
 
@@ -81,30 +79,35 @@ pub(super) async fn resolve_dependency_edges(
     Ok((active_deps, status))
 }
 
-/// Cycle detection: iterative BFS from each dep upward through
-/// the dependency graph. If we encounter `new_task_id`, there's a cycle.
+/// Cycle detection via recursive CTE.
+///
+/// Walks the entire upstream ancestry of `deps` in a single SQL query
+/// instead of issuing one SELECT per BFS level. This reduces the number
+/// of Rust↔SQLite round-trips from O(chain_depth) to O(1).
 pub(super) async fn detect_cycle(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     new_task_id: i64,
     deps: &[i64],
 ) -> Result<(), StoreError> {
-    let mut visited = HashSet::new();
-    let mut queue: VecDeque<i64> = deps.iter().copied().collect();
+    for &dep_id in deps {
+        let found: Option<(i64,)> = sqlx::query_as(
+            "WITH RECURSIVE ancestors(id) AS (
+                 SELECT ? AS id
+                 UNION
+                 SELECT td.depends_on_id
+                 FROM task_deps td
+                 JOIN ancestors a ON td.task_id = a.id
+             )
+             SELECT id FROM ancestors WHERE id = ? LIMIT 1",
+        )
+        .bind(dep_id)
+        .bind(new_task_id)
+        .fetch_optional(&mut **conn)
+        .await?;
 
-    while let Some(current) = queue.pop_front() {
-        if current == new_task_id {
+        if found.is_some() {
             return Err(StoreError::CyclicDependency);
         }
-        if !visited.insert(current) {
-            continue;
-        }
-        // Find what `current` depends on.
-        let upstream: Vec<(i64,)> =
-            sqlx::query_as("SELECT depends_on_id FROM task_deps WHERE task_id = ?")
-                .bind(current)
-                .fetch_all(&mut **conn)
-                .await?;
-        queue.extend(upstream.into_iter().map(|(id,)| id));
     }
     Ok(())
 }
