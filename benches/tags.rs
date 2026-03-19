@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo bench --bench tags`
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
@@ -52,23 +52,31 @@ fn bench_submit_with_tags(c: &mut Criterion) {
             BenchmarkId::from_parameter(tag_count),
             &tag_count,
             |b, &tag_count| {
-                b.to_async(&rt).iter(|| async move {
-                    let sched = Scheduler::builder()
-                        .store(TaskStore::open_memory().await.unwrap())
-                        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
-                        .max_concurrency(4)
-                        .poll_interval(Duration::from_millis(10))
-                        .build()
-                        .await
-                        .unwrap();
-
-                    for i in 0..500 {
-                        let mut sub = TaskSubmission::new("bench::test").key(format!("st-{i}"));
-                        for t in 0..tag_count {
-                            sub = sub.tag(format!("key-{t}"), format!("val-{i}-{t}"));
+                b.to_async(&rt).iter_custom(|iters| async move {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let sched = Scheduler::builder()
+                            .store(TaskStore::open_memory().await.unwrap())
+                            .domain(
+                                Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor),
+                            )
+                            .max_concurrency(4)
+                            .poll_interval(Duration::from_millis(10))
+                            .build()
+                            .await
+                            .unwrap();
+                        let start = Instant::now();
+                        for i in 0..500 {
+                            let mut sub =
+                                TaskSubmission::new("bench::test").key(format!("st-{i}"));
+                            for t in 0..tag_count {
+                                sub = sub.tag(format!("key-{t}"), format!("val-{i}-{t}"));
+                            }
+                            sched.submit(&sub).await.unwrap();
                         }
-                        sched.submit(&sub).await.unwrap();
+                        total += start.elapsed();
                     }
+                    total
                 });
             },
         );
@@ -84,20 +92,24 @@ fn bench_query_by_tags(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_by_tags");
 
     for queue_depth in [100usize, 1000, 5000] {
+        let store = rt.block_on(store_with_tagged_tasks(queue_depth));
         group.bench_with_input(
             BenchmarkId::from_parameter(queue_depth),
             &queue_depth,
-            |b, &queue_depth| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let store = store_with_tagged_tasks(queue_depth).await;
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store
-                            .tasks_by_tags(&[("bucket", "b0")], None)
-                            .await
-                            .unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            let _ = store
+                                .tasks_by_tags(&[("bucket", "b0")], None)
+                                .await
+                                .unwrap();
+                        }
+                        start.elapsed()
                     }
-                    start.elapsed()
                 });
             },
         );
@@ -113,20 +125,24 @@ fn bench_count_by_tags(c: &mut Criterion) {
     let mut group = c.benchmark_group("count_by_tags");
 
     for queue_depth in [100usize, 1000, 5000] {
+        let store = rt.block_on(store_with_tagged_tasks(queue_depth));
         group.bench_with_input(
             BenchmarkId::from_parameter(queue_depth),
             &queue_depth,
-            |b, &queue_depth| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let store = store_with_tagged_tasks(queue_depth).await;
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store
-                            .count_by_tags(&[("bucket", "b0")], None)
-                            .await
-                            .unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            let _ = store
+                                .count_by_tags(&[("bucket", "b0")], None)
+                                .await
+                                .unwrap();
+                        }
+                        start.elapsed()
                     }
-                    start.elapsed()
                 });
             },
         );
@@ -142,27 +158,34 @@ fn bench_tag_values_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("tag_values");
 
     for queue_depth in [100usize, 1000, 5000] {
+        let store = rt.block_on(async {
+            let store = TaskStore::open_memory().await.unwrap();
+            for i in 0..queue_depth {
+                store
+                    .submit(
+                        &TaskSubmission::new("bench::test")
+                            .key(format!("tv-{i}"))
+                            .tag("bucket", format!("b{}", i % 10)),
+                    )
+                    .await
+                    .unwrap();
+            }
+            store
+        });
         group.bench_with_input(
             BenchmarkId::from_parameter(queue_depth),
             &queue_depth,
-            |b, &queue_depth| {
-                b.to_async(&rt).iter_custom(|iters| async move {
-                    let store = TaskStore::open_memory().await.unwrap();
-                    for i in 0..queue_depth {
-                        store
-                            .submit(
-                                &TaskSubmission::new("bench::test")
-                                    .key(format!("tv-{i}"))
-                                    .tag("bucket", format!("b{}", i % 10)),
-                            )
-                            .await
-                            .unwrap();
+            |b, _| {
+                let store = store.clone();
+                b.to_async(&rt).iter_custom(|iters| {
+                    let store = store.clone();
+                    async move {
+                        let start = Instant::now();
+                        for _ in 0..iters {
+                            let _ = store.tag_values("bucket").await.unwrap();
+                        }
+                        start.elapsed()
                     }
-                    let start = std::time::Instant::now();
-                    for _ in 0..iters {
-                        let _ = store.tag_values("bucket").await.unwrap();
-                    }
-                    start.elapsed()
                 });
             },
         );
