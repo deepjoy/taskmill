@@ -122,6 +122,7 @@ impl TaskStore {
                  SELECT id FROM tasks
                  WHERE status = 'pending'
                    AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%d %H:%M:%f', 'now'))
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )

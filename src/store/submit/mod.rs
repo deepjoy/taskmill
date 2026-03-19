@@ -55,6 +55,7 @@ pub(crate) async fn submit_one(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     sub: &TaskSubmission,
     has_tags_flag: Option<&std::sync::atomic::AtomicBool>,
+    has_hierarchy_flag: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<SubmitOutcome, StoreError> {
     if let Some(ref err) = sub.payload_error {
         return Err(StoreError::Serialization(err.clone()));
@@ -127,6 +128,13 @@ pub(crate) async fn submit_one(
     if result.rows_affected() > 0 {
         let task_id = result.last_insert_rowid();
 
+        // Mark hierarchy flag if this task has a parent.
+        if sub.parent_id.is_some() {
+            if let Some(flag) = has_hierarchy_flag {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         // Insert tags.
         if let Some(flag) = has_tags_flag {
             super::insert_tags_flagged(conn, task_id, &sub.tags, flag).await?;
@@ -188,7 +196,13 @@ impl TaskStore {
 
         let mut conn = self.begin_write().await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT start");
-        let outcome = submit_one(&mut conn, sub, Some(&self.has_tags)).await?;
+        let outcome = submit_one(
+            &mut conn,
+            sub,
+            Some(&self.has_tags),
+            Some(&self.has_hierarchy),
+        )
+        .await?;
         tracing::debug!(task_type = %sub.task_type, "store.submit: INSERT end");
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         Ok(outcome)
@@ -242,7 +256,15 @@ impl TaskStore {
                 if last_occurrence[&sub.effective_key()] != global_i {
                     results.push(SubmitOutcome::Duplicate);
                 } else {
-                    results.push(submit_one(&mut conn, sub, Some(&self.has_tags)).await?);
+                    results.push(
+                        submit_one(
+                            &mut conn,
+                            sub,
+                            Some(&self.has_tags),
+                            Some(&self.has_hierarchy),
+                        )
+                        .await?,
+                    );
                 }
             }
 

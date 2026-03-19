@@ -37,7 +37,13 @@ pub(crate) async fn handle_success(
 
     // For the execute phase, check if the task spawned children.
     // If so, transition to waiting instead of completing.
-    if phase == ExecutionPhase::Execute {
+    // Skip the DB query entirely when no tasks have been submitted with parent_id.
+    if phase == ExecutionPhase::Execute
+        && deps
+            .store
+            .has_hierarchy
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
         match deps.store.active_children_count(task_id).await {
             Ok(count) if count > 0 => {
                 if let Err(e) = deps.store.set_waiting(task_id).await {
