@@ -56,7 +56,6 @@ async fn build_scheduler_with_history(n: usize) -> Scheduler {
         }
     }
 
-    token.cancel();
     sched
 }
 
