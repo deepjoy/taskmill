@@ -85,12 +85,22 @@ impl Scheduler {
         }
         drop(reader_guard);
 
-        // Atomically claim the task. Skip tag population since we already
-        // have the tags from the peek above.
-        let Some(mut task) = self.inner.store.pop_by_id_no_tags(candidate.id).await? else {
+        // Atomically claim the task. We already have the full record from
+        // peek_next, so use claim_task (no RETURNING *) and patch in-memory.
+        if !self.inner.store.claim_task(candidate.id).await? {
             return Ok(false);
-        };
-        task.tags = candidate.tags;
+        }
+        let mut task = candidate;
+        task.status = crate::task::TaskStatus::Running;
+        task.started_at = Some(chrono::Utc::now());
+        // Mirror the SQL TTL logic for first-attempt tasks.
+        if task.ttl_from == crate::task::TtlFrom::FirstAttempt
+            && task.ttl_seconds.is_some()
+            && task.expires_at.is_none()
+        {
+            task.expires_at =
+                Some(chrono::Utc::now() + chrono::Duration::seconds(task.ttl_seconds.unwrap()));
+        }
 
         // Look up executor.
         let Some(executor) = self.inner.registry.get(&task.task_type) else {

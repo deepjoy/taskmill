@@ -79,17 +79,13 @@ impl TaskStore {
         Ok(record)
     }
 
-    /// Atomically claim a specific pending task by id without populating tags.
+    /// Atomically claim a pending task by id, returning `true` if claimed.
     ///
-    /// Callers must provide tags separately (e.g. carried from a prior
-    /// `peek_next`). This avoids a redundant `populate_tags` round-trip
-    /// when the caller already has the tags.
-    pub(crate) async fn pop_by_id_no_tags(
-        &self,
-        id: i64,
-    ) -> Result<Option<TaskRecord>, StoreError> {
-        tracing::debug!(task_id = id, "store.pop_by_id_no_tags: UPDATE start");
-        let row = sqlx::query(
+    /// The caller is expected to already hold the full [`TaskRecord`] from a
+    /// prior `peek_next` and will update its in-memory fields directly. This
+    /// avoids the `RETURNING *` round-trip of [`pop_by_id`](Self::pop_by_id).
+    pub(crate) async fn claim_task(&self, id: i64) -> Result<bool, StoreError> {
+        let result = sqlx::query(
             "UPDATE tasks SET
                 status = 'running',
                 started_at = datetime('now'),
@@ -98,15 +94,12 @@ impl TaskStore {
                     THEN datetime('now', '+' || ttl_seconds || ' seconds')
                     ELSE expires_at
                 END
-             WHERE id = ? AND status = 'pending'
-             RETURNING *",
+             WHERE id = ? AND status = 'pending'",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .execute(&self.pool)
         .await?;
-        tracing::debug!(task_id = id, "store.pop_by_id_no_tags: UPDATE end");
-
-        Ok(row.as_ref().map(row_to_task_record))
+        Ok(result.rows_affected() > 0)
     }
 
     /// Pop the highest-priority pending task and mark it as running.
