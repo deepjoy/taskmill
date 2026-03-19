@@ -33,6 +33,12 @@ pub(crate) struct SpawnContext {
     /// Registry of all registered modules — shared with spawned tasks so they can
     /// construct [`ModuleHandle`](crate::module::ModuleHandle) instances.
     pub module_registry: Arc<crate::module::ModuleRegistry>,
+    /// Completion coalescing channel sender.
+    pub completion_tx: tokio::sync::mpsc::UnboundedSender<super::super::CompletionMsg>,
+    /// Completion coalescing channel receiver (Arc-wrapped for leader election).
+    pub completion_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<super::super::CompletionMsg>>,
+    >,
 }
 
 /// Output of task context construction — everything needed to insert into the

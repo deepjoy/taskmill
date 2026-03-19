@@ -30,6 +30,8 @@ impl Scheduler {
             module_running: Arc::clone(&self.inner.module_running),
             module_state: Arc::clone(&self.inner.module_state),
             module_registry: Arc::clone(&self.inner.module_registry),
+            completion_tx: self.inner.completion_tx.clone(),
+            completion_rx: self.inner.completion_rx.clone(),
         }
     }
 
@@ -291,11 +293,43 @@ impl Scheduler {
         }
     }
 
+    /// Drain the completion channel and process all queued completions in a
+    /// single batched transaction.
+    async fn drain_completions(&self) {
+        let mut batch = Vec::new();
+        {
+            let mut rx = self.inner.completion_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = batch.len(), "draining completion batch");
+        spawn::process_completion_batch(
+            &batch,
+            &self.inner.store,
+            &self.inner.event_tx,
+            &self.inner.active,
+            self.inner.max_retries,
+            &self.inner.work_notify,
+        )
+        .await;
+    }
+
     /// Resume paused tasks, dispatch finalizers, and dispatch pending work.
     async fn poll_and_dispatch(&self) {
         if self.is_paused() {
             return;
         }
+
+        // Drain queued completions before dispatching new work.
+        // This ensures completed tasks are processed first, freeing
+        // dependency edges and unblocking downstream tasks.
+        self.drain_completions().await;
 
         // Run expiry sweep before dispatching.
         self.maybe_expire_tasks().await;
@@ -381,6 +415,9 @@ impl Scheduler {
                 tracing::info!("graceful shutdown complete");
             }
         }
+
+        // Drain any remaining completions before closing the store.
+        self.drain_completions().await;
 
         // Flush WAL and close the database.
         self.inner.store.close().await;

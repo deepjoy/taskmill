@@ -6,7 +6,7 @@ use crate::store::TaskStore;
 use crate::task::{IoBudget, TaskRecord};
 
 use super::super::dispatch::ActiveTaskMap;
-use super::super::SchedulerEvent;
+use super::super::{CompletionMsg, SchedulerEvent};
 use super::parent::handle_parent_resolution;
 use super::ExecutionPhase;
 
@@ -17,13 +17,15 @@ pub(crate) struct CompletionDeps {
     pub event_tx: tokio::sync::broadcast::Sender<SchedulerEvent>,
     pub work_notify: Arc<tokio::sync::Notify>,
     pub max_retries: i32,
+    pub completion_tx: tokio::sync::mpsc::UnboundedSender<CompletionMsg>,
+    pub completion_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<CompletionMsg>>>,
 }
 
 /// Handle a successful task execution.
 ///
 /// For the execute phase, checks if the task spawned children (transition to
-/// waiting). Otherwise records completion, resolves dependents, and handles
-/// recurring re-enqueue.
+/// waiting). Otherwise sends a [`CompletionMsg`] to the coalescing channel
+/// for batched processing in `drain_completions`.
 pub(crate) async fn handle_success(
     task: &TaskRecord,
     phase: ExecutionPhase,
@@ -72,58 +74,117 @@ pub(crate) async fn handle_success(
         }
     }
 
-    match deps
-        .store
-        .complete_with_record_and_resolve(task, metrics)
-        .await
-    {
-        Ok((recurring_info, unblocked)) => {
-            // Emit recurring event if this was a recurring task.
-            if task.recurring_interval_secs.is_some() {
-                let (next_run, exec_count) = match recurring_info {
-                    Some((next, count)) => (Some(next), count),
-                    None => (None, task.recurring_execution_count + 1),
-                };
-                let _ = deps.event_tx.send(SchedulerEvent::RecurringCompleted {
-                    header: task.event_header(),
-                    execution_count: exec_count,
-                    next_run,
-                });
-            }
+    // Send completion to the coalescing channel.
+    let msg = CompletionMsg {
+        task: task.clone(),
+        metrics: *metrics,
+    };
 
-            // Remove from active tracking AFTER the store write completes.
-            decrement_module();
-            deps.active.remove(task_id);
-            let _ = deps
-                .event_tx
-                .send(SchedulerEvent::Completed(task.event_header()));
+    // Decrement module counter and remove from active map eagerly so that
+    // concurrency slots are freed before the batch commits.
+    decrement_module();
+    deps.active.remove(task_id);
 
-            // Emit unblocked events for resolved dependents.
-            for uid in &unblocked {
-                let _ = deps
-                    .event_tx
-                    .send(SchedulerEvent::TaskUnblocked { task_id: *uid });
-            }
+    if deps.completion_tx.send(msg).is_err() {
+        tracing::error!(task_id, "completion channel closed — processing inline");
+        if let Err(e) = deps
+            .store
+            .complete_with_record_and_resolve(task, metrics)
+            .await
+        {
+            tracing::error!(task_id, error = %e, "inline completion failed");
         }
-        Err(e) => {
-            tracing::error!(task_id, error = %e, "failed to complete task and resolve dependents");
-            decrement_module();
-            deps.active.remove(task_id);
+        return;
+    }
+
+    // Leader election: try to grab the rx lock and drain the batch.
+    // Under high concurrency, only one task wins — it processes the batch
+    // for everyone. Others just wake the scheduler and return.
+    if let Ok(mut rx) = deps.completion_rx.try_lock() {
+        let mut batch = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            batch.push(m);
+        }
+        drop(rx);
+
+        if !batch.is_empty() {
+            process_completion_batch(
+                &batch,
+                &deps.store,
+                &deps.event_tx,
+                &deps.active,
+                deps.max_retries,
+                &deps.work_notify,
+            )
+            .await;
         }
     }
 
+    // Wake the scheduler to dispatch new work (and drain any stragglers).
     deps.work_notify.notify_one();
+}
 
-    // If this was a child task, check if parent is ready.
-    if let Some(parent_id) = task.parent_id {
-        handle_parent_resolution(
-            parent_id,
-            &deps.store,
-            &deps.active,
-            &deps.event_tx,
-            deps.max_retries,
-            &deps.work_notify,
-        )
-        .await;
+/// Process a batch of completions: write to store, emit events, resolve parents.
+///
+/// Called from both the spawned task (leader election) and the run loop
+/// (`drain_completions`). Handles parent resolution after the batch commits
+/// since child records must be removed from the DB before the parent
+/// resolution check.
+pub(in crate::scheduler) async fn process_completion_batch(
+    batch: &[CompletionMsg],
+    store: &TaskStore,
+    event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    active: &ActiveTaskMap,
+    max_retries: i32,
+    work_notify: &Arc<tokio::sync::Notify>,
+) {
+    let items: Vec<(&TaskRecord, &IoBudget)> =
+        batch.iter().map(|m| (&m.task, &m.metrics)).collect();
+
+    match store.complete_batch_with_resolve(&items).await {
+        Ok(results) => {
+            for (msg, (_task_id, recurring_info, unblocked)) in batch.iter().zip(results) {
+                emit_completion_events(&msg.task, recurring_info, &unblocked, event_tx);
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "batch completion failed");
+            return;
+        }
+    }
+
+    // Parent resolution: now that the batch has committed (child records are
+    // removed from `tasks`), check if any parent is ready for finalization.
+    for msg in batch {
+        if let Some(parent_id) = msg.task.parent_id {
+            handle_parent_resolution(parent_id, store, active, event_tx, max_retries, work_notify)
+                .await;
+        }
+    }
+}
+
+/// Emit completion, recurring, and unblocked events for a single task.
+pub(in crate::scheduler) fn emit_completion_events(
+    task: &TaskRecord,
+    recurring_info: Option<(chrono::DateTime<chrono::Utc>, i64)>,
+    unblocked: &[i64],
+    event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+) {
+    if task.recurring_interval_secs.is_some() {
+        let (next_run, exec_count) = match recurring_info {
+            Some((next, count)) => (Some(next), count),
+            None => (None, task.recurring_execution_count + 1),
+        };
+        let _ = event_tx.send(SchedulerEvent::RecurringCompleted {
+            header: task.event_header(),
+            execution_count: exec_count,
+            next_run,
+        });
+    }
+
+    let _ = event_tx.send(SchedulerEvent::Completed(task.event_header()));
+
+    for uid in unblocked {
+        let _ = event_tx.send(SchedulerEvent::TaskUnblocked { task_id: *uid });
     }
 }

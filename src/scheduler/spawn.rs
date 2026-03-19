@@ -22,6 +22,7 @@ use crate::task::TaskRecord;
 use super::dispatch::ActiveTask;
 use super::SchedulerEvent;
 
+pub(in crate::scheduler) use completion::process_completion_batch;
 pub(crate) use context::SpawnContext;
 
 /// Whether to call `execute` or `finalize` on the executor.
@@ -78,6 +79,8 @@ pub(crate) async fn spawn_task(
         event_tx: ctx.event_tx.clone(),
         work_notify: ctx.work_notify.clone(),
         max_retries: ctx.max_retries,
+        completion_tx: ctx.completion_tx.clone(),
+        completion_rx: ctx.completion_rx.clone(),
     };
     let failure_deps = failure::FailureDeps {
         store: ctx.store,
