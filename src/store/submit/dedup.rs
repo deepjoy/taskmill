@@ -76,7 +76,7 @@ pub(crate) async fn supersede_existing(
     crate::store::lifecycle::insert_history(
         conn,
         &existing,
-        "superseded",
+        crate::store::lifecycle::HistoryStatus::Superseded,
         &crate::task::IoBudget::default(),
         existing
             .started_at

@@ -104,7 +104,7 @@ impl TaskStore {
                 super::lifecycle::insert_history(
                     &mut conn,
                     &task,
-                    "cancelled",
+                    super::lifecycle::HistoryStatus::Cancelled,
                     &crate::task::IoBudget::default(),
                     None,
                     None,

@@ -240,7 +240,7 @@ pub(crate) async fn run_progress_ticker(
                 break;
             }
             _ = tokio::time::sleep(interval) => {
-                let snapshots = active.byte_progress_snapshots();
+                let snapshots = active.byte_progress_snapshots(None);
 
                 let mut active_ids = std::collections::HashSet::with_capacity(snapshots.len());
 

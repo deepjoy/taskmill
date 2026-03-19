@@ -4,7 +4,7 @@ use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{IoBudget, TaskRecord};
 
-use super::{compute_duration_ms, insert_history};
+use super::{compute_duration_ms, insert_history, HistoryStatus};
 
 impl TaskStore {
     /// Pause a running task (for preemption). Sets status to paused.
@@ -48,7 +48,7 @@ impl TaskStore {
         insert_history(
             &mut conn,
             &task,
-            "cancelled",
+            HistoryStatus::Cancelled,
             &IoBudget::default(),
             duration_ms,
             None,
@@ -87,7 +87,7 @@ impl TaskStore {
         insert_history(
             &mut conn,
             task,
-            "cancelled",
+            HistoryStatus::Cancelled,
             &IoBudget::default(),
             duration_ms,
             None,
@@ -177,7 +177,7 @@ impl TaskStore {
             insert_history(
                 &mut conn,
                 &task,
-                "expired",
+                HistoryStatus::Expired,
                 &IoBudget::default(),
                 None,
                 None,
@@ -199,7 +199,7 @@ impl TaskStore {
                 insert_history(
                     &mut conn,
                     &child,
-                    "expired",
+                    HistoryStatus::Expired,
                     &IoBudget::default(),
                     None,
                     None,
@@ -270,7 +270,7 @@ impl TaskStore {
         insert_history(
             &mut conn,
             &task,
-            "expired",
+            HistoryStatus::Expired,
             &IoBudget::default(),
             None,
             None,

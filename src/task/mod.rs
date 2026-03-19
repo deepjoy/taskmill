@@ -246,6 +246,11 @@ pub struct TaskRecord {
 }
 
 impl TaskRecord {
+    /// Extract the module name prefix from `task_type` (e.g. `"media"` from `"media::thumb"`).
+    pub fn module_name(&self) -> Option<&str> {
+        self.task_type.split_once("::").map(|(n, _)| n)
+    }
+
     /// Deserialize the payload blob into a typed value.
     ///
     /// Returns `None` if the payload is absent, or an error if deserialization fails.

@@ -695,10 +695,7 @@ impl ModuleHandle {
 
     /// All active tasks in this module (any status).
     pub fn active_tasks(&self) -> Vec<TaskRecord> {
-        self.scheduler
-            .inner
-            .active
-            .records_with_prefix(&self.prefix)
+        self.scheduler.inner.active.records(Some(&self.prefix))
     }
 
     /// Dead-lettered tasks in this module, newest first.
@@ -733,7 +730,7 @@ impl ModuleHandle {
             .scheduler
             .inner
             .active
-            .progress_snapshots_with_prefix(&self.prefix);
+            .progress_snapshots(Some(&self.prefix));
         let mut results = Vec::with_capacity(snapshots.len());
         for (record, reported, reported_at) in snapshots {
             results.push(
@@ -755,7 +752,7 @@ impl ModuleHandle {
             .scheduler
             .inner
             .active
-            .byte_progress_snapshots_with_prefix(&self.prefix);
+            .byte_progress_snapshots(Some(&self.prefix));
         snapshots
             .into_iter()
             .filter(|(_, _, _, _, completed, _, _, _)| *completed > 0)
@@ -868,7 +865,7 @@ impl ModuleHandle {
     /// doesn't exist or belongs to a different module.
     async fn task_belongs(&self, task_id: i64) -> Result<bool, StoreError> {
         // Fast path: check the in-memory active map first.
-        let records = self.scheduler.inner.active.records();
+        let records = self.scheduler.inner.active.records(None);
         if let Some(r) = records.iter().find(|r| r.id == task_id) {
             return Ok(r.task_type.starts_with(self.prefix.as_ref()));
         }
