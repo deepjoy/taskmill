@@ -102,6 +102,46 @@ impl TaskStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Atomically claim up to `limit` highest-priority pending tasks and mark
+    /// them as running. Returns an empty vec if no work is available. This
+    /// avoids the N sequential `pop_next()` round-trips when filling
+    /// concurrency slots.
+    pub async fn pop_next_batch(&self, limit: usize) -> Result<Vec<TaskRecord>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if limit == 1 {
+            return Ok(self.pop_next().await?.into_iter().collect());
+        }
+
+        let rows = sqlx::query(
+            "UPDATE tasks SET
+                status = 'running',
+                started_at = datetime('now'),
+                expires_at = CASE
+                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    ELSE expires_at
+                END
+             WHERE id IN (
+                 SELECT id FROM tasks
+                 WHERE status = 'pending'
+                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                 ORDER BY priority ASC, id ASC
+                 LIMIT ?
+             )
+             RETURNING *",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
     /// Pop the highest-priority pending task and mark it as running.
     /// Returns `None` if the queue is empty. Tasks with a future `run_after`
     /// timestamp are excluded.
@@ -171,7 +211,8 @@ impl TaskStore {
         let Some(row) = row else { return Ok(()) };
         let task = row_to_task_record(&row);
 
-        let _recurring = Self::complete_inner(&mut conn, &task, metrics).await?;
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
+        let _recurring = Self::complete_inner(&mut conn, &task, metrics, skip_tags).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -196,8 +237,9 @@ impl TaskStore {
     ) -> Result<Option<(chrono::DateTime<chrono::Utc>, i64)>, StoreError> {
         tracing::debug!(task_id = task.id, "store.complete_with_record: BEGIN tx");
         let mut conn = self.begin_write().await?;
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
 
-        let recurring_info = Self::complete_inner(&mut conn, task, metrics).await?;
+        let recurring_info = Self::complete_inner(&mut conn, task, metrics, skip_tags).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
         drop(conn);
@@ -221,8 +263,9 @@ impl TaskStore {
     ) -> Result<(Option<(chrono::DateTime<chrono::Utc>, i64)>, Vec<i64>), StoreError> {
         tracing::debug!(task_id = task.id, "store.complete_and_resolve: BEGIN tx");
         let mut conn = self.begin_write().await?;
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
 
-        let recurring_info = Self::complete_inner(&mut conn, task, metrics).await?;
+        let recurring_info = Self::complete_inner(&mut conn, task, metrics, skip_tags).await?;
         let unblocked = Self::resolve_dependents_inner(&mut conn, task.id).await?;
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
@@ -238,6 +281,11 @@ impl TaskStore {
     ///
     /// Coalesces N individual `complete_with_record_and_resolve` calls into one
     /// `BEGIN IMMEDIATE` / `COMMIT` cycle, amortizing SQLite's WAL sync overhead.
+    ///
+    /// When none of the tasks in the batch are recurring, an optimised path
+    /// batches the DELETE and dependency-resolution SQL into single statements
+    /// instead of looping per-task. This reduces the SQL round-trip count from
+    /// ~5N to N+4 (N history inserts + 3-4 batched statements).
     ///
     /// Returns a vec of `(task_id, recurring_info, unblocked_ids)` per item.
     pub async fn complete_batch_with_resolve(
@@ -257,14 +305,124 @@ impl TaskStore {
             return Ok(vec![(task.id, recurring, unblocked)]);
         }
 
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
+        let any_recurring = items
+            .iter()
+            .any(|(t, _)| t.recurring_interval_secs.is_some());
+
+        // Recurring tasks need per-task handling (tag reads, pile-up prevention,
+        // next-instance creation). Fall back to the per-item path.
+        if any_recurring {
+            tracing::debug!(
+                count = items.len(),
+                "store.complete_batch (per-item): BEGIN tx"
+            );
+            let mut conn = self.begin_write().await?;
+
+            let mut results = Vec::with_capacity(items.len());
+            for (task, metrics) in items {
+                let recurring = Self::complete_inner(&mut conn, task, metrics, skip_tags).await?;
+                let unblocked = Self::resolve_dependents_inner(&mut conn, task.id).await?;
+                results.push((task.id, recurring, unblocked));
+            }
+
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            drop(conn);
+            self.maybe_prune().await;
+            return Ok(results);
+        }
+
+        // ── Batched fast path (no recurring tasks) ───────────────────
+
         tracing::debug!(count = items.len(), "store.complete_batch: BEGIN tx");
         let mut conn = self.begin_write().await?;
 
-        let mut results = Vec::with_capacity(items.len());
+        // Step 1: Insert history rows (per-task — each has unique binds).
         for (task, metrics) in items {
-            let recurring = Self::complete_inner(&mut conn, task, metrics).await?;
-            let unblocked = Self::resolve_dependents_inner(&mut conn, task.id).await?;
-            results.push((task.id, recurring, unblocked));
+            let duration_ms = compute_duration_ms(task);
+            insert_history(
+                &mut conn,
+                task,
+                HistoryStatus::Completed,
+                metrics,
+                duration_ms,
+                task.last_error.as_deref(),
+                skip_tags,
+            )
+            .await?;
+        }
+
+        // Step 2: Batch-delete completed tasks (requeue = 0).
+        let ids: Vec<i64> = items.iter().map(|(t, _)| t.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let sql =
+            format!("DELETE FROM tasks WHERE id IN ({placeholders}) AND requeue = 0 RETURNING id");
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        let deleted: Vec<(i64,)> = q.fetch_all(&mut *conn).await?;
+        let deleted_set: std::collections::HashSet<i64> = deleted.iter().map(|(id,)| *id).collect();
+
+        // Step 3: Handle requeued tasks (not deleted because requeue = 1).
+        for id in &ids {
+            if !deleted_set.contains(id) {
+                sqlx::query(
+                    "UPDATE tasks SET status = 'pending',
+                        priority = COALESCE(requeue_priority, priority),
+                        started_at = NULL, retry_count = 0, last_error = NULL,
+                        requeue = 0, requeue_priority = NULL
+                     WHERE id = ?",
+                )
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
+
+        // Step 4: Batch-delete orphaned tags for deleted tasks.
+        if !skip_tags && !deleted_set.is_empty() {
+            let del_ids: Vec<i64> = deleted_set.iter().copied().collect();
+            let tag_placeholders = del_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let tag_sql = format!("DELETE FROM task_tags WHERE task_id IN ({tag_placeholders})");
+            let mut tq = sqlx::query(&tag_sql);
+            for id in &del_ids {
+                tq = tq.bind(id);
+            }
+            tq.execute(&mut *conn).await?;
+        }
+
+        // Step 5: Batch-resolve dependency edges for all completed tasks.
+        let dep_sql = format!(
+            "DELETE FROM task_deps WHERE depends_on_id IN ({placeholders}) RETURNING task_id"
+        );
+        let mut dq = sqlx::query_as::<_, (i64,)>(&dep_sql);
+        for id in &ids {
+            dq = dq.bind(id);
+        }
+        let dependent_ids: Vec<(i64,)> = dq.fetch_all(&mut *conn).await?;
+
+        let mut all_unblocked: Vec<i64> = Vec::new();
+        if !dependent_ids.is_empty() {
+            let dep_placeholders = dependent_ids
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            let unblock_sql = format!(
+                "UPDATE tasks SET status = 'pending'
+                 WHERE status = 'blocked'
+                   AND id IN ({dep_placeholders})
+                   AND NOT EXISTS (SELECT 1 FROM task_deps WHERE task_deps.task_id = tasks.id)
+                 RETURNING id"
+            );
+            let mut uq = sqlx::query_as::<_, (i64,)>(&unblock_sql);
+            for (dep_id,) in &dependent_ids {
+                uq = uq.bind(dep_id);
+            }
+            let unblocked: Vec<(i64,)> = uq.fetch_all(&mut *conn).await?;
+            all_unblocked = unblocked.into_iter().map(|(id,)| id).collect();
         }
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
@@ -274,11 +432,27 @@ impl TaskStore {
         // Prune once for the whole batch.
         self.maybe_prune().await;
 
+        // Build per-task results. Non-recurring → no recurring_info.
+        // Unblocked IDs are shared across the batch (not per-task).
+        let mut results = Vec::with_capacity(items.len());
+        for (i, (task, _)) in items.iter().enumerate() {
+            // Attach unblocked list to the last item to avoid duplication.
+            let unblocked = if i == items.len() - 1 {
+                std::mem::take(&mut all_unblocked)
+            } else {
+                Vec::new()
+            };
+            results.push((task.id, None, unblocked));
+        }
+
         Ok(results)
     }
 
     /// Shared completion logic: insert history, handle recurring next instance,
     /// then handle requeue or delete.
+    ///
+    /// `skip_tags` is forwarded to [`insert_history`] and also skips the
+    /// `delete_task_tags` call when no tags are present in the store.
     ///
     /// Returns `Some((next_run, exec_count))` if a recurring next instance was
     /// created, `None` otherwise.
@@ -286,6 +460,7 @@ impl TaskStore {
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         task: &crate::task::TaskRecord,
         metrics: &IoBudget,
+        skip_tags: bool,
     ) -> Result<Option<(chrono::DateTime<chrono::Utc>, i64)>, StoreError> {
         let duration_ms = compute_duration_ms(task);
 
@@ -297,6 +472,7 @@ impl TaskStore {
             metrics,
             duration_ms,
             task.last_error.as_deref(),
+            skip_tags,
         )
         .await?;
 
@@ -334,7 +510,9 @@ impl TaskStore {
         }
 
         // Task was deleted — clean up orphaned tags.
-        crate::store::delete_task_tags(conn, task.id).await?;
+        if !skip_tags {
+            crate::store::delete_task_tags(conn, task.id).await?;
+        }
 
         // Handle recurring tasks: create the next instance after deleting
         // the completed one (to avoid UNIQUE constraint on key).
@@ -591,7 +769,7 @@ impl TaskStore {
             };
             let duration_ms = compute_duration_ms(task);
 
-            insert_history(conn, task, status, metrics, duration_ms, Some(error)).await?;
+            insert_history(conn, task, status, metrics, duration_ms, Some(error), false).await?;
 
             crate::store::delete_task_tags(conn, task.id).await?;
             sqlx::query("DELETE FROM tasks WHERE id = ?")
