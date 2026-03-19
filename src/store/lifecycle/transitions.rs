@@ -233,6 +233,49 @@ impl TaskStore {
         Ok((recurring_info, unblocked))
     }
 
+    /// Complete a batch of tasks and resolve their dependents in a single transaction.
+    ///
+    /// Coalesces N individual `complete_with_record_and_resolve` calls into one
+    /// `BEGIN IMMEDIATE` / `COMMIT` cycle, amortizing SQLite's WAL sync overhead.
+    ///
+    /// Returns a vec of `(task_id, recurring_info, unblocked_ids)` per item.
+    pub async fn complete_batch_with_resolve(
+        &self,
+        items: &[(&crate::task::TaskRecord, &IoBudget)],
+    ) -> Result<Vec<(i64, Option<(chrono::DateTime<chrono::Utc>, i64)>, Vec<i64>)>, StoreError>
+    {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Single-item fast path: avoid the batch overhead.
+        if items.len() == 1 {
+            let (task, metrics) = items[0];
+            let (recurring, unblocked) =
+                self.complete_with_record_and_resolve(task, metrics).await?;
+            return Ok(vec![(task.id, recurring, unblocked)]);
+        }
+
+        tracing::debug!(count = items.len(), "store.complete_batch: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+
+        let mut results = Vec::with_capacity(items.len());
+        for (task, metrics) in items {
+            let recurring = Self::complete_inner(&mut conn, task, metrics).await?;
+            let unblocked = Self::resolve_dependents_inner(&mut conn, task.id).await?;
+            results.push((task.id, recurring, unblocked));
+        }
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(count = items.len(), "store.complete_batch: COMMIT ok");
+
+        // Prune once for the whole batch.
+        self.maybe_prune().await;
+
+        Ok(results)
+    }
+
     /// Shared completion logic: insert history, handle recurring next instance,
     /// then handle requeue or delete.
     ///

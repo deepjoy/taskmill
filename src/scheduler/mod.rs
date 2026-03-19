@@ -41,6 +41,8 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::task::{IoBudget, TaskRecord};
+
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::priority::Priority;
 use crate::registry::TaskTypeRegistry;
@@ -50,6 +52,16 @@ use crate::store::TaskStore;
 use dispatch::ActiveTaskMap;
 
 pub use builder::SchedulerBuilder;
+
+// ── Completion coalescing ──────────────────────────────────────────
+
+/// Message sent from spawned tasks to the scheduler's completion channel.
+///
+/// Batched by `drain_completions` to reduce per-completion transaction overhead.
+pub(crate) struct CompletionMsg {
+    pub task: TaskRecord,
+    pub metrics: IoBudget,
+}
 pub use event::{
     SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
 };
@@ -121,6 +133,12 @@ pub(crate) struct SchedulerInner {
     /// Cleared when `paused_tasks()` returns empty. Avoids a SQL round-trip
     /// per dispatch cycle when no tasks are paused.
     pub(crate) has_paused_tasks: AtomicBool,
+    /// Send side of the completion coalescing channel.
+    pub(crate) completion_tx: tokio::sync::mpsc::UnboundedSender<CompletionMsg>,
+    /// Receive side, `Arc`-wrapped so spawned tasks can try to drain the batch
+    /// (leader election pattern) in addition to the run loop.
+    pub(crate) completion_rx:
+        std::sync::Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<CompletionMsg>>>,
 }
 
 /// IO-aware priority scheduler.
@@ -216,6 +234,7 @@ impl Scheduler {
         );
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
+        let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             inner: Arc::new(SchedulerInner {
                 store,
@@ -249,6 +268,8 @@ impl Scheduler {
                 module_running,
                 // Conservative: true on startup so the first cycle checks.
                 has_paused_tasks: AtomicBool::new(true),
+                completion_tx,
+                completion_rx: std::sync::Arc::new(Mutex::new(completion_rx)),
             }),
         }
     }
