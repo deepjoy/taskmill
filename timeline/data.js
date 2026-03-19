@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773907332204,
+  "lastUpdate": 1773907560873,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -2063,6 +2063,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 444909,
             "range": "± 13725",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "41898282+github-actions[bot]@users.noreply.github.com",
+            "name": "github-actions[bot]",
+            "username": "github-actions[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c415ee41c6d865b29b89450093e667fdd330e7fe",
+          "message": "chore: release v0.5.2 (#58)\n\n## 🤖 New release\n\n* `taskmill`: 0.5.1 -> 0.5.2 (✓ API compatible changes)\n\n<details><summary><i><b>Changelog</b></i></summary><p>\n\n<blockquote>\n\n## [0.5.2](https://github.com/deepjoy/taskmill/compare/v0.5.1...v0.5.2)\n- 2026-03-19\n\n### Other\n\n- reduce SQL round-trips and CPU overhead in scheduler hot paths\n([#60](https://github.com/deepjoy/taskmill/pull/60))\n- coalesce task completions into batched transactions\n([#59](https://github.com/deepjoy/taskmill/pull/59))\n- reduce SQL round-trips in scheduler hot paths\n([#57](https://github.com/deepjoy/taskmill/pull/57))\n</blockquote>\n\n\n</p></details>\n\n---\nThis PR was generated with\n[release-plz](https://github.com/release-plz/release-plz/).\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+          "timestamp": "2026-03-19T07:37:19Z",
+          "tree_id": "e1d42eda08d157f012a88959d22e0163e4321c5b",
+          "url": "https://github.com/deepjoy/taskmill/commit/c415ee41c6d865b29b89450093e667fdd330e7fe"
+        },
+        "date": 1773907560250,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3250025,
+            "range": "± 147886",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 16698137,
+            "range": "± 751122",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 74436341,
+            "range": "± 3652639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 11518792,
+            "range": "± 182356",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 27514295,
+            "range": "± 451643",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 54356039,
+            "range": "± 1121166",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 8919558,
+            "range": "± 132326",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 36054992,
+            "range": "± 482802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 69217751,
+            "range": "± 621001",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups_500",
+            "value": 315641229,
+            "range": "± 4559686",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group_500",
+            "value": 419101816,
+            "range": "± 5276121",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 425674853,
+            "range": "± 6036850",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 430246698,
+            "range": "± 4796778",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 429592929,
+            "range": "± 4358310",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 429894456,
+            "range": "± 5445198",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 534046,
+            "range": "± 13938",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 540736,
+            "range": "± 7763",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 554550,
+            "range": "± 11134",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 143987,
+            "range": "± 470",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 354228,
+            "range": "± 2918",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1279432,
+            "range": "± 4332",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 876410,
+            "range": "± 24508",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 887594,
+            "range": "± 44712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 897749,
+            "range": "± 29162",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 43,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 75,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 190,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 408,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure_500",
+            "value": 382749483,
+            "range": "± 6907308",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 164370292,
+            "range": "± 3126223",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 167377570,
+            "range": "± 3199468",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 167469288,
+            "range": "± 3360741",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 166525568,
+            "range": "± 3470194",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_1000_tasks",
+            "value": 174605471,
+            "range": "± 5944640",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit_1000",
+            "value": 232278841,
+            "range": "± 8337907",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete_1000",
+            "value": 636898971,
+            "range": "± 9503098",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 118546,
+            "range": "± 2997",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 118747,
+            "range": "± 3675",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 120024,
+            "range": "± 2836",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 399151752,
+            "range": "± 3991731",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 320736859,
+            "range": "± 4519689",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 321336486,
+            "range": "± 5081495",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 317623759,
+            "range": "± 4368021",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit_1000",
+            "value": 32322082,
+            "range": "± 2407148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch_500",
+            "value": 316990822,
+            "range": "± 4759400",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 318292785,
+            "range": "± 4969385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 337645721,
+            "range": "± 4424748",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot_100_tasks",
+            "value": 101218857,
+            "range": "± 1834221",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 86820174,
+            "range": "± 3067914",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 157848266,
+            "range": "± 5925647",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 231204937,
+            "range": "± 11825440",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 379932217,
+            "range": "± 18582209",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1126763,
+            "range": "± 138618",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9631227,
+            "range": "± 1220023",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 49641551,
+            "range": "± 5402233",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 125700,
+            "range": "± 2640",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 216800,
+            "range": "± 3794",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 607591,
+            "range": "± 3796",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 130558,
+            "range": "± 3728",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 191125,
+            "range": "± 3966",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 459024,
+            "range": "± 3825",
             "unit": "ns/iter"
           }
         ]
