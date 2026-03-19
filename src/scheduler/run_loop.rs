@@ -85,11 +85,12 @@ impl Scheduler {
         }
         drop(reader_guard);
 
-        // Atomically claim the task. Returns None if another dispatcher
-        // claimed it (or it was cancelled) between peek and now.
-        let Some(task) = self.inner.store.pop_by_id(candidate.id).await? else {
+        // Atomically claim the task. Skip tag population since we already
+        // have the tags from the peek above.
+        let Some(mut task) = self.inner.store.pop_by_id_no_tags(candidate.id).await? else {
             return Ok(false);
         };
+        task.tags = candidate.tags;
 
         // Look up executor.
         let Some(executor) = self.inner.registry.get(&task.task_type) else {
@@ -205,16 +206,28 @@ impl Scheduler {
             ));
         }
 
+        // Track whether we need to query next_run_after. Starts true
+        // (conservative). Cleared when the query returns None (no scheduled
+        // tasks). Re-set when a notification arrives (new submit may have
+        // set run_after) or when we previously found scheduled tasks.
+        let mut check_scheduled = true;
+
         loop {
-            // Compute sleep duration: min(poll_interval, time until next scheduled task).
-            let sleep_dur = match self.inner.store.next_run_after().await {
-                Ok(Some(next)) => {
-                    let until_next = (next - chrono::Utc::now())
-                        .to_std()
-                        .unwrap_or(std::time::Duration::ZERO);
-                    std::cmp::min(self.inner.poll_interval, until_next)
+            let sleep_dur = if check_scheduled {
+                match self.inner.store.next_run_after().await {
+                    Ok(Some(next)) => {
+                        let until_next = (next - chrono::Utc::now())
+                            .to_std()
+                            .unwrap_or(std::time::Duration::ZERO);
+                        std::cmp::min(self.inner.poll_interval, until_next)
+                    }
+                    _ => {
+                        check_scheduled = false;
+                        self.inner.poll_interval
+                    }
                 }
-                _ => self.inner.poll_interval,
+            } else {
+                self.inner.poll_interval
             };
 
             tokio::select! {
@@ -224,6 +237,8 @@ impl Scheduler {
                     break;
                 }
                 _ = self.inner.work_notify.notified() => {
+                    // New work submitted — may include run_after tasks.
+                    check_scheduled = true;
                     self.poll_and_dispatch().await;
                 }
                 _ = tokio::time::sleep(sleep_dur) => {
@@ -278,14 +293,22 @@ impl Scheduler {
         self.maybe_expire_tasks().await;
 
         // Resume paused tasks only if no active preemptors exist.
-        if let Ok(paused) = self.inner.store.paused_tasks().await {
-            for task in paused {
-                if !self
-                    .inner
-                    .active
-                    .has_preemptors_for(task.priority, self.inner.preempt_priority)
-                {
-                    let _ = self.inner.store.resume(task.id).await;
+        // Skip the query entirely when no tasks have been paused.
+        if self.inner.has_paused_tasks.load(AtomicOrdering::Relaxed) {
+            if let Ok(paused) = self.inner.store.paused_tasks().await {
+                if paused.is_empty() {
+                    self.inner
+                        .has_paused_tasks
+                        .store(false, AtomicOrdering::Relaxed);
+                }
+                for task in paused {
+                    if !self
+                        .inner
+                        .active
+                        .has_preemptors_for(task.priority, self.inner.preempt_priority)
+                    {
+                        let _ = self.inner.store.resume(task.id).await;
+                    }
                 }
             }
         }

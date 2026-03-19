@@ -19,7 +19,7 @@ impl TaskStore {
 
     /// Populate tags for a slice of task records from the task_tags table.
     pub(crate) async fn populate_tags(&self, records: &mut [TaskRecord]) -> Result<(), StoreError> {
-        if records.is_empty() {
+        if records.is_empty() || !self.has_tags.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
         let ids: Vec<i64> = records.iter().map(|r| r.id).collect();

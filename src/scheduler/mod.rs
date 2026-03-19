@@ -117,6 +117,10 @@ pub(crate) struct SchedulerInner {
     /// Incremented when a task is dispatched; decremented on every terminal transition.
     /// Shared with spawned tasks via `Arc` so they can decrement on completion.
     pub(crate) module_running: Arc<HashMap<String, AtomicUsize>>,
+    /// Fast-path flag: set to `true` when a task is paused (preempted).
+    /// Cleared when `paused_tasks()` returns empty. Avoids a SQL round-trip
+    /// per dispatch cycle when no tasks are paused.
+    pub(crate) has_paused_tasks: AtomicBool,
 }
 
 /// IO-aware priority scheduler.
@@ -243,6 +247,8 @@ impl Scheduler {
                 module_paused,
                 module_caps: RwLock::new(module_caps),
                 module_running,
+                // Conservative: true on startup so the first cycle checks.
+                has_paused_tasks: AtomicBool::new(true),
             }),
         }
     }

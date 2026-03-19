@@ -14,18 +14,27 @@ impl TaskStore {
     /// Returns IDs of newly-unblocked tasks (for event emission).
     pub async fn resolve_dependents(&self, completed_task_id: i64) -> Result<Vec<i64>, StoreError> {
         let mut conn = self.begin_write().await?;
+        let unblocked = Self::resolve_dependents_inner(&mut conn, completed_task_id).await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        Ok(unblocked)
+    }
 
+    /// Inner dependency resolution that runs within an existing transaction.
+    pub(crate) async fn resolve_dependents_inner(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+        completed_task_id: i64,
+    ) -> Result<Vec<i64>, StoreError> {
         // Find tasks that depend on the completed task.
         let dependent_ids: Vec<(i64,)> =
             sqlx::query_as("SELECT task_id FROM task_deps WHERE depends_on_id = ?")
                 .bind(completed_task_id)
-                .fetch_all(&mut *conn)
+                .fetch_all(&mut **conn)
                 .await?;
 
         // Remove the satisfied edges.
         sqlx::query("DELETE FROM task_deps WHERE depends_on_id = ?")
             .bind(completed_task_id)
-            .execute(&mut *conn)
+            .execute(&mut **conn)
             .await?;
 
         let mut unblocked = Vec::new();
@@ -35,7 +44,7 @@ impl TaskStore {
             let (remaining,): (i64,) =
                 sqlx::query_as("SELECT COUNT(*) FROM task_deps WHERE task_id = ?")
                     .bind(dep_id)
-                    .fetch_one(&mut *conn)
+                    .fetch_one(&mut **conn)
                     .await?;
 
             if remaining == 0 {
@@ -44,7 +53,7 @@ impl TaskStore {
                     "UPDATE tasks SET status = 'pending' WHERE id = ? AND status = 'blocked'",
                 )
                 .bind(dep_id)
-                .execute(&mut *conn)
+                .execute(&mut **conn)
                 .await?;
                 if result.rows_affected() > 0 {
                     unblocked.push(dep_id);
@@ -52,7 +61,6 @@ impl TaskStore {
             }
         }
 
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
         Ok(unblocked)
     }
 
