@@ -2,6 +2,8 @@
 //!
 //! Run with: `cargo bench -p taskmill`
 
+use std::time::{Duration, Instant};
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
     Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor,
@@ -65,14 +67,20 @@ fn bench_submit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("submit_1000_tasks", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(4).await;
-            for i in 0..1000 {
-                sched
-                    .submit(&TaskSubmission::new("bench::test").key(format!("s-{i}")))
-                    .await
-                    .unwrap();
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(4).await;
+                let start = Instant::now();
+                for i in 0..1000 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::test").key(format!("s-{i}")))
+                        .await
+                        .unwrap();
+                }
+                total += start.elapsed();
             }
+            total
         });
     });
 }
@@ -81,20 +89,26 @@ fn bench_submit_dedup_hit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("submit_dedup_hit_1000", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(4).await;
-            // First submit creates the task.
-            sched
-                .submit(&TaskSubmission::new("bench::test").key("same-key"))
-                .await
-                .unwrap();
-            // Subsequent submits hit the dedup path.
-            for _ in 0..999 {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(4).await;
+                // First submit creates the task — not measured.
                 sched
                     .submit(&TaskSubmission::new("bench::test").key("same-key"))
                     .await
                     .unwrap();
+                let start = Instant::now();
+                // Subsequent submits hit the dedup path.
+                for _ in 0..999 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::test").key("same-key"))
+                        .await
+                        .unwrap();
+                }
+                total += start.elapsed();
             }
+            total
         });
     });
 }
@@ -103,33 +117,39 @@ fn bench_dispatch_and_complete(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("dispatch_and_complete_1000", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(8).await;
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(8).await;
+                let start = Instant::now();
 
-            for i in 0..1000 {
-                sched
-                    .submit(&TaskSubmission::new("bench::test").key(format!("d-{i}")))
-                    .await
-                    .unwrap();
-            }
-
-            let mut rx = sched.subscribe();
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move {
-                sched_clone.run(token_clone).await;
-            });
-
-            let mut completed = 0;
-            while completed < 1000 {
-                if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-                    completed += 1;
+                for i in 0..1000 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::test").key(format!("d-{i}")))
+                        .await
+                        .unwrap();
                 }
-            }
 
-            token.cancel();
-            let _ = handle.await;
+                let mut rx = sched.subscribe();
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move {
+                    sched_clone.run(token_clone).await;
+                });
+
+                let mut completed = 0;
+                while completed < 1000 {
+                    if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
+                        completed += 1;
+                    }
+                }
+
+                total += start.elapsed();
+                token.cancel();
+                let _ = handle.await;
+            }
+            total
         });
     });
 }
@@ -139,18 +159,26 @@ fn bench_peek_next_varying_depth(c: &mut Criterion) {
     let mut group = c.benchmark_group("peek_next");
 
     for size in [100, 1000, 5000] {
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.to_async(&rt).iter(|| async move {
-                let store = TaskStore::open_memory().await.unwrap();
-                for i in 0..size {
-                    store
-                        .submit(&TaskSubmission::new("test").key(format!("pk-{i}")))
-                        .await
-                        .unwrap();
-                }
-                // Bench just the peek_next call.
-                for _ in 0..100 {
-                    let _ = store.peek_next().await.unwrap();
+        let store = rt.block_on(async {
+            let store = TaskStore::open_memory().await.unwrap();
+            for i in 0..size {
+                store
+                    .submit(&TaskSubmission::new("test").key(format!("pk-{i}")))
+                    .await
+                    .unwrap();
+            }
+            store
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
+            let store = store.clone();
+            b.to_async(&rt).iter_custom(|iters| {
+                let store = store.clone();
+                async move {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        let _ = store.peek_next().await.unwrap();
+                    }
+                    start.elapsed()
                 }
             });
         });
@@ -168,33 +196,39 @@ fn bench_concurrency_scaling(c: &mut Criterion) {
             BenchmarkId::from_parameter(concurrency),
             &concurrency,
             |b, &concurrency| {
-                b.to_async(&rt).iter(|| async move {
-                    let sched = build_scheduler(concurrency).await;
+                b.to_async(&rt).iter_custom(|iters| async move {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let sched = build_scheduler(concurrency).await;
+                        let start = Instant::now();
 
-                    for i in 0..500 {
-                        sched
-                            .submit(&TaskSubmission::new("bench::test").key(format!("cs-{i}")))
-                            .await
-                            .unwrap();
-                    }
-
-                    let mut rx = sched.subscribe();
-                    let token = CancellationToken::new();
-                    let sched_clone = sched.clone();
-                    let token_clone = token.clone();
-                    let handle = tokio::spawn(async move {
-                        sched_clone.run(token_clone).await;
-                    });
-
-                    let mut completed = 0;
-                    while completed < 500 {
-                        if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-                            completed += 1;
+                        for i in 0..500 {
+                            sched
+                                .submit(&TaskSubmission::new("bench::test").key(format!("cs-{i}")))
+                                .await
+                                .unwrap();
                         }
-                    }
 
-                    token.cancel();
-                    let _ = handle.await;
+                        let mut rx = sched.subscribe();
+                        let token = CancellationToken::new();
+                        let sched_clone = sched.clone();
+                        let token_clone = token.clone();
+                        let handle = tokio::spawn(async move {
+                            sched_clone.run(token_clone).await;
+                        });
+
+                        let mut completed = 0;
+                        while completed < 500 {
+                            if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
+                                completed += 1;
+                            }
+                        }
+
+                        total += start.elapsed();
+                        token.cancel();
+                        let _ = handle.await;
+                    }
+                    total
                 });
             },
         );
@@ -207,12 +241,18 @@ fn bench_batch_submit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("batch_submit_1000", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(4).await;
-            let submissions: Vec<_> = (0..1000)
-                .map(|i| TaskSubmission::new("bench::test").key(format!("b-{i}")))
-                .collect();
-            sched.submit_batch(&submissions).await.unwrap();
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(4).await;
+                let submissions: Vec<_> = (0..1000)
+                    .map(|i| TaskSubmission::new("bench::test").key(format!("b-{i}")))
+                    .collect();
+                let start = Instant::now();
+                sched.submit_batch(&submissions).await.unwrap();
+                total += start.elapsed();
+            }
+            total
         });
     });
 }
@@ -221,46 +261,52 @@ fn bench_mixed_priority_dispatch(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("mixed_priority_dispatch_500", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(4).await;
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(4).await;
+                let start = Instant::now();
 
-            let priorities = [
-                Priority::IDLE,
-                Priority::BACKGROUND,
-                Priority::NORMAL,
-                Priority::HIGH,
-                Priority::REALTIME,
-            ];
+                let priorities = [
+                    Priority::IDLE,
+                    Priority::BACKGROUND,
+                    Priority::NORMAL,
+                    Priority::HIGH,
+                    Priority::REALTIME,
+                ];
 
-            for i in 0..500 {
-                let priority = priorities[i % priorities.len()];
-                sched
-                    .submit(
-                        &TaskSubmission::new("bench::test")
-                            .key(format!("mp-{i}"))
-                            .priority(priority),
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            let mut rx = sched.subscribe();
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move {
-                sched_clone.run(token_clone).await;
-            });
-
-            let mut completed = 0;
-            while completed < 500 {
-                if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-                    completed += 1;
+                for i in 0..500 {
+                    let priority = priorities[i % priorities.len()];
+                    sched
+                        .submit(
+                            &TaskSubmission::new("bench::test")
+                                .key(format!("mp-{i}"))
+                                .priority(priority),
+                        )
+                        .await
+                        .unwrap();
                 }
-            }
 
-            token.cancel();
-            let _ = handle.await;
+                let mut rx = sched.subscribe();
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move {
+                    sched_clone.run(token_clone).await;
+                });
+
+                let mut completed = 0;
+                while completed < 500 {
+                    if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
+                        completed += 1;
+                    }
+                }
+
+                total += start.elapsed();
+                token.cancel();
+                let _ = handle.await;
+            }
+            total
         });
     });
 }
@@ -271,79 +317,91 @@ fn bench_byte_progress_overhead(c: &mut Criterion) {
 
     // Baseline: NoopExecutor (no byte reporting).
     group.bench_function("noop_500", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = build_scheduler(8).await;
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = build_scheduler(8).await;
+                let start = Instant::now();
 
-            for i in 0..500 {
-                sched
-                    .submit(&TaskSubmission::new("bench::test").key(format!("bp-noop-{i}")))
-                    .await
-                    .unwrap();
-            }
-
-            let mut rx = sched.subscribe();
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move {
-                sched_clone.run(token_clone).await;
-            });
-
-            let mut completed = 0;
-            while completed < 500 {
-                if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-                    completed += 1;
+                for i in 0..500 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::test").key(format!("bp-noop-{i}")))
+                        .await
+                        .unwrap();
                 }
-            }
 
-            token.cancel();
-            let _ = handle.await;
+                let mut rx = sched.subscribe();
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move {
+                    sched_clone.run(token_clone).await;
+                });
+
+                let mut completed = 0;
+                while completed < 500 {
+                    if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
+                        completed += 1;
+                    }
+                }
+
+                total += start.elapsed();
+                token.cancel();
+                let _ = handle.await;
+            }
+            total
         });
     });
 
     // With byte progress reporting: 1MB in 1KB chunks per task.
     group.bench_function("byte_reporting_500", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = Scheduler::builder()
-                .store(TaskStore::open_memory().await.unwrap())
-                .domain(Domain::<BenchDomain>::new().raw_executor(
-                    "byte-test",
-                    ByteProgressExecutor {
-                        total: 1_048_576,
-                        chunk_size: 1024,
-                    },
-                ))
-                .max_concurrency(8)
-                .poll_interval(std::time::Duration::from_millis(10))
-                .progress_interval(std::time::Duration::from_millis(100))
-                .build()
-                .await
-                .unwrap();
-
-            for i in 0..500 {
-                sched
-                    .submit(&TaskSubmission::new("bench::byte-test").key(format!("bp-{i}")))
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = Scheduler::builder()
+                    .store(TaskStore::open_memory().await.unwrap())
+                    .domain(Domain::<BenchDomain>::new().raw_executor(
+                        "byte-test",
+                        ByteProgressExecutor {
+                            total: 1_048_576,
+                            chunk_size: 1024,
+                        },
+                    ))
+                    .max_concurrency(8)
+                    .poll_interval(std::time::Duration::from_millis(10))
+                    .progress_interval(std::time::Duration::from_millis(100))
+                    .build()
                     .await
                     .unwrap();
-            }
+                let start = Instant::now();
 
-            let mut rx = sched.subscribe();
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move {
-                sched_clone.run(token_clone).await;
-            });
-
-            let mut completed = 0;
-            while completed < 500 {
-                if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-                    completed += 1;
+                for i in 0..500 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::byte-test").key(format!("bp-{i}")))
+                        .await
+                        .unwrap();
                 }
-            }
 
-            token.cancel();
-            let _ = handle.await;
+                let mut rx = sched.subscribe();
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move {
+                    sched_clone.run(token_clone).await;
+                });
+
+                let mut completed = 0;
+                while completed < 500 {
+                    if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
+                        completed += 1;
+                    }
+                }
+
+                total += start.elapsed();
+                token.cancel();
+                let _ = handle.await;
+            }
+            total
         });
     });
 
@@ -354,47 +412,53 @@ fn bench_byte_progress_snapshot(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("byte_progress_snapshot_100_tasks", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = Scheduler::builder()
-                .store(TaskStore::open_memory().await.unwrap())
-                .domain(Domain::<BenchDomain>::new().raw_executor(
-                    "byte-test",
-                    ByteProgressExecutor {
-                        total: 10_485_760,
-                        chunk_size: 65_536,
-                    },
-                ))
-                .max_concurrency(100)
-                .poll_interval(std::time::Duration::from_millis(10))
-                .build()
-                .await
-                .unwrap();
-
-            // Submit and dispatch 100 tasks.
-            for i in 0..100 {
-                sched
-                    .submit(&TaskSubmission::new("bench::byte-test").key(format!("snap-{i}")))
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = Scheduler::builder()
+                    .store(TaskStore::open_memory().await.unwrap())
+                    .domain(Domain::<BenchDomain>::new().raw_executor(
+                        "byte-test",
+                        ByteProgressExecutor {
+                            total: 10_485_760,
+                            chunk_size: 65_536,
+                        },
+                    ))
+                    .max_concurrency(100)
+                    .poll_interval(std::time::Duration::from_millis(10))
+                    .build()
                     .await
                     .unwrap();
+
+                // Submit and dispatch 100 tasks.
+                for i in 0..100 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::byte-test").key(format!("snap-{i}")))
+                        .await
+                        .unwrap();
+                }
+
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move {
+                    sched_clone.run(token_clone).await;
+                });
+
+                // Small sleep to let tasks start — not timed.
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                let start = Instant::now();
+                // Bench the snapshot call with byte_progress.
+                for _ in 0..100 {
+                    let _ = sched.snapshot().await;
+                }
+                total += start.elapsed();
+
+                token.cancel();
+                let _ = handle.await;
             }
-
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move {
-                sched_clone.run(token_clone).await;
-            });
-
-            // Small sleep to let tasks start.
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-            // Bench the snapshot call with byte_progress.
-            for _ in 0..100 {
-                let _ = sched.snapshot().await;
-            }
-
-            token.cancel();
-            let _ = handle.await;
+            total
         });
     });
 }

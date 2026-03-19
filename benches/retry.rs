@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo bench --bench retry`
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use taskmill::{
@@ -98,42 +98,50 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     c.bench_function("dispatch_permanent_failure_500", |b| {
-        b.to_async(&rt).iter(|| async {
-            let sched = Scheduler::builder()
-                .store(TaskStore::open_memory().await.unwrap())
-                .domain(Domain::<BenchDomain>::new().raw_executor("fail", FailPermanentExecutor))
-                .max_concurrency(8)
-                .max_retries(0)
-                .poll_interval(Duration::from_millis(10))
-                .build()
-                .await
-                .unwrap();
-
-            for i in 0..500 {
-                sched
-                    .submit(&TaskSubmission::new("bench::fail").key(format!("pf-{i}")))
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let sched = Scheduler::builder()
+                    .store(TaskStore::open_memory().await.unwrap())
+                    .domain(
+                        Domain::<BenchDomain>::new().raw_executor("fail", FailPermanentExecutor),
+                    )
+                    .max_concurrency(8)
+                    .max_retries(0)
+                    .poll_interval(Duration::from_millis(10))
+                    .build()
                     .await
                     .unwrap();
-            }
+                let start = Instant::now();
 
-            let mut rx = sched.subscribe();
-            let token = CancellationToken::new();
-            let sched_clone = sched.clone();
-            let token_clone = token.clone();
-            let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
-
-            let mut terminal = 0;
-            while terminal < 500 {
-                if let Ok(SchedulerEvent::Failed {
-                    will_retry: false, ..
-                }) = rx.recv().await
-                {
-                    terminal += 1;
+                for i in 0..500 {
+                    sched
+                        .submit(&TaskSubmission::new("bench::fail").key(format!("pf-{i}")))
+                        .await
+                        .unwrap();
                 }
-            }
 
-            token.cancel();
-            let _ = handle.await;
+                let mut rx = sched.subscribe();
+                let token = CancellationToken::new();
+                let sched_clone = sched.clone();
+                let token_clone = token.clone();
+                let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+                let mut terminal = 0;
+                while terminal < 500 {
+                    if let Ok(SchedulerEvent::Failed {
+                        will_retry: false, ..
+                    }) = rx.recv().await
+                    {
+                        terminal += 1;
+                    }
+                }
+
+                total += start.elapsed();
+                token.cancel();
+                let _ = handle.await;
+            }
+            total
         });
     });
 }
@@ -184,44 +192,53 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
             max_retries: 2,
         };
         group.bench_function(*name, |b| {
-            b.to_async(&rt).iter(|| {
+            let policy = policy.clone();
+            b.to_async(&rt).iter_custom(move |iters| {
                 let policy = policy.clone();
                 async move {
-                    let sched = Scheduler::builder()
-                        .store(TaskStore::open_memory().await.unwrap())
-                        .domain(
-                            Domain::<BenchDomain>::new()
-                                .raw_executor("fail", FailRetryableExecutor)
-                                .default_retry(policy),
-                        )
-                        .max_concurrency(8)
-                        .poll_interval(Duration::from_millis(10))
-                        .build()
-                        .await
-                        .unwrap();
-
-                    for i in 0..100 {
-                        sched
-                            .submit(&TaskSubmission::new("bench::fail").key(format!("rf-{i}")))
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let policy = policy.clone();
+                        let sched = Scheduler::builder()
+                            .store(TaskStore::open_memory().await.unwrap())
+                            .domain(
+                                Domain::<BenchDomain>::new()
+                                    .raw_executor("fail", FailRetryableExecutor)
+                                    .default_retry(policy),
+                            )
+                            .max_concurrency(8)
+                            .poll_interval(Duration::from_millis(10))
+                            .build()
                             .await
                             .unwrap();
-                    }
+                        let start = Instant::now();
 
-                    let mut rx = sched.subscribe();
-                    let token = CancellationToken::new();
-                    let sched_clone = sched.clone();
-                    let token_clone = token.clone();
-                    let handle = tokio::spawn(async move { sched_clone.run(token_clone).await });
-
-                    let mut dead_lettered = 0;
-                    while dead_lettered < 100 {
-                        if let Ok(SchedulerEvent::DeadLettered { .. }) = rx.recv().await {
-                            dead_lettered += 1;
+                        for i in 0..100 {
+                            sched
+                                .submit(&TaskSubmission::new("bench::fail").key(format!("rf-{i}")))
+                                .await
+                                .unwrap();
                         }
-                    }
 
-                    token.cancel();
-                    let _ = handle.await;
+                        let mut rx = sched.subscribe();
+                        let token = CancellationToken::new();
+                        let sched_clone = sched.clone();
+                        let token_clone = token.clone();
+                        let handle =
+                            tokio::spawn(async move { sched_clone.run(token_clone).await });
+
+                        let mut dead_lettered = 0;
+                        while dead_lettered < 100 {
+                            if let Ok(SchedulerEvent::DeadLettered { .. }) = rx.recv().await {
+                                dead_lettered += 1;
+                            }
+                        }
+
+                        total += start.elapsed();
+                        token.cancel();
+                        let _ = handle.await;
+                    }
+                    total
                 }
             });
         });
