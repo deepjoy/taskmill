@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/deepjoy/taskmill/compare/v0.5.0...v0.5.1) - 2026-03-19
+
+### Fixed
+
+- *(bench)* eliminate per-sample scheduler setup cost in history benchmarks ([#55](https://github.com/deepjoy/taskmill/pull/55))
+- *(bench)* remove premature cancellation token call in history benchmark setup ([#54](https://github.com/deepjoy/taskmill/pull/54))
+- *(ci)* bootstrap _benchmarks branch on first push to main ([#53](https://github.com/deepjoy/taskmill/pull/53))
+- *(ci)* restore stderr capture for benchmark output on main ([#51](https://github.com/deepjoy/taskmill/pull/51))
+- *(ci)* exclude lib target from cargo bench to fix benchmark CI ([#49](https://github.com/deepjoy/taskmill/pull/49))
+
+### Other
+
+- decompose internal god objects into focused, single-responsibility modules ([#56](https://github.com/deepjoy/taskmill/pull/56))
+- eliminate stringly-typed history status and DRY violations ([#52](https://github.com/deepjoy/taskmill/pull/52))
+
 ## [0.5.0](https://github.com/deepjoy/taskmill/compare/v0.4.0...v0.5.0) - 2026-03-18
 
 ### Added
