@@ -22,6 +22,7 @@
 //! via [`Scheduler::store()`](crate::Scheduler::store) for queries and
 //! diagnostics.
 
+mod dependencies;
 mod hierarchy;
 mod lifecycle;
 mod query;

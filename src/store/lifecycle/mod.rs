@@ -2,15 +2,12 @@
 //! dependency resolution.
 
 mod cancel_expire;
-mod complete;
-mod dependencies;
-mod fail;
-mod pop;
+mod transitions;
 
 #[cfg(test)]
 mod tests;
 
-pub use fail::FailBackoff;
+pub use transitions::FailBackoff;
 
 use crate::task::{IoBudget, TaskRecord};
 

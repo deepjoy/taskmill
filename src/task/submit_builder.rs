@@ -220,111 +220,123 @@ impl SubmitBuilder {
     /// Apply all default layers and per-call overrides, returning the
     /// scheduler and the fully resolved [`TaskSubmission`].
     ///
-    /// Two modes determined by whether [`with_typed_defaults`](Self::with_typed_defaults)
-    /// was called:
+    /// Delegates to three focused methods that each handle one layer of the
+    /// precedence chain:
     ///
-    /// **`submit_typed()` path** (typed_defaults present):
-    /// 1. TypedTask values are set as the base (layer 4).
-    /// 2. Module defaults override them where the module has an explicit
-    ///    setting (layer 3).
-    /// 3. SubmitBuilder per-call overrides trump everything (layer 1).
-    ///
-    /// **`submit()` path** (typed_defaults absent):
-    /// 1. Module defaults fill in only where the submission is at its
-    ///    zero/`None` value (layer 3 fills in layer 2 gaps).
-    /// 2. SubmitBuilder per-call overrides trump everything (layer 1).
+    /// 1. [`apply_prefix`](Self::apply_prefix) — prefix `task_type` with the
+    ///    module name.
+    /// 2. [`apply_defaults`](Self::apply_defaults) — layers 2–4 (TypedTask
+    ///    baseline, module defaults, or submission-explicit values).
+    /// 3. [`apply_overrides`](Self::apply_overrides) — layer 1 (per-call
+    ///    chained overrides, always highest priority).
     ///
     /// Layer 5 (Scheduler global defaults, e.g. global TTL) is applied later
     /// inside `Scheduler::submit()`.
-    fn resolve(self) -> (Scheduler, TaskSubmission) {
-        let scheduler = self.scheduler;
-        let mut sub = self.submission;
+    fn resolve(mut self) -> (Scheduler, TaskSubmission) {
+        self.apply_prefix();
+        self.apply_defaults();
+        self.apply_overrides();
+        (self.scheduler, self.submission)
+    }
 
-        // ── 1. Prefix task_type with the module name ─────────────────────────
+    /// Prefix `task_type` with the module name (e.g. `"thumbnail"` →
+    /// `"media::thumbnail"`). Updates `label` when it matches the old
+    /// unprefixed type.
+    fn apply_prefix(&mut self) {
         if !self.module_name.is_empty() {
-            let old_type = sub.task_type.clone();
-            sub.task_type = format!("{}::{}", self.module_name, old_type);
-            // Update label if it was the default (equal to the old task_type).
-            if sub.label == old_type {
-                sub.label = sub.task_type.clone();
+            let old_type = self.submission.task_type.clone();
+            self.submission.task_type = format!("{}::{}", self.module_name, old_type);
+            if self.submission.label == old_type {
+                self.submission.label = self.submission.task_type.clone();
             }
         }
+    }
 
-        // ── 2+3. Apply TypedTask defaults then module overrides ───────────────
-        if let Some(td) = self.typed_defaults {
-            // ── submit_typed() path ───────────────────────────────────────────
-            // TypedTask values are the baseline (layer 4). Module defaults
-            // unconditionally override them when the module has an explicit
-            // setting (layer 3).
-            sub.priority = td.priority;
-            sub.group_key = td.group;
-            sub.ttl = td.ttl;
-            // TypedTask tags are the base; module tags add new keys only.
-            sub.tags = td.tags;
-            Self::merge_module_tags(&mut sub, &self.module_defaults.tags);
-            if let Some(p) = self.module_defaults.priority {
-                sub.priority = p;
-            }
-            if let Some(g) = self.module_defaults.group {
-                sub.group_key = Some(g);
-            }
-            if let Some(t) = self.module_defaults.ttl {
-                sub.ttl = Some(t);
-            }
+    /// Layers 2–4: apply typed/module/submission defaults.
+    ///
+    /// **`submit_typed()` path** (`typed_defaults` present):
+    /// TypedTask values are the baseline (layer 4). Module defaults
+    /// unconditionally override them (layer 3).
+    ///
+    /// **`submit()` path** (`typed_defaults` absent):
+    /// Submission values are the baseline (layer 2). Module defaults fill in
+    /// only where the submission is at its zero/`None` value (layer 3).
+    fn apply_defaults(&mut self) {
+        if let Some(td) = self.typed_defaults.take() {
+            // ── submit_typed() path ───────────────────────────────────────
+            // TypedTask values are the baseline (layer 4).
+            self.submission.priority = td.priority;
+            self.submission.group_key = td.group;
+            self.submission.ttl = td.ttl;
+            self.submission.tags = td.tags;
+            // Module defaults: tags merge first, then scalars override
+            // unconditionally (layer 3 beats layer 4).
+            Self::merge_module_tags(&mut self.submission, &self.module_defaults.tags);
+            self.apply_module_scalar_defaults(true);
         } else {
-            // ── submit() path ─────────────────────────────────────────────────
-            // Module defaults fill in only where the submission is at its
-            // zero/None value (submission explicit values beat module defaults).
-            //
-            // Priority: treat `NORMAL` as "not explicitly set" — the same
-            // convention used by `BatchSubmission::build`.
-            if sub.priority == Priority::NORMAL {
-                if let Some(p) = self.module_defaults.priority {
-                    sub.priority = p;
-                }
-            }
-            if sub.group_key.is_none() {
-                if let Some(g) = self.module_defaults.group {
-                    sub.group_key = Some(g);
-                }
-            }
-            if sub.ttl.is_none() {
-                if let Some(t) = self.module_defaults.ttl {
-                    sub.ttl = Some(t);
-                }
-            }
-            // Module tags: add keys not already on the submission (submission wins).
-            Self::merge_module_tags(&mut sub, &self.module_defaults.tags);
+            // ── submit() path ─────────────────────────────────────────────
+            // Module defaults fill gaps only (layer 3 fills layer 2 gaps).
+            self.apply_module_scalar_defaults(false);
+            Self::merge_module_tags(&mut self.submission, &self.module_defaults.tags);
         }
+    }
 
-        // ── 4. Apply per-call overrides (layer 1 — always highest priority) ──
-        if let Some(p) = self.override_priority {
-            sub.priority = p;
+    /// Apply module-level scalar defaults (priority, group, TTL).
+    ///
+    /// When `unconditional` is `true` (typed path), module values always
+    /// override the current submission value. When `false` (untyped path),
+    /// they fill in only where the submission is at its zero/`None` value
+    /// (`Priority::NORMAL` is treated as "not explicitly set").
+    fn apply_module_scalar_defaults(&mut self, unconditional: bool) {
+        if let Some(p) = self.module_defaults.priority {
+            if unconditional || self.submission.priority == Priority::NORMAL {
+                self.submission.priority = p;
+            }
         }
-        if let Some(g) = self.override_group {
-            sub.group_key = Some(g);
+        if let Some(ref g) = self.module_defaults.group {
+            if unconditional || self.submission.group_key.is_none() {
+                self.submission.group_key = Some(g.clone());
+            }
         }
-        if let Some(k) = self.override_key {
-            sub.label = k.clone();
-            sub.dedup_key = Some(k);
+        if let Some(t) = self.module_defaults.ttl {
+            if unconditional || self.submission.ttl.is_none() {
+                self.submission.ttl = Some(t);
+            }
         }
-        if let Some(ra) = self.override_run_after {
-            sub.run_after = Some(ra);
+    }
+
+    /// Layer 1: per-call overrides — always highest priority.
+    ///
+    /// Values set via chained builder methods (`.priority()`, `.group()`,
+    /// etc.) unconditionally overwrite whatever layers 2–4 produced.
+    fn apply_overrides(&mut self) {
+        if let Some(p) = self.override_priority.take() {
+            self.submission.priority = p;
         }
-        if let Some(t) = self.override_ttl {
-            sub.ttl = Some(t);
+        if let Some(g) = self.override_group.take() {
+            self.submission.group_key = Some(g);
+        }
+        if let Some(k) = self.override_key.take() {
+            self.submission.label = k.clone();
+            self.submission.dedup_key = Some(k);
+        }
+        if let Some(ra) = self.override_run_after.take() {
+            self.submission.run_after = Some(ra);
+        }
+        if let Some(t) = self.override_ttl.take() {
+            self.submission.ttl = Some(t);
         }
         if !self.override_depends_on.is_empty() {
-            sub.dependencies.extend(self.override_depends_on);
+            self.submission
+                .dependencies
+                .append(&mut self.override_depends_on);
         }
-        for (k, v) in self.override_tags {
-            sub.tags.insert(k, v);
+        for (k, v) in std::mem::take(&mut self.override_tags) {
+            self.submission.tags.insert(k, v);
         }
-        if let Some(pid) = self.override_parent_id {
-            sub.parent_id = Some(pid);
+        if let Some(pid) = self.override_parent_id.take() {
+            self.submission.parent_id = Some(pid);
         }
-
-        (scheduler, sub)
     }
 
     /// Submit the task, returning the outcome.
