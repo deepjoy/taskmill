@@ -47,7 +47,17 @@ impl Scheduler {
             return Ok(false);
         }
 
-        // Peek at the next candidate without changing its status.
+        // Fast path: no gate checks needed, use pop_next() (single SQL)
+        // instead of peek_next() + gate.admit() + claim_task() (2 SQL).
+        // pop_next() skips expired tasks via its WHERE clause.
+        if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
+            let Some(task) = self.inner.store.pop_next().await? else {
+                return Ok(false);
+            };
+            return self.spawn_dispatched_task(task).await;
+        }
+
+        // Slow path: peek → gate check → claim.
         let Some(candidate) = self.inner.store.peek_next().await? else {
             return Ok(false);
         };
@@ -102,6 +112,14 @@ impl Scheduler {
             }
         }
 
+        self.spawn_dispatched_task(task).await
+    }
+
+    /// Look up executor and spawn a task that is already in the `running` state.
+    async fn spawn_dispatched_task(
+        &self,
+        task: crate::task::TaskRecord,
+    ) -> Result<bool, StoreError> {
         // Look up executor.
         let Some(executor) = self.inner.registry.get(&task.task_type) else {
             tracing::error!(

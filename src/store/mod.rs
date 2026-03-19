@@ -168,6 +168,9 @@ pub struct TaskStore {
     /// Fast-path flag: `false` means no tags have been inserted into
     /// `task_tags`, so `populate_tags` can skip the query entirely.
     pub(crate) has_tags: std::sync::Arc<AtomicBool>,
+    /// Fast-path flag: `false` means no tasks with `parent_id` have been
+    /// submitted, so `active_children_count` checks can be skipped.
+    pub(crate) has_hierarchy: std::sync::Arc<AtomicBool>,
 }
 
 impl TaskStore {
@@ -195,8 +198,9 @@ impl TaskStore {
             retention_policy: config.retention_policy,
             prune_interval: config.prune_interval,
             completion_count: std::sync::Arc::new(AtomicU64::new(0)),
-            // Conservative for file-backed stores that may have existing tags.
+            // Conservative for file-backed stores that may have existing tags/hierarchy.
             has_tags: std::sync::Arc::new(AtomicBool::new(true)),
+            has_hierarchy: std::sync::Arc::new(AtomicBool::new(true)),
         };
         store.migrate().await?;
         store.recover_running().await?;
@@ -221,8 +225,9 @@ impl TaskStore {
             retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
             prune_interval: 100,
             completion_count: std::sync::Arc::new(AtomicU64::new(0)),
-            // In-memory stores start empty — no tags to query.
+            // In-memory stores start empty — no tags or hierarchy to query.
             has_tags: std::sync::Arc::new(AtomicBool::new(false)),
+            has_hierarchy: std::sync::Arc::new(AtomicBool::new(false)),
         };
         store.migrate().await?;
         Ok(store)

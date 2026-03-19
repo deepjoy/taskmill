@@ -62,7 +62,7 @@ pub(crate) async fn insert_history(
     } else {
         task.retry_count
     };
-    sqlx::query(
+    let result = sqlx::query(
         "INSERT INTO task_history (task_type, key, label, priority, status, payload,
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
@@ -110,9 +110,7 @@ pub(crate) async fn insert_history(
     .await?;
 
     // Copy tags from task_tags to task_history_tags.
-    let history_rowid = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
-        .fetch_one(&mut **conn)
-        .await?;
+    let history_rowid = result.last_insert_rowid();
     sqlx::query(
         "INSERT INTO task_history_tags (history_rowid, key, value)
          SELECT ?, key, value FROM task_tags WHERE task_id = ?",

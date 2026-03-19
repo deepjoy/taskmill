@@ -20,48 +20,45 @@ impl TaskStore {
     }
 
     /// Inner dependency resolution that runs within an existing transaction.
+    ///
+    /// Uses `DELETE ... RETURNING` to combine edge lookup + deletion into a
+    /// single query, then a single batched `UPDATE ... RETURNING` to unblock
+    /// all dependents whose remaining deps are now zero.
     pub(crate) async fn resolve_dependents_inner(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
         completed_task_id: i64,
     ) -> Result<Vec<i64>, StoreError> {
-        // Find tasks that depend on the completed task.
+        // Step 1: Delete satisfied edges and collect affected task IDs.
         let dependent_ids: Vec<(i64,)> =
-            sqlx::query_as("SELECT task_id FROM task_deps WHERE depends_on_id = ?")
+            sqlx::query_as("DELETE FROM task_deps WHERE depends_on_id = ? RETURNING task_id")
                 .bind(completed_task_id)
                 .fetch_all(&mut **conn)
                 .await?;
 
-        // Remove the satisfied edges.
-        sqlx::query("DELETE FROM task_deps WHERE depends_on_id = ?")
-            .bind(completed_task_id)
-            .execute(&mut **conn)
-            .await?;
-
-        let mut unblocked = Vec::new();
-
-        for (dep_id,) in dependent_ids {
-            // Check if this dependent has any remaining unresolved deps.
-            let (remaining,): (i64,) =
-                sqlx::query_as("SELECT COUNT(*) FROM task_deps WHERE task_id = ?")
-                    .bind(dep_id)
-                    .fetch_one(&mut **conn)
-                    .await?;
-
-            if remaining == 0 {
-                // All deps satisfied — unblock.
-                let result = sqlx::query(
-                    "UPDATE tasks SET status = 'pending' WHERE id = ? AND status = 'blocked'",
-                )
-                .bind(dep_id)
-                .execute(&mut **conn)
-                .await?;
-                if result.rows_affected() > 0 {
-                    unblocked.push(dep_id);
-                }
-            }
+        if dependent_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(unblocked)
+        // Step 2: Unblock tasks with zero remaining deps in one UPDATE.
+        let placeholders = dependent_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE tasks SET status = 'pending'
+             WHERE status = 'blocked'
+               AND id IN ({placeholders})
+               AND NOT EXISTS (SELECT 1 FROM task_deps WHERE task_deps.task_id = tasks.id)
+             RETURNING id"
+        );
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
+        for (dep_id,) in &dependent_ids {
+            q = q.bind(dep_id);
+        }
+        let unblocked: Vec<(i64,)> = q.fetch_all(&mut **conn).await?;
+
+        Ok(unblocked.into_iter().map(|(id,)| id).collect())
     }
 
     /// After a task permanently fails, propagate failure to blocked dependents.
@@ -93,17 +90,12 @@ impl TaskStore {
         Box<dyn std::future::Future<Output = Result<(Vec<i64>, Vec<i64>), StoreError>> + Send + 'a>,
     > {
         Box::pin(async move {
+            // Delete edges from the failed task and collect affected task IDs.
             let dependent_rows: Vec<(i64,)> =
-                sqlx::query_as("SELECT task_id FROM task_deps WHERE depends_on_id = ?")
+                sqlx::query_as("DELETE FROM task_deps WHERE depends_on_id = ? RETURNING task_id")
                     .bind(failed_task_id)
                     .fetch_all(&mut **conn)
                     .await?;
-
-            // Clean up edges from the failed task.
-            sqlx::query("DELETE FROM task_deps WHERE depends_on_id = ?")
-                .bind(failed_task_id)
-                .execute(&mut **conn)
-                .await?;
 
             let mut all_failed = Vec::new();
             let mut all_unblocked = Vec::new();

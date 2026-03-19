@@ -133,6 +133,11 @@ pub(crate) struct SchedulerInner {
     /// Cleared when `paused_tasks()` returns empty. Avoids a SQL round-trip
     /// per dispatch cycle when no tasks are paused.
     pub(crate) has_paused_tasks: AtomicBool,
+    /// Fast-dispatch mode: when `true`, `try_dispatch` uses `pop_next()`
+    /// (single SQL) instead of `peek_next()` + gate + `claim_task()` (2 SQL).
+    /// Computed at build time: `true` when no groups, no resource monitoring,
+    /// and no module concurrency caps are configured.
+    pub(crate) fast_dispatch: AtomicBool,
     /// Send side of the completion coalescing channel.
     pub(crate) completion_tx: tokio::sync::mpsc::UnboundedSender<CompletionMsg>,
     /// Receive side, `Arc`-wrapped so spawned tasks can try to drain the batch
@@ -268,6 +273,8 @@ impl Scheduler {
                 module_running,
                 // Conservative: true on startup so the first cycle checks.
                 has_paused_tasks: AtomicBool::new(true),
+                // Default to false; builder sets true when safe.
+                fast_dispatch: AtomicBool::new(false),
                 completion_tx,
                 completion_rx: std::sync::Arc::new(Mutex::new(completion_rx)),
             }),

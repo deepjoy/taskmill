@@ -402,6 +402,7 @@ impl SchedulerBuilder {
         };
 
         // Build gate from pressure sources + policy.
+        let has_pressure = !self.pressure_sources.is_empty();
         let mut pressure = CompositePressure::new();
         for source in self.pressure_sources {
             pressure.add_source(source);
@@ -434,6 +435,12 @@ impl SchedulerBuilder {
             module_registry,
             module_state,
         );
+
+        // Compute fast-dispatch eligibility before consuming builder fields.
+        let has_groups =
+            self.default_group_concurrency > 0 || !self.group_concurrency_overrides.is_empty();
+        let has_monitoring = self.enable_resource_monitoring;
+        let has_module_caps = !scheduler.inner.module_caps.read().unwrap().is_empty();
 
         // Apply group concurrency limits.
         if self.default_group_concurrency > 0 {
@@ -472,6 +479,16 @@ impl SchedulerBuilder {
                 sampler_config,
                 sampler_token,
             ));
+        }
+
+        // Enable fast dispatch (single pop_next instead of peek + gate + claim)
+        // when no groups, no resource monitoring, no pressure sources, and no
+        // module caps are configured.
+        if !has_groups && !has_monitoring && !has_pressure && !has_module_caps {
+            scheduler
+                .inner
+                .fast_dispatch
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(scheduler)

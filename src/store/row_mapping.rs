@@ -10,13 +10,57 @@ use crate::task::{
 };
 
 pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
-    // SQLite stores as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm"
-    // (the latter from backoff-computed run_after). Try with fractional seconds
-    // first, then fall back to whole-second precision.
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+    // SQLite stores as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm".
+    // Fast fixed-position byte parser instead of the generic chrono parser.
+    let b = s.as_bytes();
+    if b.len() < 19 {
+        return DateTime::<Utc>::default();
+    }
+
+    let year = parse_4(b, 0);
+    let month = parse_2(b, 5);
+    let day = parse_2(b, 8);
+    let hour = parse_2(b, 11);
+    let min = parse_2(b, 14);
+    let sec = parse_2(b, 17);
+
+    let nanos = if b.len() > 20 && b[19] == b'.' {
+        parse_frac_nanos(b, 20)
+    } else {
+        0
+    };
+
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|d| d.and_hms_nano_opt(hour, min, sec, nanos))
         .map(|ndt| ndt.and_utc())
         .unwrap_or_default()
+}
+
+#[inline(always)]
+fn parse_2(b: &[u8], off: usize) -> u32 {
+    (b[off] - b'0') as u32 * 10 + (b[off + 1] - b'0') as u32
+}
+
+#[inline(always)]
+fn parse_4(b: &[u8], off: usize) -> i32 {
+    (b[off] - b'0') as i32 * 1000
+        + (b[off + 1] - b'0') as i32 * 100
+        + (b[off + 2] - b'0') as i32 * 10
+        + (b[off + 3] - b'0') as i32
+}
+
+#[inline(always)]
+fn parse_frac_nanos(b: &[u8], start: usize) -> u32 {
+    let frac_len = (b.len() - start).min(9);
+    let mut val: u32 = 0;
+    for i in 0..frac_len {
+        val = val * 10 + (b[start + i] - b'0') as u32;
+    }
+    // Pad to 9 digits (nanoseconds).
+    for _ in frac_len..9 {
+        val *= 10;
+    }
+    val
 }
 
 pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
@@ -134,5 +178,41 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         // Tags are populated separately from the task_history_tags table.
         tags: std::collections::HashMap::new(),
         max_retries: row.get("max_retries"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_whole_seconds() {
+        let dt = parse_datetime("2024-01-15 09:30:45");
+        assert_eq!(dt.to_string(), "2024-01-15 09:30:45 UTC");
+    }
+
+    #[test]
+    fn parse_fractional_millis() {
+        let dt = parse_datetime("2024-01-15 09:30:45.123");
+        assert_eq!(dt.to_string(), "2024-01-15 09:30:45.123 UTC");
+        assert_eq!(dt.timestamp_subsec_millis(), 123);
+    }
+
+    #[test]
+    fn parse_fractional_micros() {
+        let dt = parse_datetime("2024-01-15 09:30:45.123456");
+        assert_eq!(dt.to_string(), "2024-01-15 09:30:45.123456 UTC");
+    }
+
+    #[test]
+    fn parse_short_string_returns_default() {
+        let dt = parse_datetime("bad");
+        assert_eq!(dt, DateTime::<Utc>::default());
+    }
+
+    #[test]
+    fn parse_empty_returns_default() {
+        let dt = parse_datetime("");
+        assert_eq!(dt, DateTime::<Utc>::default());
     }
 }
