@@ -66,6 +66,7 @@ fn bench_history_query(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_query");
     group.sample_size(20);
+    group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
         let sched = rt.block_on(build_scheduler_with_history(history_size));
@@ -97,6 +98,7 @@ fn bench_history_stats(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_stats");
     group.sample_size(20);
+    group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
         let sched = rt.block_on(build_scheduler_with_history(history_size));
@@ -128,6 +130,7 @@ fn bench_history_by_type(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_by_type");
     group.sample_size(20);
+    group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
         let sched = rt.block_on(build_scheduler_with_history(history_size));
