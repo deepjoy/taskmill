@@ -10,8 +10,8 @@ use crate::task::IoBudget;
 
 use super::SchedulerEvent;
 
-use super::dispatch::{self, SpawnContext};
 use super::gate::GateContext;
+use super::spawn::{self, SpawnContext};
 use super::{Scheduler, ShutdownMode};
 
 impl Scheduler {
@@ -114,11 +114,11 @@ impl Scheduler {
 
         // Spawn the task — this inserts into the active map, builds the
         // context, emits Dispatched, and wires up completion handling.
-        dispatch::spawn_task(
+        spawn::spawn_task(
             task,
             executor,
             self.build_spawn_context().await,
-            dispatch::ExecutionPhase::Execute,
+            spawn::ExecutionPhase::Execute,
         )
         .await;
 
@@ -168,11 +168,11 @@ impl Scheduler {
         };
         let executor = Arc::clone(executor);
 
-        dispatch::spawn_task(
+        spawn::spawn_task(
             task,
             executor,
             self.build_spawn_context().await,
-            dispatch::ExecutionPhase::Finalize,
+            spawn::ExecutionPhase::Finalize,
         )
         .await;
 

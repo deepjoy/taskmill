@@ -28,6 +28,7 @@ pub(crate) mod gate;
 pub mod progress;
 mod queries;
 mod run_loop;
+pub(crate) mod spawn;
 mod submit;
 #[cfg(test)]
 mod tests;
