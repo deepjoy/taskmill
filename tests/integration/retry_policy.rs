@@ -4,17 +4,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    BackoffStrategy, Domain, DomainKey, RetryPolicy, Scheduler, SchedulerEvent, TaskContext,
-    TaskError, TaskExecutor, TaskStore, TaskSubmission, TaskTypeConfig, TypedExecutor, TypedTask,
+    BackoffStrategy, Domain, RetryPolicy, Scheduler, SchedulerEvent, TaskContext, TaskError,
+    TaskStore, TaskSubmission, TaskTypeConfig, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
-// ── Domain Key ─────────────────────────────────────────────────────
-
-struct TestDomain;
-impl DomainKey for TestDomain {
-    const NAME: &'static str = "test";
-}
+use super::common::{define_task, TestDomain};
 
 // ── Typed Tasks ────────────────────────────────────────────────────
 
@@ -83,6 +78,11 @@ impl TypedTask for RetryEventTask {
     }
 }
 
+// ── Local task types for formerly-untyped executors ────────────────
+
+define_task!(LegacyTask, TestDomain, "legacy");
+define_task!(RetryOverrideTask, TestDomain, "retry-override");
+
 // ── Typed Executors ────────────────────────────────────────────────
 
 /// Always fails with a retryable error. Works as a TypedExecutor for any task type.
@@ -94,20 +94,28 @@ impl<T: TypedTask> TypedExecutor<T> for AlwaysRetryableTypedExec {
     }
 }
 
-/// Always fails with a retryable error (untyped, for raw_executor).
+/// Always fails with a retryable error.
 struct AlwaysRetryableExecutor;
 
-impl TaskExecutor for AlwaysRetryableExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<LegacyTask> for AlwaysRetryableExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: LegacyTask,
+        _ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         Err(TaskError::retryable("transient"))
     }
 }
 
-/// Fails with a retryable error and requests a specific retry delay (untyped).
+/// Fails with a retryable error and requests a specific retry delay.
 struct RetryAfterExecutor(Duration);
 
-impl TaskExecutor for RetryAfterExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<RetryOverrideTask> for RetryAfterExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: RetryOverrideTask,
+        _ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         Err(TaskError::retryable("rate limited").retry_after(self.0))
     }
 }
@@ -322,10 +330,10 @@ async fn failed_event_includes_retry_after_duration() {
 async fn failed_event_includes_executor_retry_after_override() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "retry-override",
-            RetryAfterExecutor(Duration::from_secs(42)),
-        ))
+        .domain(
+            Domain::<TestDomain>::new()
+                .task::<RetryOverrideTask>(RetryAfterExecutor(Duration::from_secs(42))),
+        )
         .max_retries(3)
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))
@@ -379,7 +387,7 @@ async fn failed_event_includes_executor_retry_after_override() {
 async fn null_max_retries_uses_global_default() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("legacy", AlwaysRetryableExecutor))
+        .domain(Domain::<TestDomain>::new().task::<LegacyTask>(AlwaysRetryableExecutor))
         .max_retries(2)
         .max_concurrency(1)
         .poll_interval(Duration::from_millis(50))

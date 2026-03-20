@@ -4,15 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskmill::{Domain, DomainKey, Scheduler, TaskStore, TaskSubmission};
+use taskmill::{Domain, Scheduler, TaskStore, TaskSubmission};
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
-
-struct TestDomain;
-impl DomainKey for TestDomain {
-    const NAME: &'static str = "test";
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // M. Task Dependencies
@@ -434,8 +429,7 @@ async fn dep_blocked_count_in_snapshot() {
     let sched = Scheduler::builder()
         .store(store)
         .domain(
-            Domain::<TestDomain>::new()
-                .raw_executor("test", DelayExecutor(Duration::from_secs(60))),
+            Domain::<TestDomain>::new().task::<TestTask>(DelayExecutor(Duration::from_secs(60))),
         )
         .build()
         .await
@@ -473,12 +467,11 @@ async fn dep_full_chain_with_scheduler() {
 
     let sched = Scheduler::builder()
         .store(store)
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "step",
-            CountingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<StepTask>(CountingExecutor {
                 count: counter.clone(),
-            },
-        ))
+            }),
+        )
         .build()
         .await
         .unwrap();

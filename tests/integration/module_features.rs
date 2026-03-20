@@ -6,34 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor,
-    TaskStore, TaskSubmission, TaskTypeConfig,
+    Domain, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore, TaskSubmission,
+    TaskTypeConfig, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
-
-// ── Domain key structs ──────────────────────────────────────────────
-
-struct MediaDomain;
-impl DomainKey for MediaDomain {
-    const NAME: &'static str = "media";
-}
-
-struct SyncDomain;
-impl DomainKey for SyncDomain {
-    const NAME: &'static str = "sync";
-}
-
-struct ADomain;
-impl DomainKey for ADomain {
-    const NAME: &'static str = "a";
-}
-
-struct BDomain;
-impl DomainKey for BDomain {
-    const NAME: &'static str = "b";
-}
 
 // ═══════════════════════════════════════════════════════════════════
 // P. Default Layering (Step 5)
@@ -70,7 +48,7 @@ async fn submit_typed_five_layer_precedence_chain() {
         .default_ttl(std::time::Duration::from_secs(14400)) // layer 5 (not reached)
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor("layered", NoopExecutor)
+                .task::<LayeredTask>(NoopExecutor)
                 .default_priority(Priority::BACKGROUND) // layer 3: overrides TypedTask HIGH
                 .default_group("module-group") // layer 3: overrides typed-group
                 .default_ttl(std::time::Duration::from_secs(10800)) // layer 3: 3 h
@@ -141,14 +119,11 @@ async fn module_cap_limits_concurrency_to_2() {
         .poll_interval(Duration::from_millis(20))
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: current.clone(),
-                        max_seen: max_seen.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<MediaWorkTask>(ConcurrencyTrackingExecutor {
+                    current: current.clone(),
+                    max_seen: max_seen.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(2),
         )
         .build()
@@ -204,14 +179,11 @@ async fn module_cap_and_group_cap_are_independent() {
         .group_concurrency("gpu", 2) // group cap = 2
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: current.clone(),
-                        max_seen: max_seen.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<MediaWorkTask>(ConcurrencyTrackingExecutor {
+                    current: current.clone(),
+                    max_seen: max_seen.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(4), // module cap = 4
         )
         .build()
@@ -270,14 +242,11 @@ async fn ungrouped_task_respects_module_cap() {
         .poll_interval(Duration::from_millis(20))
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: current.clone(),
-                        max_seen: max_seen.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<MediaWorkTask>(ConcurrencyTrackingExecutor {
+                    current: current.clone(),
+                    max_seen: max_seen.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(3),
         )
         .build()
@@ -332,26 +301,20 @@ async fn global_cap_is_hard_ceiling_over_module_caps() {
         .poll_interval(Duration::from_millis(20))
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: total_current.clone(),
-                        max_seen: total_max.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<MediaWorkTask>(ConcurrencyTrackingExecutor {
+                    current: total_current.clone(),
+                    max_seen: total_max.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(3),
         )
         .domain(
             Domain::<SyncDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: total_current.clone(),
-                        max_seen: total_max.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<SyncWorkTask>(ConcurrencyTrackingExecutor {
+                    current: total_current.clone(),
+                    max_seen: total_max.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(3),
         )
         .build()
@@ -409,14 +372,11 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
         .poll_interval(Duration::from_millis(20))
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "work",
-                    ConcurrencyTrackingExecutor {
-                        current: current.clone(),
-                        max_seen: max_seen.clone(),
-                        delay: Duration::from_millis(100),
-                    },
-                )
+                .task::<MediaWorkTask>(ConcurrencyTrackingExecutor {
+                    current: current.clone(),
+                    max_seen: max_seen.clone(),
+                    delay: Duration::from_millis(100),
+                })
                 .max_concurrency(4), // initial cap — will be narrowed at runtime
         )
         .build()
@@ -482,8 +442,8 @@ async fn module_state_is_scoped_to_module() {
         saw_a: Arc<AtomicBool>,
         no_b: Arc<AtomicBool>,
     }
-    impl TaskExecutor for CheckerExec {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl<T: TypedTask> TypedExecutor<T> for CheckerExec {
+        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
             self.saw_a
                 .store(ctx.state::<ConfigA>().is_some(), Ordering::SeqCst);
             if ctx.state::<ConfigB>().is_some() {
@@ -497,19 +457,16 @@ async fn module_state_is_scoped_to_module() {
         .store(TaskStore::open_memory().await.unwrap())
         .poll_interval(Duration::from_millis(20))
         .domain(
-            Domain::<ADomain>::new()
-                .raw_executor(
-                    "task",
-                    CheckerExec {
-                        saw_a: Arc::clone(&saw_a),
-                        no_b: Arc::clone(&no_b),
-                    },
-                )
+            Domain::<DomainA>::new()
+                .task::<DomainATask>(CheckerExec {
+                    saw_a: Arc::clone(&saw_a),
+                    no_b: Arc::clone(&no_b),
+                })
                 .state(ConfigA("a-config".into())),
         )
         .domain(
-            Domain::<BDomain>::new()
-                .raw_executor("task", NoopExecutor)
+            Domain::<DomainB>::new()
+                .task::<DomainBTask>(NoopExecutor)
                 .state(ConfigB("b-config".into())),
         )
         .build()
@@ -517,7 +474,7 @@ async fn module_state_is_scoped_to_module() {
         .unwrap();
 
     sched
-        .domain::<ADomain>()
+        .domain::<DomainA>()
         .submit_raw(TaskSubmission::new("task").key("t1"))
         .await
         .unwrap();
@@ -560,8 +517,8 @@ async fn global_state_accessible_from_all_modules() {
     let b_saw = Arc::new(AtomicBool::new(false));
 
     struct GlobalChecker(Arc<AtomicBool>);
-    impl TaskExecutor for GlobalChecker {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl<T: TypedTask> TypedExecutor<T> for GlobalChecker {
+        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
             self.0
                 .store(ctx.state::<SharedConfig>().is_some(), Ordering::SeqCst);
             Ok(())
@@ -572,19 +529,19 @@ async fn global_state_accessible_from_all_modules() {
         .store(TaskStore::open_memory().await.unwrap())
         .poll_interval(Duration::from_millis(20))
         .app_state(SharedConfig("global".into()))
-        .domain(Domain::<ADomain>::new().raw_executor("task", GlobalChecker(Arc::clone(&a_saw))))
-        .domain(Domain::<BDomain>::new().raw_executor("task", GlobalChecker(Arc::clone(&b_saw))))
+        .domain(Domain::<DomainA>::new().task::<DomainATask>(GlobalChecker(Arc::clone(&a_saw))))
+        .domain(Domain::<DomainB>::new().task::<DomainBTask>(GlobalChecker(Arc::clone(&b_saw))))
         .build()
         .await
         .unwrap();
 
     sched
-        .domain::<ADomain>()
+        .domain::<DomainA>()
         .submit_raw(TaskSubmission::new("task").key("ta"))
         .await
         .unwrap();
     sched
-        .domain::<BDomain>()
+        .domain::<DomainB>()
         .submit_raw(TaskSubmission::new("task").key("tb"))
         .await
         .unwrap();
@@ -625,8 +582,8 @@ async fn module_state_shadows_global_state() {
     let b_value = Arc::new(std::sync::Mutex::new(String::new()));
 
     struct ValueCapture(Arc<std::sync::Mutex<String>>);
-    impl TaskExecutor for ValueCapture {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl<T: TypedTask> TypedExecutor<T> for ValueCapture {
+        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
             if let Some(cfg) = ctx.state::<Config>() {
                 *self.0.lock().unwrap() = cfg.0.clone();
             }
@@ -639,22 +596,22 @@ async fn module_state_shadows_global_state() {
         .poll_interval(Duration::from_millis(20))
         .app_state(Config("global".into()))
         .domain(
-            Domain::<ADomain>::new()
-                .raw_executor("task", ValueCapture(Arc::clone(&a_value)))
+            Domain::<DomainA>::new()
+                .task::<DomainATask>(ValueCapture(Arc::clone(&a_value)))
                 .state(Config("module-a".into())),
         )
-        .domain(Domain::<BDomain>::new().raw_executor("task", ValueCapture(Arc::clone(&b_value))))
+        .domain(Domain::<DomainB>::new().task::<DomainBTask>(ValueCapture(Arc::clone(&b_value))))
         .build()
         .await
         .unwrap();
 
     sched
-        .domain::<ADomain>()
+        .domain::<DomainA>()
         .submit_raw(TaskSubmission::new("task").key("ta"))
         .await
         .unwrap();
     sched
-        .domain::<BDomain>()
+        .domain::<DomainB>()
         .submit_raw(TaskSubmission::new("task").key("tb"))
         .await
         .unwrap();

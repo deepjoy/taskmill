@@ -5,9 +5,10 @@
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
+    TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -17,10 +18,17 @@ impl DomainKey for BenchDomain {
     const NAME: &'static str = "bench";
 }
 
+#[derive(Serialize, Deserialize)]
+struct BenchTask;
+impl TypedTask for BenchTask {
+    type Domain = BenchDomain;
+    const TASK_TYPE: &'static str = "test";
+}
+
 struct NoopExecutor;
 
-impl TaskExecutor for NoopExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<BenchTask> for NoopExecutor {
+    async fn execute(&self, _payload: BenchTask, _ctx: &TaskContext) -> Result<(), TaskError> {
         Ok(())
     }
 }
@@ -56,7 +64,7 @@ fn bench_dispatch_no_groups(c: &mut Criterion) {
             for _ in 0..iters {
                 let sched = Scheduler::builder()
                     .store(TaskStore::open_memory().await.unwrap())
-                    .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
+                    .domain(Domain::<BenchDomain>::new().task::<BenchTask>(NoopExecutor))
                     .max_concurrency(8)
                     .poll_interval(Duration::from_millis(10))
                     .build()
@@ -90,7 +98,7 @@ fn bench_dispatch_one_group(c: &mut Criterion) {
             for _ in 0..iters {
                 let sched = Scheduler::builder()
                     .store(TaskStore::open_memory().await.unwrap())
-                    .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
+                    .domain(Domain::<BenchDomain>::new().task::<BenchTask>(NoopExecutor))
                     .max_concurrency(8)
                     .group_concurrency("g0", 500) // high limit — no artificial throttling
                     .poll_interval(Duration::from_millis(10))
@@ -138,7 +146,7 @@ fn bench_dispatch_group_scaling(c: &mut Criterion) {
 
                         let mut builder = Scheduler::builder()
                             .store(TaskStore::open_memory().await.unwrap())
-                            .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
+                            .domain(Domain::<BenchDomain>::new().task::<BenchTask>(NoopExecutor))
                             .max_concurrency(8)
                             .poll_interval(Duration::from_millis(10));
 

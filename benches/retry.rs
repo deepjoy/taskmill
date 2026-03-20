@@ -5,9 +5,10 @@
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use serde::{Deserialize, Serialize};
 use taskmill::{
     BackoffStrategy, Domain, DomainKey, RetryPolicy, Scheduler, SchedulerEvent, TaskContext,
-    TaskError, TaskExecutor, TaskStore, TaskSubmission,
+    TaskError, TaskStore, TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -19,20 +20,29 @@ impl DomainKey for BenchDomain {
     const NAME: &'static str = "bench";
 }
 
+// ── Typed Tasks ────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct FailTask;
+impl TypedTask for FailTask {
+    type Domain = BenchDomain;
+    const TASK_TYPE: &'static str = "fail";
+}
+
 // ── Executors ───────────────────────────────────────────────────────
 
 struct FailPermanentExecutor;
 
-impl TaskExecutor for FailPermanentExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<FailTask> for FailPermanentExecutor {
+    async fn execute(&self, _payload: FailTask, _ctx: &TaskContext) -> Result<(), TaskError> {
         Err(TaskError::permanent("bench: permanent failure"))
     }
 }
 
 struct FailRetryableExecutor;
 
-impl TaskExecutor for FailRetryableExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<FailTask> for FailRetryableExecutor {
+    async fn execute(&self, _payload: FailTask, _ctx: &TaskContext) -> Result<(), TaskError> {
         Err(TaskError::retryable("bench: transient failure"))
     }
 }
@@ -103,9 +113,7 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
             for _ in 0..iters {
                 let sched = Scheduler::builder()
                     .store(TaskStore::open_memory().await.unwrap())
-                    .domain(
-                        Domain::<BenchDomain>::new().raw_executor("fail", FailPermanentExecutor),
-                    )
+                    .domain(Domain::<BenchDomain>::new().task::<FailTask>(FailPermanentExecutor))
                     .max_concurrency(8)
                     .max_retries(0)
                     .poll_interval(Duration::from_millis(10))
@@ -203,7 +211,7 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
                             .store(TaskStore::open_memory().await.unwrap())
                             .domain(
                                 Domain::<BenchDomain>::new()
-                                    .raw_executor("fail", FailRetryableExecutor)
+                                    .task::<FailTask>(FailRetryableExecutor)
                                     .default_retry(policy),
                             )
                             .max_concurrency(8)

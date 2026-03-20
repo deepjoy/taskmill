@@ -273,20 +273,52 @@ impl Default for TaskTypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{Domain, DomainKey, TypedExecutor};
     use crate::task::retry::{BackoffStrategy, RetryPolicy};
+    use crate::task::TypedTask;
+
+    struct TestDomain;
+    impl DomainKey for TestDomain {
+        const NAME: &'static str = "test";
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct NoopTask;
+    impl TypedTask for NoopTask {
+        type Domain = TestDomain;
+        const TASK_TYPE: &'static str = "noop";
+    }
 
     struct NoopExecutor;
 
-    impl TaskExecutor for NoopExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<NoopTask> for NoopExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: NoopTask,
+            _ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             Ok(())
         }
+    }
+
+    /// Helper: produce an erased executor from a `TypedExecutor<T>` via
+    /// `Domain::task()`. This mirrors how the scheduler registers typed
+    /// executors internally.
+    fn erased_from_domain() -> Arc<dyn ErasedExecutor> {
+        let domain = Domain::<TestDomain>::new().task::<NoopTask>(NoopExecutor);
+        domain
+            .into_module()
+            .executors
+            .into_iter()
+            .next()
+            .unwrap()
+            .executor
     }
 
     #[test]
     fn register_and_lookup() {
         let mut reg = TaskTypeRegistry::new();
-        reg.register("test-type", Arc::new(NoopExecutor));
+        reg.register_erased("test-type", erased_from_domain());
 
         assert!(reg.get("test-type").is_some());
         assert!(reg.get("unknown").is_none());
@@ -297,8 +329,8 @@ mod tests {
     #[should_panic(expected = "already registered")]
     fn duplicate_registration_panics() {
         let mut reg = TaskTypeRegistry::new();
-        reg.register("dup", Arc::new(NoopExecutor));
-        reg.register("dup", Arc::new(NoopExecutor));
+        reg.register_erased("dup", erased_from_domain());
+        reg.register_erased("dup", erased_from_domain());
     }
 
     #[test]
@@ -312,7 +344,7 @@ mod tests {
             },
             max_retries: 5,
         };
-        reg.register_with_retry_policy("api-call", Arc::new(NoopExecutor), policy);
+        reg.register_erased_with_retry_policy("api-call", erased_from_domain(), policy);
 
         assert!(reg.get("api-call").is_some());
         let retrieved = reg.type_retry_policy("api-call").unwrap();
@@ -322,7 +354,7 @@ mod tests {
     #[test]
     fn type_retry_policy_returns_none_for_missing() {
         let mut reg = TaskTypeRegistry::new();
-        reg.register("plain", Arc::new(NoopExecutor));
+        reg.register_erased("plain", erased_from_domain());
 
         assert!(reg.type_retry_policy("plain").is_none());
         assert!(reg.type_retry_policy("nonexistent").is_none());
@@ -337,8 +369,7 @@ mod tests {
             },
             max_retries: 7,
         };
-        let executor: Arc<dyn ErasedExecutor> = Arc::new(NoopExecutor);
-        reg.register_erased_with_retry_policy("erased-type", executor, policy);
+        reg.register_erased_with_retry_policy("erased-type", erased_from_domain(), policy);
 
         assert!(reg.get("erased-type").is_some());
         let retrieved = reg.type_retry_policy("erased-type").unwrap();
