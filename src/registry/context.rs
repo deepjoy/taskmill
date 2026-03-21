@@ -15,7 +15,7 @@ use super::child_spawner::ChildSpawner;
 use super::io_tracker::IoTracker;
 use super::state::StateSnapshot;
 
-/// Execution context passed to a [`TaskExecutor`](super::TaskExecutor).
+/// Execution context passed to a [`TypedExecutor`](crate::TypedExecutor).
 ///
 /// Provides access to the task record, cancellation token, progress reporter,
 /// shared application state, and domain-scoped task submission. Use the accessor
@@ -218,7 +218,7 @@ impl TaskContext {
     ///
     /// ```ignore
     /// impl TypedExecutor<VideoUploaded> for VideoProcessor {
-    ///     async fn execute(&self, event: VideoUploaded, ctx: &TaskContext) -> Result<(), TaskError> {
+    ///     async fn execute(&self, event: VideoUploaded, ctx: DomainTaskContext<'_, Media>) -> Result<(), TaskError> {
     ///         let media = ctx.domain::<Media>();
     ///         media.submit(Thumbnail { path: event.path.clone(), size: 256 })
     ///             .await

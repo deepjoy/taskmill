@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainKey, Scheduler, TaskContext, TaskError, TaskStore, TaskSubmission, TypedExecutor,
-    TypedTask,
+    Domain, DomainKey, DomainTaskContext, Scheduler, TaskError, TaskStore, TaskSubmission,
+    TypedExecutor, TypedTask,
 };
 
 struct BenchDomain;
@@ -25,7 +25,7 @@ impl TypedExecutor<BenchTask> for NoopExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: BenchTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, BenchDomain>,
     ) -> Result<(), TaskError> {
         Ok(())
     }

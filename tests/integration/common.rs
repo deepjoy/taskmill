@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::marker::PhantomData;
+
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    DomainKey, PressureSource, SchedulerEvent, TaskContext, TaskError, TaskSubmission,
-    TypedExecutor, TypedTask,
+    DomainKey, DomainTaskContext, PressureSource, SchedulerEvent, TaskError, TypedExecutor,
+    TypedTask,
 };
 
 // ── Domain Keys ────────────────────────────────────────────────────
@@ -68,7 +70,7 @@ impl DomainKey for GammaDomain {
 /// ```
 macro_rules! define_task {
     ($name:ident, $domain:ty, $task_type:expr) => {
-        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[derive(Debug, Default, Clone, Serialize, Deserialize)]
         pub struct $name;
         impl TypedTask for $name {
             type Domain = $domain;
@@ -124,7 +126,11 @@ define_task!(DomainBTask, DomainB, "task");
 pub struct NoopExecutor;
 
 impl<T: TypedTask> TypedExecutor<T> for NoopExecutor {
-    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         Ok(())
     }
 }
@@ -133,7 +139,11 @@ impl<T: TypedTask> TypedExecutor<T> for NoopExecutor {
 pub struct DelayExecutor(pub Duration);
 
 impl<T: TypedTask> TypedExecutor<T> for DelayExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         tokio::select! {
             _ = ctx.token().cancelled() => Err(TaskError::new("cancelled")),
             _ = tokio::time::sleep(self.0) => Ok(()),
@@ -147,7 +157,11 @@ pub struct CountingExecutor {
 }
 
 impl<T: TypedTask> TypedExecutor<T> for CountingExecutor {
-    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -160,7 +174,11 @@ pub struct FailNTimesExecutor {
 }
 
 impl<T: TypedTask> TypedExecutor<T> for FailNTimesExecutor {
-    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         let count = self.failures.fetch_add(1, Ordering::SeqCst);
         if count < self.max_failures {
             Err(TaskError::retryable("transient failure"))
@@ -170,14 +188,18 @@ impl<T: TypedTask> TypedExecutor<T> for FailNTimesExecutor {
     }
 }
 
-/// Records IO bytes via TaskContext.
+/// Records IO bytes via DomainTaskContext.
 pub struct IoReportingExecutor {
     pub read: i64,
     pub write: i64,
 }
 
 impl<T: TypedTask> TypedExecutor<T> for IoReportingExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         ctx.record_read_bytes(self.read);
         ctx.record_write_bytes(self.write);
         Ok(())
@@ -192,7 +214,11 @@ pub struct ConcurrencyTrackingExecutor {
 }
 
 impl<T: TypedTask> TypedExecutor<T> for ConcurrencyTrackingExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         let prev = self.current.fetch_add(1, Ordering::SeqCst);
         self.max_seen.fetch_max(prev + 1, Ordering::SeqCst);
         tokio::select! {
@@ -204,44 +230,84 @@ impl<T: TypedTask> TypedExecutor<T> for ConcurrencyTrackingExecutor {
     }
 }
 
-/// An executor that spawns N child tasks.
-pub struct ChildSpawnerExecutor {
-    pub child_type: &'static str,
+/// An executor that spawns N child tasks of type `C` in the same domain.
+pub struct ChildSpawnerExecutor<C> {
     pub count: usize,
-    pub fail_fast: bool,
+    pub _child: PhantomData<C>,
 }
 
-impl<T: TypedTask> TypedExecutor<T> for ChildSpawnerExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl<C> ChildSpawnerExecutor<C> {
+    pub fn new(count: usize) -> Self {
+        Self {
+            count,
+            _child: PhantomData,
+        }
+    }
+}
+
+impl<T, C> TypedExecutor<T> for ChildSpawnerExecutor<C>
+where
+    T: TypedTask,
+    C: TypedTask<Domain = T::Domain> + Default + Send + Sync + 'static,
+{
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         for i in 0..self.count {
-            let sub = TaskSubmission::new(self.child_type)
+            ctx.spawn_child_with(C::default())
                 .key(format!("child-{i}"))
                 .priority(ctx.record().priority)
-                .fail_fast(self.fail_fast);
-            ctx.spawn_child(sub).await?;
+                .await
+                .map_err(|e| TaskError::new(e.to_string()))?;
         }
         Ok(())
     }
 }
 
-/// Tracks whether finalize was called.
-pub struct FinalizeTracker {
+/// Tracks whether finalize was called. Generic over child type `C`.
+pub struct FinalizeTracker<C> {
     pub child_count: usize,
     pub finalized: Arc<AtomicBool>,
+    pub _child: PhantomData<C>,
 }
 
-impl<T: TypedTask> TypedExecutor<T> for FinalizeTracker {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl<C> FinalizeTracker<C> {
+    pub fn new(child_count: usize, finalized: Arc<AtomicBool>) -> Self {
+        Self {
+            child_count,
+            finalized,
+            _child: PhantomData,
+        }
+    }
+}
+
+impl<T, C> TypedExecutor<T> for FinalizeTracker<C>
+where
+    T: TypedTask,
+    C: TypedTask<Domain = T::Domain> + Default + Send + Sync + 'static,
+{
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         for i in 0..self.child_count {
-            let sub = TaskSubmission::new("child")
+            ctx.spawn_child_with(C::default())
                 .key(format!("ft-child-{i}"))
-                .priority(ctx.record().priority);
-            ctx.spawn_child(sub).await?;
+                .priority(ctx.record().priority)
+                .await
+                .map_err(|e| TaskError::new(e.to_string()))?;
         }
         Ok(())
     }
 
-    async fn finalize<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn finalize<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         self.finalized.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -251,7 +317,11 @@ impl<T: TypedTask> TypedExecutor<T> for FinalizeTracker {
 pub struct AlwaysFailExecutor;
 
 impl<T: TypedTask> TypedExecutor<T> for AlwaysFailExecutor {
-    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         Err(TaskError::new("permanent failure"))
     }
 }

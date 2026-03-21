@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
-    TaskSubmission, TypedExecutor, TypedTask,
+    Domain, DomainKey, DomainTaskContext, Priority, Scheduler, SchedulerEvent, TaskError,
+    TaskStore, TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -41,7 +41,11 @@ impl TypedTask for ByteTestTask {
 struct NoopExecutor;
 
 impl TypedExecutor<BenchTask> for NoopExecutor {
-    async fn execute(&self, _payload: BenchTask, _ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: BenchTask,
+        _ctx: DomainTaskContext<'a, BenchDomain>,
+    ) -> Result<(), TaskError> {
         Ok(())
     }
 }
@@ -53,7 +57,11 @@ struct ByteProgressExecutor {
 }
 
 impl TypedExecutor<ByteTestTask> for ByteProgressExecutor {
-    async fn execute(&self, _payload: ByteTestTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: ByteTestTask,
+        ctx: DomainTaskContext<'a, BenchDomain>,
+    ) -> Result<(), TaskError> {
         ctx.set_bytes_total(self.total);
         let mut remaining = self.total;
         while remaining > 0 {

@@ -4,10 +4,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskmill::{Domain, Scheduler, TaskStore, TaskSubmission};
+use taskmill::{Domain, Scheduler, TaskStore};
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
+
+// ═══════════════════════════════════════════════════════════════════
+// Helper: build a minimal scheduler for store-level dependency tests.
+// ═══════════════════════════════════════════════════════════════════
+
+async fn dep_scheduler() -> Scheduler {
+    Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
+        .build()
+        .await
+        .unwrap()
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // M. Task Dependencies
@@ -17,13 +30,26 @@ use super::common::*;
 async fn dep_basic_blocked_then_unblocked() {
     // Submit A, submit B depending on A → B is blocked.
     // Complete A → B becomes pending.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("dep-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("dep-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("dep-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("dep-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let b = store.task_by_id(id_b).await.unwrap().unwrap();
     assert_eq!(b.status, taskmill::TaskStatus::Blocked);
@@ -48,13 +74,26 @@ async fn dep_basic_blocked_then_unblocked() {
 #[tokio::test]
 async fn dep_fail_cancels_dependent() {
     // Submit A, submit B depending on A. Fail A → B moves to history as DependencyFailed.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("fail-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("fail-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("fail-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("fail-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // Fail A permanently.
     let a = store.pop_next().await.unwrap().unwrap();
@@ -84,18 +123,34 @@ async fn dep_fail_cancels_dependent() {
 #[tokio::test]
 async fn dep_fan_in() {
     // C depends on both A and B. Complete A → C still blocked. Complete B → C pending.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("fi-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("fi-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("fi-b");
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("fi-b")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_c = TaskSubmission::new("test")
+    let id_c = handle
+        .submit_with(TestTask)
         .key("fi-c")
-        .depends_on_all([id_a, id_b]);
-    let id_c = store.submit(&sub_c).await.unwrap().id().unwrap();
+        .depends_on_all([id_a, id_b])
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let c = store.task_by_id(id_c).await.unwrap().unwrap();
     assert_eq!(c.status, taskmill::TaskStatus::Blocked);
@@ -128,16 +183,35 @@ async fn dep_fan_in() {
 #[tokio::test]
 async fn dep_fan_out() {
     // B and C both depend on A. Complete A → both become pending.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("fo-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("fo-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("fo-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("fo-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_c = TaskSubmission::new("test").key("fo-c").depends_on(id_a);
-    let id_c = store.submit(&sub_c).await.unwrap().id().unwrap();
+    let id_c = handle
+        .submit_with(TestTask)
+        .key("fo-c")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // Complete A.
     let a = store.pop_next().await.unwrap().unwrap();
@@ -155,26 +229,48 @@ async fn dep_fan_out() {
 #[tokio::test]
 async fn dep_cycle_detection_direct() {
     // A depends on B, B depends on A → CyclicDependency error.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
 
-    let sub_a = TaskSubmission::new("test").key("cyc-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("cyc-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("cyc-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("cyc-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // Try to make A depend on B (cycle).
     // We need to submit a new task that depends on B and somehow forms a cycle.
     // Actually, since A is already inserted, we can't make it depend on B.
     // The cycle detection works at submission time. Let's test A→B→C→A.
-    let sub_c = TaskSubmission::new("test").key("cyc-c").depends_on(id_b);
-    let _id_c = store.submit(&sub_c).await.unwrap().id().unwrap();
+    let _id_c = handle
+        .submit_with(TestTask)
+        .key("cyc-c")
+        .depends_on(id_b)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // Now try to submit D that depends on C and A, where A already has B depending on it.
     // That's not a cycle. Let's test an actual self-dependency.
-    let sub_self = TaskSubmission::new("test").key("cyc-self").depends_on(id_a);
     // This shouldn't cause issues because cyc-self doesn't have anyone depending on it.
-    let _ = store.submit(&sub_self).await.unwrap();
+    let _ = handle
+        .submit_with(TestTask)
+        .key("cyc-self")
+        .depends_on(id_a)
+        .await
+        .unwrap();
 
     // The true cycle test: submit a task that would create A→B→...→A.
     // This is tricky because we can only declare deps at submission time.
@@ -199,10 +295,17 @@ async fn dep_cycle_detection_direct() {
 #[tokio::test]
 async fn dep_already_completed() {
     // Depend on already-completed task → task starts as pending immediately.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("done-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("done-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // Complete A.
     let a = store.pop_next().await.unwrap().unwrap();
@@ -212,8 +315,14 @@ async fn dep_already_completed() {
         .unwrap();
 
     // Submit B depending on A (already completed).
-    let sub_b = TaskSubmission::new("test").key("done-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("done-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let b = store.task_by_id(id_b).await.unwrap().unwrap();
     assert_eq!(b.status, taskmill::TaskStatus::Pending);
@@ -222,10 +331,17 @@ async fn dep_already_completed() {
 #[tokio::test]
 async fn dep_already_failed() {
     // Depend on already-failed task → DependencyFailed error at submission.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("af-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("af-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let a = store.pop_next().await.unwrap().unwrap();
     store
@@ -240,18 +356,27 @@ async fn dep_already_failed() {
         .await
         .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("af-b").depends_on(id_a);
-    let err = store.submit(&sub_b).await.unwrap_err();
+    let err = handle
+        .submit_with(TestTask)
+        .key("af-b")
+        .depends_on(id_a)
+        .await
+        .unwrap_err();
     assert!(matches!(err, taskmill::StoreError::DependencyFailed(_)));
 }
 
 #[tokio::test]
 async fn dep_nonexistent() {
     // Depend on nonexistent task → InvalidDependency error.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
 
-    let sub = TaskSubmission::new("test").key("ne").depends_on(99999);
-    let err = store.submit(&sub).await.unwrap_err();
+    let err = handle
+        .submit_with(TestTask)
+        .key("ne")
+        .depends_on(99999)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         taskmill::StoreError::InvalidDependency(99999)
@@ -261,13 +386,26 @@ async fn dep_nonexistent() {
 #[tokio::test]
 async fn dep_cancel_cascades() {
     // Cancel a task with dependents → dependents cascade-fail.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("cc-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("cc-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("cc-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("cc-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     store.cancel_to_history(id_a).await.unwrap();
 
@@ -285,16 +423,27 @@ async fn dep_cancel_cascades() {
 #[tokio::test]
 async fn dep_ignore_policy_unblocks() {
     // DependencyFailurePolicy::Ignore → dependent unblocked despite dep failure.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("ig-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("ig-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test")
+    let id_b = handle
+        .submit_with(TestTask)
         .key("ig-b")
         .depends_on(id_a)
-        .on_dependency_failure(taskmill::DependencyFailurePolicy::Ignore);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+        .on_dependency_failure(taskmill::DependencyFailurePolicy::Ignore)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let b = store.task_by_id(id_b).await.unwrap().unwrap();
     assert_eq!(b.status, taskmill::TaskStatus::Blocked);
@@ -324,18 +473,34 @@ async fn dep_ignore_policy_unblocks() {
 #[tokio::test]
 async fn dep_query_methods() {
     // Verify task_dependencies() and task_dependents() return correct edges.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("qm-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("qm-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("qm-b");
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("qm-b")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_c = TaskSubmission::new("test")
+    let id_c = handle
+        .submit_with(TestTask)
         .key("qm-c")
-        .depends_on_all([id_a, id_b]);
-    let id_c = store.submit(&sub_c).await.unwrap().id().unwrap();
+        .depends_on_all([id_a, id_b])
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     let deps = store.task_dependencies(id_c).await.unwrap();
     assert_eq!(deps.len(), 2);
@@ -356,21 +521,44 @@ async fn dep_query_methods() {
 #[tokio::test]
 async fn dep_diamond_chain() {
     // Diamond: A→B, A→C, B→D, C→D. Complete A, then B and C, then D.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("d-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("d-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("d-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("d-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_c = TaskSubmission::new("test").key("d-c").depends_on(id_a);
-    let id_c = store.submit(&sub_c).await.unwrap().id().unwrap();
+    let id_c = handle
+        .submit_with(TestTask)
+        .key("d-c")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_d = TaskSubmission::new("test")
+    let id_d = handle
+        .submit_with(TestTask)
         .key("d-d")
-        .depends_on_all([id_b, id_c]);
-    let id_d = store.submit(&sub_d).await.unwrap().id().unwrap();
+        .depends_on_all([id_b, id_c])
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // All B, C, D should be blocked.
     assert_eq!(
@@ -437,18 +625,13 @@ async fn dep_blocked_count_in_snapshot() {
 
     let handle = sched.domain::<TestDomain>();
 
-    let outcome_a = handle
-        .submit_raw(TaskSubmission::new("test::test").key("snap-a"))
-        .await
-        .unwrap();
+    let outcome_a = handle.submit_with(TestTask).key("snap-a").await.unwrap();
     let id_a = outcome_a.id().unwrap();
 
     handle
-        .submit_raw(
-            TaskSubmission::new("test::test")
-                .key("snap-b")
-                .depends_on(id_a),
-        )
+        .submit_with(TestTask)
+        .key("snap-b")
+        .depends_on(id_a)
         .await
         .unwrap();
 
@@ -488,19 +671,24 @@ async fn dep_full_chain_with_scheduler() {
     });
 
     let outcome_a = domain_handle
-        .submit_raw(TaskSubmission::new("step").key("chain-a"))
+        .submit_with(StepTask)
+        .key("chain-a")
         .await
         .unwrap();
     let id_a = outcome_a.id().unwrap();
 
     let outcome_b = domain_handle
-        .submit_raw(TaskSubmission::new("step").key("chain-b").depends_on(id_a))
+        .submit_with(StepTask)
+        .key("chain-b")
+        .depends_on(id_a)
         .await
         .unwrap();
     let id_b = outcome_b.id().unwrap();
 
     let outcome_c = domain_handle
-        .submit_raw(TaskSubmission::new("step").key("chain-c").depends_on(id_b))
+        .submit_with(StepTask)
+        .key("chain-c")
+        .depends_on(id_b)
         .await
         .unwrap();
     let _id_c = outcome_c.id().unwrap();
@@ -525,13 +713,26 @@ async fn dep_full_chain_with_scheduler() {
 #[tokio::test]
 async fn dep_blocked_tasks_survive_across_store_reopen() {
     // Blocked tasks and their dep edges are persisted in SQLite.
-    let store = TaskStore::open_memory().await.unwrap();
+    let sched = dep_scheduler().await;
+    let handle = sched.domain::<TestDomain>();
+    let store = sched.store();
 
-    let sub_a = TaskSubmission::new("test").key("rec-a");
-    let id_a = store.submit(&sub_a).await.unwrap().id().unwrap();
+    let id_a = handle
+        .submit_with(TestTask)
+        .key("rec-a")
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
-    let sub_b = TaskSubmission::new("test").key("rec-b").depends_on(id_a);
-    let id_b = store.submit(&sub_b).await.unwrap().id().unwrap();
+    let id_b = handle
+        .submit_with(TestTask)
+        .key("rec-b")
+        .depends_on(id_a)
+        .await
+        .unwrap()
+        .id()
+        .unwrap();
 
     // B should be blocked with dep edges persisted.
     let b = store.task_by_id(id_b).await.unwrap().unwrap();

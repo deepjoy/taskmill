@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use crate::module::{ExecutorOptions, ModuleExecutor, ModuleHandle};
 use crate::priority::Priority;
-use crate::registry::{ErasedExecutor, TaskContext, TaskExecutor};
+use crate::registry::{DomainTaskContext, ErasedExecutor, TaskContext, TaskExecutor};
 use crate::scheduler::progress::TaskProgress;
 use crate::scheduler::SchedulerEvent;
 use crate::store::StoreError;
@@ -154,19 +154,30 @@ pub struct TaskTypeOptions {
 
 // ── TypedExecutor<T> ─────────────────────────────────────────────────
 
-/// An executor that receives a deserialized, typed payload.
+/// An executor that receives a deserialized, typed payload and a
+/// domain-parameterized context.
 ///
 /// Register with [`Domain::task::<T>(executor)`](Domain::task). The library
 /// wraps this in an erased adapter so the scheduler engine remains untyped
 /// internally.
 ///
+/// The [`DomainTaskContext`] carries the domain identity `D` as a type
+/// parameter, enabling compile-time–safe child spawning via
+/// [`spawn_child_with`](DomainTaskContext::spawn_child_with).
+///
 /// # Example
 ///
 /// ```ignore
 /// impl TypedExecutor<Thumbnail> for ThumbnailExec {
-///     async fn execute(&self, thumb: Thumbnail, ctx: &TaskContext) -> Result<(), TaskError> {
+///     async fn execute(
+///         &self,
+///         thumb: Thumbnail,
+///         ctx: DomainTaskContext<'_, Media>,
+///     ) -> Result<(), TaskError> {
 ///         ctx.check_cancelled()?;
-///         process(thumb).await
+///         ctx.spawn_child_with(ResizeTask { path: thumb.path, size: 256 })
+///             .await?;
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -175,7 +186,7 @@ pub trait TypedExecutor<T: TypedTask>: Send + Sync + 'static {
     fn execute<'a>(
         &'a self,
         payload: T,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, T::Domain>,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
 
     /// Called when all child tasks spawned by this task have settled.
@@ -183,7 +194,7 @@ pub trait TypedExecutor<T: TypedTask>: Send + Sync + 'static {
     fn finalize<'a>(
         &'a self,
         _payload: T,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, T::Domain>,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
         async { Ok(()) }
     }
@@ -193,7 +204,7 @@ pub trait TypedExecutor<T: TypedTask>: Send + Sync + 'static {
     fn on_cancel<'a>(
         &'a self,
         _payload: T,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, T::Domain>,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
         async { Ok(()) }
     }
@@ -213,17 +224,20 @@ struct TypedExecutorAdapter<T, E> {
 impl<T: TypedTask, E: TypedExecutor<T>> TaskExecutor for TypedExecutorAdapter<T, E> {
     async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         let payload: T = ctx.payload()?;
-        self.executor.execute(payload, ctx).await
+        let dctx = DomainTaskContext::<T::Domain>::new(ctx);
+        self.executor.execute(payload, dctx).await
     }
 
     async fn finalize<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         let payload: T = ctx.payload()?;
-        self.executor.finalize(payload, ctx).await
+        let dctx = DomainTaskContext::<T::Domain>::new(ctx);
+        self.executor.finalize(payload, dctx).await
     }
 
     async fn on_cancel<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         let payload: T = ctx.payload()?;
-        self.executor.on_cancel(payload, ctx).await
+        let dctx = DomainTaskContext::<T::Domain>::new(ctx);
+        self.executor.on_cancel(payload, dctx).await
     }
 }
 
@@ -338,23 +352,6 @@ impl<D: DomainKey> Domain<D> {
             task_type: T::TASK_TYPE.to_string(),
             executor: Arc::new(adapter) as Arc<dyn ErasedExecutor>,
             options: ExecutorOptions { ttl, retry_policy },
-        });
-        self
-    }
-
-    /// Escape hatch: register an untyped executor by task-type string.
-    ///
-    /// Use only when [`TypedExecutor`] is not practical (e.g. dynamic
-    /// plugin systems).
-    pub fn raw_executor(
-        mut self,
-        task_type: impl Into<String>,
-        executor: impl TaskExecutor,
-    ) -> Self {
-        self.executors.push(ModuleExecutor {
-            task_type: task_type.into(),
-            executor: Arc::new(executor) as Arc<dyn ErasedExecutor>,
-            options: ExecutorOptions::default(),
         });
         self
     }
@@ -496,11 +493,6 @@ impl<D: DomainKey> DomainHandle<D> {
             outcomes.push(self.submit(task).await?);
         }
         Ok(outcomes)
-    }
-
-    /// Escape hatch: raw untyped submission.
-    pub fn submit_raw(&self, sub: TaskSubmission) -> crate::task::SubmitBuilder {
-        self.inner.submit(sub)
     }
 
     // ── Lifecycle ───────────────────────────────────────────────────
@@ -752,10 +744,8 @@ impl<D: DomainKey> DomainSubmitBuilder<D> {
     }
 
     /// Set a dependency failure policy.
-    pub fn on_dependency_failure(self, _p: DependencyFailurePolicy) -> Self {
-        // DependencyFailurePolicy is set on the TaskSubmission, which is already
-        // resolved inside the inner SubmitBuilder. For now, delegate to the
-        // underlying submission mechanism.
+    pub fn on_dependency_failure(mut self, p: DependencyFailurePolicy) -> Self {
+        self.inner = self.inner.on_dependency_failure(p);
         self
     }
 
@@ -763,6 +753,21 @@ impl<D: DomainKey> DomainSubmitBuilder<D> {
     pub fn parent(mut self, id: i64) -> Self {
         self.inner = self.inner.parent(id);
         self
+    }
+
+    /// Mark this task as a child of the task currently executing in the
+    /// given [`DomainTaskContext`].
+    ///
+    /// This is the idiomatic way to create cross-domain children:
+    ///
+    /// ```ignore
+    /// ctx.domain::<Analytics>()
+    ///     .submit_with(ScanStartedEvent { .. })
+    ///     .child_of(&ctx)
+    ///     .await?;
+    /// ```
+    pub fn child_of<D2: DomainKey>(self, ctx: &DomainTaskContext<'_, D2>) -> Self {
+        self.parent(ctx.record().id)
     }
 
     /// Submit the task, returning the outcome.
@@ -1018,7 +1023,7 @@ mod tests {
         async fn execute<'a>(
             &'a self,
             _payload: TestTask,
-            _ctx: &'a TaskContext,
+            _ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             Ok(())
         }

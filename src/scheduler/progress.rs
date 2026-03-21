@@ -52,7 +52,7 @@ use super::SchedulerEvent;
 /// # Example
 ///
 /// ```ignore
-/// // Inside a TaskExecutor::execute implementation:
+/// // Inside a TypedExecutor::execute implementation:
 /// async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
 ///     let items = vec![/* ... */];
 ///     for (i, item) in items.iter().enumerate() {

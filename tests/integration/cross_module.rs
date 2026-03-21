@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainHandle, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
-    TaskSubmission, TypedExecutor, TypedTask,
+    Domain, DomainHandle, DomainKey, DomainTaskContext, Scheduler, SchedulerEvent, TaskError,
+    TaskStore, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -29,10 +29,11 @@ impl TypedExecutor<TriggerTask> for CrossDomainSubmitter {
     async fn execute<'a>(
         &'a self,
         _payload: TriggerTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, DomainA>,
     ) -> Result<(), TaskError> {
         let b: DomainHandle<DomainB> = ctx.domain::<DomainB>();
-        b.submit_raw(TaskSubmission::new("task").key("cross-module-child"))
+        b.submit_with(DomainBTask)
+            .key("cross-module-child")
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
         self.submitted.store(true, Ordering::SeqCst);
@@ -60,7 +61,7 @@ async fn ctx_domain_submits_to_other_module_with_prefix_and_defaults() {
                 async fn execute<'a>(
                     &'a self,
                     _payload: DomainBTask,
-                    _ctx: &'a TaskContext,
+                    _ctx: DomainTaskContext<'a, DomainB>,
                 ) -> Result<(), TaskError> {
                     self.0.store(true, Ordering::SeqCst);
                     Ok(())
@@ -76,7 +77,8 @@ async fn ctx_domain_submits_to_other_module_with_prefix_and_defaults() {
 
     sched
         .domain::<DomainA>()
-        .submit_raw(TaskSubmission::new("trigger").key("t1"))
+        .submit_with(TriggerTask)
+        .key("t1")
         .await
         .unwrap();
 
@@ -108,11 +110,12 @@ impl TypedExecutor<MediaLeaderTask> for SameDomainSubmitter {
     async fn execute<'a>(
         &'a self,
         _payload: MediaLeaderTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         let media: DomainHandle<MediaDomain> = ctx.domain::<MediaDomain>();
         media
-            .submit_raw(TaskSubmission::new("follower").key("same-module-follower"))
+            .submit_with(MediaFollowerTask)
+            .key("same-module-follower")
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
         self.submitted.store(true, Ordering::SeqCst);
@@ -140,7 +143,7 @@ async fn ctx_domain_self_submit_applies_owning_module_defaults() {
                         async fn execute<'a>(
                             &'a self,
                             _payload: MediaFollowerTask,
-                            _ctx: &'a TaskContext,
+                            _ctx: DomainTaskContext<'a, MediaDomain>,
                         ) -> Result<(), TaskError> {
                             self.0.store(true, Ordering::SeqCst);
                             Ok(())
@@ -158,7 +161,8 @@ async fn ctx_domain_self_submit_applies_owning_module_defaults() {
 
     sched
         .domain::<MediaDomain>()
-        .submit_raw(TaskSubmission::new("leader").key("l1"))
+        .submit_with(MediaLeaderTask)
+        .key("l1")
         .await
         .unwrap();
 
@@ -195,7 +199,7 @@ async fn ctx_try_domain_returns_none_for_unknown_domain() {
         async fn execute<'a>(
             &'a self,
             _payload: ProbeTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             let found = ctx.try_domain::<NonexistentDomain>().is_some();
             *self.0.lock().unwrap() = Some(found);
@@ -214,7 +218,8 @@ async fn ctx_try_domain_returns_none_for_unknown_domain() {
 
     sched
         .domain::<TestDomain>()
-        .submit_raw(TaskSubmission::new("probe").key("p1"))
+        .submit_with(ProbeTask)
+        .key("p1")
         .await
         .unwrap();
 
@@ -245,9 +250,10 @@ async fn spawn_child_routes_through_owning_module() {
         async fn execute<'a>(
             &'a self,
             _payload: SpawnerTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
-            ctx.spawn_child(TaskSubmission::new("worker").key("spawned-child"))
+            ctx.spawn_child_with(WorkerTask)
+                .key("spawned-child")
                 .await?;
             Ok(())
         }
@@ -258,7 +264,7 @@ async fn spawn_child_routes_through_owning_module() {
         async fn execute<'a>(
             &'a self,
             _payload: WorkerTask,
-            _ctx: &'a TaskContext,
+            _ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             self.0.store(true, Ordering::SeqCst);
             Ok(())
@@ -280,7 +286,8 @@ async fn spawn_child_routes_through_owning_module() {
 
     sched
         .domain::<TestDomain>()
-        .submit_raw(TaskSubmission::new("spawner").key("s1"))
+        .submit_with(SpawnerTask)
+        .key("s1")
         .await
         .unwrap();
 
@@ -310,12 +317,13 @@ impl TypedExecutor<MediaParentTask> for CrossDomainParentExec {
     async fn execute<'a>(
         &'a self,
         _payload: MediaParentTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         let analytics: DomainHandle<AnalyticsDomain> = ctx.domain::<AnalyticsDomain>();
         analytics
-            .submit_raw(TaskSubmission::new("work").key("cross-child"))
-            .parent(ctx.record().id)
+            .submit_with(AnalyticsWorkTask)
+            .key("cross-child")
+            .child_of(&ctx)
             .await
             .map_err(|e| TaskError::new(format!("{e}")))?;
         self.child_submitted.store(true, Ordering::SeqCst);
@@ -345,7 +353,7 @@ async fn cross_domain_parent_child_lifecycle() {
                 async fn execute<'a>(
                     &'a self,
                     _payload: AnalyticsWorkTask,
-                    _ctx: &'a TaskContext,
+                    _ctx: DomainTaskContext<'a, AnalyticsDomain>,
                 ) -> Result<(), TaskError> {
                     self.0.store(true, Ordering::SeqCst);
                     Ok(())
@@ -364,7 +372,8 @@ async fn cross_domain_parent_child_lifecycle() {
 
     sched
         .domain::<MediaDomain>()
-        .submit_raw(TaskSubmission::new("parent").key("media-parent-1"))
+        .submit_with(MediaParentTask)
+        .key("media-parent-1")
         .await
         .unwrap();
 
@@ -421,11 +430,8 @@ async fn cross_domain_failure_cascade() {
 
     sched
         .domain::<MediaDomain>()
-        .submit_raw(
-            TaskSubmission::new("parent")
-                .key("media-parent-cascade")
-                .fail_fast(true),
-        )
+        .submit_with(MediaParentTask)
+        .key("media-parent-cascade")
         .await
         .unwrap();
 
@@ -483,7 +489,7 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
         async fn execute<'a>(
             &'a self,
             _payload: AlphaWorkTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, AlphaDomain>,
         ) -> Result<(), TaskError> {
             self.0.wait().await;
             tokio::select! {
@@ -500,7 +506,7 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
         async fn execute<'a>(
             &'a self,
             _payload: BetaWorkTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, BetaDomain>,
         ) -> Result<(), TaskError> {
             self.0.wait().await;
             tokio::select! {
@@ -527,12 +533,14 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
 
     sched
         .domain::<AlphaDomain>()
-        .submit_raw(TaskSubmission::new("work").key("a1"))
+        .submit_with(AlphaWorkTask)
+        .key("a1")
         .await
         .unwrap();
     sched
         .domain::<BetaDomain>()
-        .submit_raw(TaskSubmission::new("work").key("b1"))
+        .submit_with(BetaWorkTask)
+        .key("b1")
         .await
         .unwrap();
 
@@ -578,28 +586,25 @@ async fn cross_domain_cancel_by_tag_via_domain_handles() {
 
     // Tagged tasks — targets for cross-module cancel.
     let alpha_tagged = alpha
-        .submit_raw(
-            TaskSubmission::new("work")
-                .key("a-tagged")
-                .tag("job_id", "job-1"),
-        )
+        .submit_with(AlphaWorkTask)
+        .key("a-tagged")
+        .tag("job_id", "job-1")
         .await
         .unwrap()
         .id()
         .unwrap();
     let beta_tagged = beta
-        .submit_raw(
-            TaskSubmission::new("work")
-                .key("b-tagged")
-                .tag("job_id", "job-1"),
-        )
+        .submit_with(BetaWorkTask)
+        .key("b-tagged")
+        .tag("job_id", "job-1")
         .await
         .unwrap()
         .id()
         .unwrap();
     // Untagged task — must survive.
     let alpha_untagged = alpha
-        .submit_raw(TaskSubmission::new("work").key("a-untagged"))
+        .submit_with(AlphaWorkTask)
+        .key("a-untagged")
         .await
         .unwrap()
         .id()
@@ -664,19 +669,18 @@ async fn parent_method_inherits_ttl_and_tags() {
 
     // Submit parent with a 60-second TTL and a custom tag.
     let parent_outcome = media
-        .submit_raw(
-            TaskSubmission::new("parent")
-                .key("ttl-parent")
-                .ttl(Duration::from_secs(60))
-                .tag("job", "pipeline-42"),
-        )
+        .submit_with(MediaParentTask)
+        .key("ttl-parent")
+        .ttl(Duration::from_secs(60))
+        .tag("job", "pipeline-42")
         .await
         .unwrap();
     let parent_id = parent_outcome.id().unwrap();
 
     // Submit child with .parent() — no explicit TTL or tags on the child.
     let child_outcome = media
-        .submit_raw(TaskSubmission::new("child").key("ttl-child"))
+        .submit_with(MediaChildTask)
+        .key("ttl-child")
         .parent(parent_id)
         .await
         .unwrap();
@@ -700,11 +704,9 @@ async fn parent_method_inherits_ttl_and_tags() {
     // Child's own tags take precedence — a tag set directly on the child
     // should not be overwritten by the parent tag with the same key.
     let child2_outcome = media
-        .submit_raw(
-            TaskSubmission::new("child")
-                .key("ttl-child-2")
-                .tag("job", "child-override"),
-        )
+        .submit_with(MediaChildTask)
+        .key("ttl-child-2")
+        .tag("job", "child-override")
         .parent(parent_id)
         .await
         .unwrap();
@@ -738,7 +740,8 @@ async fn event_header_module_field_populated_from_task_type_prefix() {
 
     sched
         .domain::<MediaDomain>()
-        .submit_raw(TaskSubmission::new("thumbnail").key("thumb-1"))
+        .submit_with(MediaThumbnailTask)
+        .key("thumb-1")
         .await
         .unwrap();
 
@@ -790,11 +793,13 @@ async fn module_receiver_events_match_module_field() {
     let sync_handle = sched.domain::<SyncDomain>();
     for i in 0..2 {
         media
-            .submit_raw(TaskSubmission::new("thumbnail").key(format!("t{i}")))
+            .submit_with(MediaThumbnailTask)
+            .key(format!("t{i}"))
             .await
             .unwrap();
         sync_handle
-            .submit_raw(TaskSubmission::new("push").key(format!("p{i}")))
+            .submit_with(PushTask)
+            .key(format!("p{i}"))
             .await
             .unwrap();
     }
