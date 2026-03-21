@@ -9,7 +9,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use pprof::criterion::{Output, PProfProfiler};
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
+    Domain, DomainKey, DomainTaskContext, Scheduler, SchedulerEvent, TaskError, TaskStore,
     TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
@@ -30,7 +30,11 @@ impl TypedTask for BenchTask {
 struct NoopExecutor;
 
 impl TypedExecutor<BenchTask> for NoopExecutor {
-    async fn execute(&self, _payload: BenchTask, _ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: BenchTask,
+        _ctx: DomainTaskContext<'a, BenchDomain>,
+    ) -> Result<(), TaskError> {
         Ok(())
     }
 }

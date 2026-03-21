@@ -71,7 +71,7 @@
 //! - **`Supersede`** — cancel the existing task (recording it in history as
 //!   [`HistoryStatus::Superseded`]) and replace it with the new submission.
 //!   For running tasks the cancellation token is fired, the
-//!   [`on_cancel`](TaskExecutor::on_cancel) hook runs, and children are
+//!   [`on_cancel`](TypedExecutor::on_cancel) hook runs, and children are
 //!   cascade-cancelled. Returns [`SubmitOutcome::Superseded`].
 //! - **`Reject`** — return [`SubmitOutcome::Rejected`] without modifying the
 //!   existing task.
@@ -124,7 +124,7 @@
 //! An executor can spawn child tasks via [`TaskContext::spawn_child`]. When
 //! children exist, the parent enters a **waiting** state after its executor
 //! returns. Once all children complete, the parent's
-//! [`TaskExecutor::finalize`] method is called — useful for assembly work
+//! [`TypedExecutor::finalize`] method is called — useful for assembly work
 //! like `CompleteMultipartUpload`. If any child fails and
 //! [`fail_fast`](TaskSubmission::fail_fast) is `true` (the default), siblings
 //! are cancelled and the parent fails immediately.
@@ -332,7 +332,7 @@
 //! struct ThumbnailExecutor;
 //!
 //! impl TypedExecutor<Thumbnail> for ThumbnailExecutor {
-//!     async fn execute(&self, thumb: Thumbnail, ctx: &TaskContext) -> Result<(), TaskError> {
+//!     async fn execute(&self, thumb: Thumbnail, ctx: DomainTaskContext<'_, Media>) -> Result<(), TaskError> {
 //!         ctx.progress().report(0.5, Some("resizing".into()));
 //!         // ... do work, check ctx.token().is_cancelled() ...
 //!         ctx.record_read_bytes(4_096);
@@ -387,7 +387,7 @@
 //!     .await?;
 //!
 //! // Inside an ingest executor — domain state checked first, then global:
-//! async fn execute(&self, task: FetchTask, ctx: &TaskContext) -> Result<(), TaskError> {
+//! async fn execute(&self, task: FetchTask, ctx: DomainTaskContext<'_, Ingest>) -> Result<(), TaskError> {
 //!     let cfg = ctx.state::<IngestConfig>().expect("IngestConfig not registered");
 //!     let svc = ctx.state::<AppServices>().expect("AppServices not registered");
 //!     svc.db.query("...").await?;
@@ -510,7 +510,7 @@
 //! ```
 //!
 //! For untyped batch submission with batch-wide defaults, use [`BatchSubmission`]
-//! and [`DomainHandle::submit_raw`].
+//! and [`Scheduler::submit_built`].
 //!
 //! A [`SchedulerEvent::BatchSubmitted`] event is emitted for observability
 //! whenever at least one task in the batch was inserted.
@@ -524,21 +524,17 @@
 //!
 //! ```ignore
 //! impl TypedExecutor<MultipartUpload> for MultipartUploadExecutor {
-//!     async fn execute(&self, upload: MultipartUpload, ctx: &TaskContext) -> Result<(), TaskError> {
+//!     async fn execute(&self, upload: MultipartUpload, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
 //!         for part in &upload.parts {
-//!             // "upload-part" is prefixed with the owning domain name automatically.
-//!             ctx.spawn_child(
-//!                 TaskSubmission::new("upload-part")
-//!                     .key(&part.etag)
-//!                     .priority(ctx.record().priority)
-//!                     .payload_json(part)
-//!                     .expected_io(IoBudget::disk(part.size as i64, 0)),
-//!             ).await?;
+//!             ctx.spawn_child_with(UploadPart { etag: part.etag.clone(), size: part.size })
+//!                 .key(&part.etag)
+//!                 .priority(ctx.record().priority)
+//!                 .await?;
 //!         }
 //!         Ok(())
 //!     }
 //!
-//!     async fn finalize(&self, upload: MultipartUpload, ctx: &TaskContext) -> Result<(), TaskError> {
+//!     async fn finalize(&self, upload: MultipartUpload, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
 //!         // All parts uploaded — complete the multipart upload.
 //!         complete_multipart(&upload).await?;
 //!         Ok(())
@@ -562,7 +558,7 @@
 //!
 //! ```ignore
 //! impl TypedExecutor<Upload> for UploadExecutor {
-//!     async fn execute(&self, upload: Upload, ctx: &TaskContext) -> Result<(), TaskError> {
+//!     async fn execute(&self, upload: Upload, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
 //!         // Cooperatively check for cancellation in long loops.
 //!         for chunk in upload.chunks() {
 //!             ctx.check_cancelled()?;
@@ -571,7 +567,7 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn on_cancel(&self, upload: Upload, ctx: &TaskContext) -> Result<(), TaskError> {
+//!     async fn on_cancel(&self, upload: Upload, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
 //!         // Abort the in-progress multipart upload.
 //!         abort_multipart(&upload.upload_id).await?;
 //!         Ok(())
@@ -638,10 +634,19 @@
 //!     .run_after(Duration::from_secs(30))
 //!     .await?;
 //!
-//! // For recurring or complex scheduling, use `submit_raw` with TaskSubmission:
-//! media.submit_raw(TaskSubmission::new("cleanup")
+//! // For recurring scheduling, configure it in `TypedTask::config()`:
+//! // impl TypedTask for Cleanup {
+//! //     fn config() -> TaskTypeConfig {
+//! //         TaskTypeConfig::new().recurring(RecurringSchedule {
+//! //             interval: Duration::from_secs(6 * 3600),
+//! //             initial_delay: None,
+//! //             max_executions: None,
+//! //         })
+//! //     }
+//! // }
+//! media.submit_with(Cleanup { target: "stale-uploads".into() })
 //!     .key("stale-uploads")
-//!     .recurring(Duration::from_secs(6 * 3600))).await?;
+//!     .await?;
 //!
 //! // Pause/resume/cancel recurring schedules via the domain handle.
 //! media.pause_recurring(task_id).await?;
@@ -784,11 +789,11 @@ pub use domain::{
     Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskEvent, TaskTypeConfig,
     TaskTypeOptions, TypedEventStream, TypedExecutor,
 };
+pub use registry::{ChildSpawnBuilder, DomainTaskContext};
 
 // ── Core re-exports ──────────────────────────────────────────────────
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};
 pub use priority::Priority;
-pub use registry::{TaskContext, TaskExecutor};
 pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};

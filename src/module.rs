@@ -895,7 +895,7 @@ mod tests {
 
     use crate::domain::{Domain, DomainKey, TypedExecutor};
     use crate::priority::Priority;
-    use crate::registry::TaskContext;
+    use crate::registry::DomainTaskContext;
     use crate::task::retry::{BackoffStrategy, RetryPolicy};
     use crate::task::{TaskError, TypedTask};
 
@@ -907,7 +907,7 @@ mod tests {
         async fn execute<'a>(
             &'a self,
             _payload: T,
-            _ctx: &'a TaskContext,
+            _ctx: DomainTaskContext<'a, T::Domain>,
         ) -> Result<(), TaskError> {
             Ok(())
         }

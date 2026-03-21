@@ -11,6 +11,7 @@
 
 pub(crate) mod child_spawner;
 mod context;
+mod domain_context;
 pub(crate) mod io_tracker;
 pub(crate) mod state;
 
@@ -22,7 +23,8 @@ use crate::task::retry::RetryPolicy;
 use crate::task::TaskError;
 
 pub(crate) use child_spawner::{ChildSpawner, ParentContext};
-pub use context::TaskContext;
+pub(crate) use context::TaskContext;
+pub use domain_context::{ChildSpawnBuilder, DomainTaskContext};
 pub(crate) use io_tracker::IoTracker;
 pub(crate) use state::{StateMap, StateSnapshot};
 
@@ -53,7 +55,7 @@ pub(crate) use state::{StateMap, StateSnapshot};
 ///     }
 /// }
 /// ```
-pub trait TaskExecutor: Send + Sync + 'static {
+pub(crate) trait TaskExecutor: Send + Sync + 'static {
     /// Execute a task.
     ///
     /// - `ctx`: Execution context with the task record, cancellation token,
@@ -163,40 +165,6 @@ impl TaskTypeRegistry {
         }
     }
 
-    /// Register an executor for a named task type.
-    ///
-    /// Panics if the name is already registered (catch configuration errors
-    /// at startup, not at runtime).
-    pub fn register<E: TaskExecutor>(&mut self, name: &str, executor: Arc<E>) {
-        if self.types.contains_key(name) {
-            panic!("task type '{name}' already registered");
-        }
-        self.types
-            .insert(name.to_string(), executor as Arc<dyn ErasedExecutor>);
-    }
-
-    /// Register an executor with a per-type default TTL.
-    pub fn register_with_ttl<E: TaskExecutor>(
-        &mut self,
-        name: &str,
-        executor: Arc<E>,
-        ttl: std::time::Duration,
-    ) {
-        self.register(name, executor);
-        self.type_ttls.insert(name.to_string(), ttl);
-    }
-
-    /// Register an executor with a per-type retry policy.
-    pub fn register_with_retry_policy<E: TaskExecutor>(
-        &mut self,
-        name: &str,
-        executor: Arc<E>,
-        policy: RetryPolicy,
-    ) {
-        self.register(name, executor);
-        self.type_retry_policies.insert(name.to_string(), policy);
-    }
-
     /// Look up the per-type default TTL for a task type.
     pub fn type_ttl(&self, name: &str) -> Option<&std::time::Duration> {
         self.type_ttls.get(name)
@@ -295,7 +263,7 @@ mod tests {
         async fn execute<'a>(
             &'a self,
             _payload: NoopTask,
-            _ctx: &'a TaskContext,
+            _ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             Ok(())
         }

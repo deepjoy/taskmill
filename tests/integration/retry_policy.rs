@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    BackoffStrategy, Domain, RetryPolicy, Scheduler, SchedulerEvent, TaskContext, TaskError,
-    TaskStore, TaskSubmission, TaskTypeConfig, TypedExecutor, TypedTask,
+    BackoffStrategy, Domain, DomainTaskContext, RetryPolicy, Scheduler, SchedulerEvent, TaskError,
+    TaskStore, TaskTypeConfig, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -89,7 +89,11 @@ define_task!(RetryOverrideTask, TestDomain, "retry-override");
 struct AlwaysRetryableTypedExec;
 
 impl<T: TypedTask> TypedExecutor<T> for AlwaysRetryableTypedExec {
-    async fn execute<'a>(&'a self, _payload: T, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        _ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         Err(TaskError::retryable("transient"))
     }
 }
@@ -101,7 +105,7 @@ impl TypedExecutor<LegacyTask> for AlwaysRetryableExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: LegacyTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, TestDomain>,
     ) -> Result<(), TaskError> {
         Err(TaskError::retryable("transient"))
     }
@@ -114,7 +118,7 @@ impl TypedExecutor<RetryOverrideTask> for RetryAfterExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: RetryOverrideTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, TestDomain>,
     ) -> Result<(), TaskError> {
         Err(TaskError::retryable("rate limited").retry_after(self.0))
     }
@@ -349,8 +353,10 @@ async fn failed_event_includes_executor_retry_after_override() {
         async move { s.run(t).await }
     });
 
-    sched
-        .submit(&TaskSubmission::new("test::retry-override").key("ro1"))
+    let test_handle = sched.domain::<TestDomain>();
+    test_handle
+        .submit_with(RetryOverrideTask)
+        .key("ro1")
         .await
         .unwrap();
 
@@ -403,8 +409,10 @@ async fn null_max_retries_uses_global_default() {
         async move { s.run(t).await }
     });
 
-    sched
-        .submit(&TaskSubmission::new("test::legacy").key("leg1"))
+    let test_handle = sched.domain::<TestDomain>();
+    test_handle
+        .submit_with(LegacyTask)
+        .key("leg1")
         .await
         .unwrap();
 

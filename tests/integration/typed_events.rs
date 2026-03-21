@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainHandle, Scheduler, TaskContext, TaskError, TaskEvent, TaskStore, TypedExecutor,
-    TypedTask,
+    Domain, DomainHandle, DomainTaskContext, Scheduler, TaskError, TaskEvent, TaskStore,
+    TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -32,7 +32,7 @@ impl TypedExecutor<Thumbnail> for ThumbnailExec {
     async fn execute<'a>(
         &'a self,
         _payload: Thumbnail,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         Ok(())
     }
@@ -54,7 +54,7 @@ impl TypedExecutor<FailingTask> for AlwaysFailTypedExec {
     async fn execute<'a>(
         &'a self,
         _payload: FailingTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         Err(TaskError::new("permanent failure"))
     }
@@ -247,7 +247,7 @@ impl TypedExecutor<Thumbnail> for CrossDomainTypedExec {
     async fn execute<'a>(
         &'a self,
         thumb: Thumbnail,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         let sync: DomainHandle<SyncDomain> = ctx.domain::<SyncDomain>();
         sync.submit(UploadTask {
@@ -268,7 +268,7 @@ impl TypedExecutor<UploadTask> for UploadExec {
     async fn execute<'a>(
         &'a self,
         _payload: UploadTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, SyncDomain>,
     ) -> Result<(), TaskError> {
         self.ran.store(true, Ordering::SeqCst);
         Ok(())
@@ -336,7 +336,7 @@ impl TypedExecutor<Thumbnail> for DomainStateExec {
     async fn execute<'a>(
         &'a self,
         _payload: Thumbnail,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, MediaDomain>,
     ) -> Result<(), TaskError> {
         let cfg = ctx
             .domain_state::<MediaDomain, MediaConfig>()

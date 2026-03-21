@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use taskmill::{
-    Domain, Priority, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore, TaskSubmission,
+    Domain, DomainTaskContext, Priority, Scheduler, SchedulerEvent, TaskError, TaskStore,
     TaskTypeConfig, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
@@ -133,7 +133,8 @@ async fn module_cap_limits_concurrency_to_2() {
     let media = sched.domain::<MediaDomain>();
     for i in 0..5 {
         media
-            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_with(MediaWorkTask)
+            .key(format!("t{i}"))
             .await
             .unwrap();
     }
@@ -194,11 +195,9 @@ async fn module_cap_and_group_cap_are_independent() {
     // Submit 6 tasks all in the "gpu" group — group cap is the binding constraint.
     for i in 0..6 {
         media
-            .submit_raw(
-                TaskSubmission::new("work")
-                    .key(format!("t{i}"))
-                    .group("gpu"),
-            )
+            .submit_with(MediaWorkTask)
+            .key(format!("t{i}"))
+            .group("gpu")
             .await
             .unwrap();
     }
@@ -256,7 +255,8 @@ async fn ungrouped_task_respects_module_cap() {
     let media = sched.domain::<MediaDomain>();
     for i in 0..7 {
         media
-            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_with(MediaWorkTask)
+            .key(format!("t{i}"))
             .await
             .unwrap();
     }
@@ -325,10 +325,12 @@ async fn global_cap_is_hard_ceiling_over_module_caps() {
     let sync = sched.domain::<SyncDomain>();
     for i in 0..5 {
         media
-            .submit_raw(TaskSubmission::new("work").key(format!("m{i}")))
+            .submit_with(MediaWorkTask)
+            .key(format!("m{i}"))
             .await
             .unwrap();
-        sync.submit_raw(TaskSubmission::new("work").key(format!("s{i}")))
+        sync.submit_with(SyncWorkTask)
+            .key(format!("s{i}"))
             .await
             .unwrap();
     }
@@ -395,7 +397,8 @@ async fn set_max_concurrency_changes_dispatch_behavior() {
 
     for i in 0..6 {
         media
-            .submit_raw(TaskSubmission::new("work").key(format!("t{i}")))
+            .submit_with(MediaWorkTask)
+            .key(format!("t{i}"))
             .await
             .unwrap();
     }
@@ -443,7 +446,11 @@ async fn module_state_is_scoped_to_module() {
         no_b: Arc<AtomicBool>,
     }
     impl<T: TypedTask> TypedExecutor<T> for CheckerExec {
-        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        async fn execute<'a>(
+            &'a self,
+            _payload: T,
+            ctx: DomainTaskContext<'a, T::Domain>,
+        ) -> Result<(), TaskError> {
             self.saw_a
                 .store(ctx.state::<ConfigA>().is_some(), Ordering::SeqCst);
             if ctx.state::<ConfigB>().is_some() {
@@ -475,7 +482,8 @@ async fn module_state_is_scoped_to_module() {
 
     sched
         .domain::<DomainA>()
-        .submit_raw(TaskSubmission::new("task").key("t1"))
+        .submit_with(DomainATask)
+        .key("t1")
         .await
         .unwrap();
 
@@ -518,7 +526,11 @@ async fn global_state_accessible_from_all_modules() {
 
     struct GlobalChecker(Arc<AtomicBool>);
     impl<T: TypedTask> TypedExecutor<T> for GlobalChecker {
-        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        async fn execute<'a>(
+            &'a self,
+            _payload: T,
+            ctx: DomainTaskContext<'a, T::Domain>,
+        ) -> Result<(), TaskError> {
             self.0
                 .store(ctx.state::<SharedConfig>().is_some(), Ordering::SeqCst);
             Ok(())
@@ -537,12 +549,14 @@ async fn global_state_accessible_from_all_modules() {
 
     sched
         .domain::<DomainA>()
-        .submit_raw(TaskSubmission::new("task").key("ta"))
+        .submit_with(DomainATask)
+        .key("ta")
         .await
         .unwrap();
     sched
         .domain::<DomainB>()
-        .submit_raw(TaskSubmission::new("task").key("tb"))
+        .submit_with(DomainBTask)
+        .key("tb")
         .await
         .unwrap();
 
@@ -583,7 +597,11 @@ async fn module_state_shadows_global_state() {
 
     struct ValueCapture(Arc<std::sync::Mutex<String>>);
     impl<T: TypedTask> TypedExecutor<T> for ValueCapture {
-        async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+        async fn execute<'a>(
+            &'a self,
+            _payload: T,
+            ctx: DomainTaskContext<'a, T::Domain>,
+        ) -> Result<(), TaskError> {
             if let Some(cfg) = ctx.state::<Config>() {
                 *self.0.lock().unwrap() = cfg.0.clone();
             }
@@ -607,12 +625,14 @@ async fn module_state_shadows_global_state() {
 
     sched
         .domain::<DomainA>()
-        .submit_raw(TaskSubmission::new("task").key("ta"))
+        .submit_with(DomainATask)
+        .key("ta")
         .await
         .unwrap();
     sched
         .domain::<DomainB>()
-        .submit_raw(TaskSubmission::new("task").key("tb"))
+        .submit_with(DomainBTask)
+        .key("tb")
         .await
         .unwrap();
 

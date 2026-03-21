@@ -250,7 +250,7 @@ impl Scheduler {
     ///
     /// Records the task in history as `cancelled` (instead of silently
     /// deleting). For running/waiting tasks, triggers the cancellation
-    /// token, fires the [`on_cancel`](crate::TaskExecutor::on_cancel) hook,
+    /// token, fires the [`on_cancel`](crate::TypedExecutor::on_cancel) hook,
     /// and emits a [`SchedulerEvent::Cancelled`] event. Returns `true` if
     /// the task was found and cancelled.
     pub async fn cancel(&self, task_id: i64) -> Result<bool, StoreError> {

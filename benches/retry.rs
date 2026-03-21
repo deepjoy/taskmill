@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use serde::{Deserialize, Serialize};
 use taskmill::{
-    BackoffStrategy, Domain, DomainKey, RetryPolicy, Scheduler, SchedulerEvent, TaskContext,
+    BackoffStrategy, Domain, DomainKey, DomainTaskContext, RetryPolicy, Scheduler, SchedulerEvent,
     TaskError, TaskStore, TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
@@ -34,7 +34,11 @@ impl TypedTask for FailTask {
 struct FailPermanentExecutor;
 
 impl TypedExecutor<FailTask> for FailPermanentExecutor {
-    async fn execute(&self, _payload: FailTask, _ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: FailTask,
+        _ctx: DomainTaskContext<'a, BenchDomain>,
+    ) -> Result<(), TaskError> {
         Err(TaskError::permanent("bench: permanent failure"))
     }
 }
@@ -42,7 +46,11 @@ impl TypedExecutor<FailTask> for FailPermanentExecutor {
 struct FailRetryableExecutor;
 
 impl TypedExecutor<FailTask> for FailRetryableExecutor {
-    async fn execute(&self, _payload: FailTask, _ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: FailTask,
+        _ctx: DomainTaskContext<'a, BenchDomain>,
+    ) -> Result<(), TaskError> {
         Err(TaskError::retryable("bench: transient failure"))
     }
 }

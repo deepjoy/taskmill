@@ -35,6 +35,7 @@ use chrono::{DateTime, Utc};
 use crate::priority::Priority;
 use crate::scheduler::Scheduler;
 use crate::store::StoreError;
+use crate::task::submission::DependencyFailurePolicy;
 use crate::task::{SubmitOutcome, TaskSubmission, TtlFrom};
 
 /// Module-level defaults applied to every submission through a module handle.
@@ -108,6 +109,7 @@ pub struct SubmitBuilder {
     override_run_after: Option<DateTime<Utc>>,
     override_ttl: Option<Duration>,
     override_depends_on: Vec<i64>,
+    override_on_dependency_failure: Option<DependencyFailurePolicy>,
     override_tags: HashMap<String, String>,
     override_parent_id: Option<i64>,
 }
@@ -135,6 +137,7 @@ impl SubmitBuilder {
             override_run_after: None,
             override_ttl: None,
             override_depends_on: Vec::new(),
+            override_on_dependency_failure: None,
             override_tags: HashMap::new(),
             override_parent_id: None,
         }
@@ -193,6 +196,12 @@ impl SubmitBuilder {
     /// Add multiple task dependencies. Merged with existing.
     pub fn depends_on_all(mut self, ids: impl IntoIterator<Item = i64>) -> Self {
         self.override_depends_on.extend(ids);
+        self
+    }
+
+    /// Set the dependency failure policy (`Cancel`, `Fail`, or `Ignore`).
+    pub fn on_dependency_failure(mut self, policy: DependencyFailurePolicy) -> Self {
+        self.override_on_dependency_failure = Some(policy);
         self
     }
 
@@ -330,6 +339,9 @@ impl SubmitBuilder {
             self.submission
                 .dependencies
                 .append(&mut self.override_depends_on);
+        }
+        if let Some(p) = self.override_on_dependency_failure.take() {
+            self.submission.on_dependency_failure = p;
         }
         for (k, v) in std::mem::take(&mut self.override_tags) {
             self.submission.tags.insert(k, v);

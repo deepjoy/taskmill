@@ -250,7 +250,7 @@ pub struct SchedulerConfig {
     /// When set, a background task polls active tasks' byte counters at this
     /// interval and emits [`TaskProgress`] events on a dedicated channel.
     pub progress_interval: Option<Duration>,
-    /// Timeout for [`TaskExecutor::on_cancel`](crate::TaskExecutor::on_cancel)
+    /// Timeout for [`TypedExecutor::on_cancel`](crate::TypedExecutor::on_cancel)
     /// hooks. If a cancel hook does not complete within this duration it is
     /// aborted. Default: 30 seconds.
     pub cancel_hook_timeout: Duration,

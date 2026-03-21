@@ -535,11 +535,7 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .task::<ParentTask>(ChildSpawnerExecutor {
-                    child_type: "child",
-                    count: 3,
-                    fail_fast: true,
-                })
+                .task::<ParentTask>(ChildSpawnerExecutor::<ChildTask>::new(3))
                 .task::<ChildTask>(AlwaysFailExecutor),
         )
         .max_concurrency(4)
@@ -593,10 +589,7 @@ async fn non_fail_fast_waits_for_all_children() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .task::<ParentTask>(FinalizeTracker {
-                    child_count: 2,
-                    finalized: finalized.clone(),
-                })
+                .task::<ParentTask>(FinalizeTracker::<ChildTask>::new(2, finalized.clone()))
                 .task::<ChildTask>(NoopExecutor),
         )
         .max_concurrency(4)

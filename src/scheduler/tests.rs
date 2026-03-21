@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{Domain, DomainKey, TypedExecutor};
 use crate::priority::Priority;
-use crate::registry::TaskContext;
+use crate::registry::DomainTaskContext;
 use crate::store::TaskStore;
 use crate::task::{
     DuplicateStrategy, HistoryStatus, SubmitOutcome, TaskError, TaskSubmission, TypedTask,
@@ -96,7 +96,11 @@ impl TypedTask for BetaTask {
 struct InstantExecutor;
 
 impl<T: TypedTask> TypedExecutor<T> for InstantExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         ctx.record_read_bytes(100);
         ctx.record_write_bytes(50);
         Ok(())
@@ -106,7 +110,11 @@ impl<T: TypedTask> TypedExecutor<T> for InstantExecutor {
 struct SlowExecutor;
 
 impl<T: TypedTask> TypedExecutor<T> for SlowExecutor {
-    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn execute<'a>(
+        &'a self,
+        _payload: T,
+        ctx: DomainTaskContext<'a, T::Domain>,
+    ) -> Result<(), TaskError> {
         tokio::select! {
             _ = ctx.token().cancelled() => {
                 Err(TaskError::new("cancelled"))
@@ -129,7 +137,7 @@ impl TypedExecutor<TestTask> for CancelHookExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: TestTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, TestDomain>,
     ) -> Result<(), TaskError> {
         tokio::select! {
             _ = ctx.token().cancelled() => {
@@ -144,7 +152,7 @@ impl TypedExecutor<TestTask> for CancelHookExecutor {
     async fn on_cancel<'a>(
         &'a self,
         _payload: TestTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, TestDomain>,
     ) -> Result<(), TaskError> {
         self.cancel_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -159,7 +167,7 @@ impl TypedExecutor<TestTask> for FailingExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: TestTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, TestDomain>,
     ) -> Result<(), TaskError> {
         Err(TaskError::retryable("boom"))
     }
@@ -458,7 +466,7 @@ async fn app_state_accessible_from_executor() {
         async fn execute<'a>(
             &'a self,
             _payload: TestTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             let state = ctx.state::<MyState>().expect("state should be set");
             state.flag.store(true, Ordering::SeqCst);
@@ -567,14 +575,14 @@ impl TypedExecutor<ParentTask> for SpawningExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: ParentTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, ParentDomain>,
     ) -> Result<(), TaskError> {
         for i in 0..self.num_children {
             let sub = TaskSubmission::new("child")
                 .key(format!("child-{i}"))
                 .priority(ctx.record().priority)
                 .payload_json(&ChildTask);
-            ctx.spawn_child(sub).await?;
+            ctx.inner.spawn_child(sub).await?;
         }
         Ok(())
     }
@@ -590,14 +598,14 @@ impl TypedExecutor<ParentTask> for FinalizeTrackingExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: ParentTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, ParentDomain>,
     ) -> Result<(), TaskError> {
         for i in 0..self.children {
             let sub = TaskSubmission::new("child")
                 .key(format!("ft-child-{i}"))
                 .priority(ctx.record().priority)
                 .payload_json(&ChildTask);
-            ctx.spawn_child(sub).await?;
+            ctx.inner.spawn_child(sub).await?;
         }
         Ok(())
     }
@@ -605,7 +613,7 @@ impl TypedExecutor<ParentTask> for FinalizeTrackingExecutor {
     async fn finalize<'a>(
         &'a self,
         _payload: ParentTask,
-        _ctx: &'a TaskContext,
+        _ctx: DomainTaskContext<'a, ParentDomain>,
     ) -> Result<(), TaskError> {
         self.finalized
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -844,7 +852,7 @@ impl TypedExecutor<ByteTestTask> for ByteProgressExecutor {
     async fn execute<'a>(
         &'a self,
         _payload: ByteTestTask,
-        ctx: &'a TaskContext,
+        ctx: DomainTaskContext<'a, ByteTestDomain>,
     ) -> Result<(), TaskError> {
         ctx.set_bytes_total(1_048_576);
         for _ in 0..1024 {
@@ -1283,7 +1291,7 @@ async fn on_cancel_hook_timeout_does_not_block() {
         async fn execute<'a>(
             &'a self,
             _payload: TestTask,
-            ctx: &'a TaskContext,
+            ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             tokio::select! {
                 _ = ctx.token().cancelled() => Err(TaskError::new("cancelled")),
@@ -1294,7 +1302,7 @@ async fn on_cancel_hook_timeout_does_not_block() {
         async fn on_cancel<'a>(
             &'a self,
             _payload: TestTask,
-            _ctx: &'a TaskContext,
+            _ctx: DomainTaskContext<'a, TestDomain>,
         ) -> Result<(), TaskError> {
             // Simulate a very slow cancel hook.
             tokio::time::sleep(Duration::from_secs(60)).await;
