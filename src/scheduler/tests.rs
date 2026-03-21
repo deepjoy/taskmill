@@ -1,20 +1,102 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::backpressure::{CompositePressure, ThrottlePolicy};
+use crate::domain::{Domain, DomainKey, TypedExecutor};
 use crate::priority::Priority;
-use crate::registry::{TaskContext, TaskExecutor, TaskTypeRegistry};
+use crate::registry::TaskContext;
 use crate::store::TaskStore;
-use crate::task::{DuplicateStrategy, HistoryStatus, SubmitOutcome, TaskError, TaskSubmission};
+use crate::task::{
+    DuplicateStrategy, HistoryStatus, SubmitOutcome, TaskError, TaskSubmission, TypedTask,
+};
 
-use super::{Scheduler, SchedulerConfig, SchedulerEvent, TaskProgress};
+use super::{Scheduler, SchedulerEvent, TaskProgress};
+
+// ── Domain & task type definitions ──────────────────────────────────
+
+struct TestDomain;
+impl DomainKey for TestDomain {
+    const NAME: &'static str = "test";
+}
+
+struct ParentDomain;
+impl DomainKey for ParentDomain {
+    const NAME: &'static str = "parent";
+}
+
+// ChildTask lives in ParentDomain so spawn_child (which prefixes with
+// the owning module) produces "parent::child" — matching the registration.
+
+struct ByteTestDomain;
+impl DomainKey for ByteTestDomain {
+    const NAME: &'static str = "byte-test";
+}
+
+struct AlphaDomain;
+impl DomainKey for AlphaDomain {
+    const NAME: &'static str = "alpha";
+}
+
+struct BetaDomain;
+impl DomainKey for BetaDomain {
+    const NAME: &'static str = "beta";
+}
+
+struct UnknownDomain;
+impl DomainKey for UnknownDomain {
+    const NAME: &'static str = "unknown";
+}
+
+#[derive(Serialize, Deserialize)]
+struct TestTask;
+impl TypedTask for TestTask {
+    type Domain = TestDomain;
+    const TASK_TYPE: &'static str = "test";
+}
+
+#[derive(Serialize, Deserialize)]
+struct ParentTask;
+impl TypedTask for ParentTask {
+    type Domain = ParentDomain;
+    const TASK_TYPE: &'static str = "parent";
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChildTask;
+impl TypedTask for ChildTask {
+    type Domain = ParentDomain;
+    const TASK_TYPE: &'static str = "child";
+}
+
+#[derive(Serialize, Deserialize)]
+struct ByteTestTask;
+impl TypedTask for ByteTestTask {
+    type Domain = ByteTestDomain;
+    const TASK_TYPE: &'static str = "byte-test";
+}
+
+#[derive(Serialize, Deserialize)]
+struct AlphaTask;
+impl TypedTask for AlphaTask {
+    type Domain = AlphaDomain;
+    const TASK_TYPE: &'static str = "alpha";
+}
+
+#[derive(Serialize, Deserialize)]
+struct BetaTask;
+impl TypedTask for BetaTask {
+    type Domain = BetaDomain;
+    const TASK_TYPE: &'static str = "beta";
+}
+
+// ── Executors ───────────────────────────────────────────────────────
 
 struct InstantExecutor;
 
-impl TaskExecutor for InstantExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl<T: TypedTask> TypedExecutor<T> for InstantExecutor {
+    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
         ctx.record_read_bytes(100);
         ctx.record_write_bytes(50);
         Ok(())
@@ -23,8 +105,8 @@ impl TaskExecutor for InstantExecutor {
 
 struct SlowExecutor;
 
-impl TaskExecutor for SlowExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl<T: TypedTask> TypedExecutor<T> for SlowExecutor {
+    async fn execute<'a>(&'a self, _payload: T, ctx: &'a TaskContext) -> Result<(), TaskError> {
         tokio::select! {
             _ = ctx.token().cancelled() => {
                 Err(TaskError::new("cancelled"))
@@ -43,8 +125,12 @@ struct CancelHookExecutor {
     cancel_called: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl TaskExecutor for CancelHookExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<TestTask> for CancelHookExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: TestTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         tokio::select! {
             _ = ctx.token().cancelled() => {
                 Err(TaskError::new("cancelled"))
@@ -55,7 +141,11 @@ impl TaskExecutor for CancelHookExecutor {
         }
     }
 
-    async fn on_cancel<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn on_cancel<'a>(
+        &'a self,
+        _payload: TestTask,
+        _ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         self.cancel_called
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -65,38 +155,37 @@ impl TaskExecutor for CancelHookExecutor {
 #[allow(dead_code)]
 struct FailingExecutor;
 
-impl TaskExecutor for FailingExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<TestTask> for FailingExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: TestTask,
+        _ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         Err(TaskError::retryable("boom"))
     }
 }
 
-async fn setup(executor: Arc<dyn crate::registry::ErasedExecutor>) -> Scheduler {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("test", executor);
-
-    Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    )
+async fn setup(executor: impl TypedExecutor<TestTask>) -> Scheduler {
+    Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(executor))
+        .build()
+        .await
+        .unwrap()
 }
 
-fn arc_erased<E: TaskExecutor>(e: E) -> Arc<dyn crate::registry::ErasedExecutor> {
-    Arc::new(e) as Arc<dyn crate::registry::ErasedExecutor>
+/// Helper: create a test-domain submission with a serialized `TestTask` payload.
+fn test_sub(key: &str) -> TaskSubmission {
+    TaskSubmission::new("test::test")
+        .key(key)
+        .payload_json(&TestTask)
 }
 
 #[tokio::test]
 async fn dispatch_executes_task() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    sched
-        .submit(&TaskSubmission::new("test").key("k1"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("k1")).await.unwrap();
 
     let dispatched = sched.try_dispatch().await.unwrap();
     assert!(dispatched);
@@ -105,7 +194,7 @@ async fn dispatch_executes_task() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Task should be completed and in history.
-    let k1 = crate::task::generate_dedup_key("test", Some(b"k1"));
+    let k1 = crate::task::generate_dedup_key("test::test", Some(b"k1"));
     assert!(sched.store().task_by_key(&k1).await.unwrap().is_none());
     let hist = sched.store().history_by_key(&k1).await.unwrap();
     assert_eq!(hist.len(), 1);
@@ -113,7 +202,7 @@ async fn dispatch_executes_task() {
 
 #[tokio::test]
 async fn dispatch_returns_false_when_empty() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let dispatched = sched.try_dispatch().await.unwrap();
     assert!(!dispatched);
 }
@@ -121,15 +210,13 @@ async fn dispatch_returns_false_when_empty() {
 #[tokio::test]
 async fn unregistered_type_fails_task() {
     let store = TaskStore::open_memory().await.unwrap();
-    let registry = TaskTypeRegistry::new(); // empty — no executors
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    // Empty domain — no executors registered for "unknown::unknown".
+    let sched = Scheduler::builder()
+        .store(store)
+        .domain(Domain::<UnknownDomain>::new())
+        .build()
+        .await
+        .unwrap();
 
     sched
         .submit(&TaskSubmission::new("unknown").key("k"))
@@ -145,9 +232,9 @@ async fn unregistered_type_fails_task() {
 
 #[tokio::test]
 async fn dedup_via_scheduler() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    let sub = TaskSubmission::new("test").key("dup");
+    let sub = test_sub("dup");
 
     let first = sched.submit(&sub).await.unwrap();
     let second = sched.submit(&sub).await.unwrap();
@@ -157,7 +244,7 @@ async fn dedup_via_scheduler() {
 
 #[tokio::test]
 async fn set_max_concurrency_works() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     assert_eq!(sched.max_concurrency(), 4);
     sched.set_max_concurrency(8);
     assert_eq!(sched.max_concurrency(), 8);
@@ -165,10 +252,10 @@ async fn set_max_concurrency_works() {
 
 #[tokio::test]
 async fn cancel_pending_task() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     let id = sched
-        .submit(&TaskSubmission::new("test").key("cancel-me"))
+        .submit(&test_sub("cancel-me"))
         .await
         .unwrap()
         .id()
@@ -178,7 +265,7 @@ async fn cancel_pending_task() {
     assert!(cancelled);
 
     // Task should be gone.
-    let cancel_key = crate::task::generate_dedup_key("test", Some(b"cancel-me"));
+    let cancel_key = crate::task::generate_dedup_key("test::test", Some(b"cancel-me"));
     assert!(sched
         .store()
         .task_by_key(&cancel_key)
@@ -189,10 +276,10 @@ async fn cancel_pending_task() {
 
 #[tokio::test]
 async fn cancel_running_task() {
-    let sched = setup(arc_erased(SlowExecutor)).await;
+    let sched = setup(SlowExecutor).await;
 
     let id = sched
-        .submit(&TaskSubmission::new("test").key("cancel-running"))
+        .submit(&test_sub("cancel-running"))
         .await
         .unwrap()
         .id()
@@ -208,13 +295,10 @@ async fn cancel_running_task() {
 
 #[tokio::test]
 async fn event_emitted_on_complete() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let mut rx = sched.subscribe();
 
-    sched
-        .submit(&TaskSubmission::new("test").key("evt"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("evt")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
 
@@ -231,17 +315,14 @@ async fn event_emitted_on_complete() {
 
 #[tokio::test]
 async fn scheduler_is_clone() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let sched2 = sched.clone();
 
     // Both should share the same store.
-    sched
-        .submit(&TaskSubmission::new("test").key("shared"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("shared")).await.unwrap();
 
     // The clone can see the task.
-    let shared_key = crate::task::generate_dedup_key("test", Some(b"shared"));
+    let shared_key = crate::task::generate_dedup_key("test::test", Some(b"shared"));
     let task = sched2.store().task_by_key(&shared_key).await.unwrap();
     assert!(task.is_some());
 }
@@ -255,13 +336,13 @@ async fn submit_typed_enqueues_task() {
         path: String,
     }
 
-    struct TestDomain;
-    impl crate::domain::DomainKey for TestDomain {
+    struct TestDomain2;
+    impl crate::domain::DomainKey for TestDomain2 {
         const NAME: &'static str = "test";
     }
 
     impl crate::task::TypedTask for Thumb {
-        type Domain = TestDomain;
+        type Domain = TestDomain2;
         const TASK_TYPE: &'static str = "test";
 
         fn config() -> crate::domain::TaskTypeConfig {
@@ -269,7 +350,7 @@ async fn submit_typed_enqueues_task() {
         }
     }
 
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     let task = Thumb {
         path: "/a.jpg".into(),
@@ -295,14 +376,11 @@ async fn submit_typed_enqueues_task() {
 
 #[tokio::test]
 async fn snapshot_returns_dashboard_state() {
-    let sched = setup(arc_erased(SlowExecutor)).await;
+    let sched = setup(SlowExecutor).await;
 
     // Submit two tasks.
     for key in &["snap-a", "snap-b"] {
-        sched
-            .submit(&TaskSubmission::new("test").key(*key))
-            .await
-            .unwrap();
+        sched.submit(&test_sub(key)).await.unwrap();
     }
 
     // Dispatch one so it becomes running.
@@ -322,14 +400,11 @@ async fn snapshot_returns_dashboard_state() {
 
 #[tokio::test]
 async fn pause_all_stops_dispatching() {
-    let sched = setup(arc_erased(SlowExecutor)).await;
+    let sched = setup(SlowExecutor).await;
 
     // Submit two tasks.
     for key in &["pa-1", "pa-2"] {
-        sched
-            .submit(&TaskSubmission::new("test").key(*key))
-            .await
-            .unwrap();
+        sched.submit(&test_sub(key)).await.unwrap();
     }
 
     // Dispatch one so it's running.
@@ -357,7 +432,7 @@ async fn pause_all_stops_dispatching() {
 
 #[tokio::test]
 async fn pause_resume_events_emitted() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let mut rx = sched.subscribe();
 
     sched.pause_all().await;
@@ -379,8 +454,12 @@ async fn app_state_accessible_from_executor() {
 
     struct StateCheckExecutor;
 
-    impl TaskExecutor for StateCheckExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<TestTask> for StateCheckExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: TestTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             let state = ctx.state::<MyState>().expect("state should be set");
             state.flag.store(true, Ordering::SeqCst);
             Ok(())
@@ -391,16 +470,13 @@ async fn app_state_accessible_from_executor() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .module(crate::module::Module::new("test").executor("test", Arc::new(StateCheckExecutor)))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(StateCheckExecutor))
         .app_state(MyState { flag: flag.clone() })
         .build()
         .await
         .unwrap();
 
-    sched
-        .submit(&TaskSubmission::new("test::test").key("state-test"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("state-test")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -410,14 +486,14 @@ async fn app_state_accessible_from_executor() {
 
 #[tokio::test]
 async fn task_lookup_pending() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    sched
-        .submit(&TaskSubmission::new("test").key("lookup-1"))
+    sched.submit(&test_sub("lookup-1")).await.unwrap();
+
+    let result = sched
+        .task_lookup("test::test", Some(b"lookup-1"))
         .await
         .unwrap();
-
-    let result = sched.task_lookup("test", Some(b"lookup-1")).await.unwrap();
     assert!(matches!(
         result,
         crate::task::TaskLookup::Active(ref r) if r.status == crate::task::TaskStatus::Pending
@@ -426,18 +502,15 @@ async fn task_lookup_pending() {
 
 #[tokio::test]
 async fn task_lookup_completed() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    sched
-        .submit(&TaskSubmission::new("test").key("lookup-done"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("lookup-done")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let result = sched
-        .task_lookup("test", Some(b"lookup-done"))
+        .task_lookup("test::test", Some(b"lookup-done"))
         .await
         .unwrap();
     assert!(matches!(result, crate::task::TaskLookup::History(_)));
@@ -445,9 +518,9 @@ async fn task_lookup_completed() {
 
 #[tokio::test]
 async fn task_lookup_not_found() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let result = sched
-        .task_lookup("test", Some(b"does-not-exist"))
+        .task_lookup("test::test", Some(b"does-not-exist"))
         .await
         .unwrap();
     assert!(matches!(result, crate::task::TaskLookup::NotFound));
@@ -472,7 +545,7 @@ async fn lookup_typed_works() {
         const TASK_TYPE: &'static str = "test";
     }
 
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     let task = Thumb {
         path: "/a.jpg".into(),
@@ -490,12 +563,17 @@ struct SpawningExecutor {
     num_children: usize,
 }
 
-impl TaskExecutor for SpawningExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<ParentTask> for SpawningExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: ParentTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         for i in 0..self.num_children {
             let sub = TaskSubmission::new("child")
                 .key(format!("child-{i}"))
-                .priority(ctx.record().priority);
+                .priority(ctx.record().priority)
+                .payload_json(&ChildTask);
             ctx.spawn_child(sub).await?;
         }
         Ok(())
@@ -508,18 +586,27 @@ struct FinalizeTrackingExecutor {
     finalized: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl TaskExecutor for FinalizeTrackingExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<ParentTask> for FinalizeTrackingExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: ParentTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         for i in 0..self.children {
             let sub = TaskSubmission::new("child")
                 .key(format!("ft-child-{i}"))
-                .priority(ctx.record().priority);
+                .priority(ctx.record().priority)
+                .payload_json(&ChildTask);
             ctx.spawn_child(sub).await?;
         }
         Ok(())
     }
 
-    async fn finalize<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    async fn finalize<'a>(
+        &'a self,
+        _payload: ParentTask,
+        _ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         self.finalized
             .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -528,23 +615,26 @@ impl TaskExecutor for FinalizeTrackingExecutor {
 
 #[tokio::test]
 async fn parent_enters_waiting_when_children_spawned() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
-    registry.register_erased("child", arc_erased(InstantExecutor));
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(
+            Domain::<ParentDomain>::new()
+                .task::<ParentTask>(SpawningExecutor { num_children: 2 })
+                .task::<ChildTask>(InstantExecutor),
+        )
+        .build()
+        .await
+        .unwrap();
 
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
     let mut rx = sched.subscribe();
 
     // Submit parent task.
     sched
-        .submit(&TaskSubmission::new("parent").key("p1"))
+        .submit(
+            &TaskSubmission::new("parent::parent")
+                .key("p1")
+                .payload_json(&ParentTask),
+        )
         .await
         .unwrap();
 
@@ -565,7 +655,7 @@ async fn parent_enters_waiting_when_children_spawned() {
     assert!(saw_waiting, "expected Waiting event for parent");
 
     // Parent should be in waiting status in the store.
-    let parent_key = crate::task::generate_dedup_key("parent", Some(b"p1"));
+    let parent_key = crate::task::generate_dedup_key("parent::parent", Some(b"p1"));
     let parent = sched
         .store()
         .task_by_key(&parent_key)
@@ -580,22 +670,25 @@ async fn parent_enters_waiting_when_children_spawned() {
 
 #[tokio::test]
 async fn parent_auto_completes_after_children_finish() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
-    registry.register_erased("child", arc_erased(InstantExecutor));
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(
+            Domain::<ParentDomain>::new()
+                .task::<ParentTask>(SpawningExecutor { num_children: 2 })
+                .task::<ChildTask>(InstantExecutor),
+        )
+        .build()
+        .await
+        .unwrap();
 
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
     let mut rx = sched.subscribe();
 
     sched
-        .submit(&TaskSubmission::new("parent").key("p-complete"))
+        .submit(
+            &TaskSubmission::new("parent::parent")
+                .key("p-complete")
+                .payload_json(&ParentTask),
+        )
         .await
         .unwrap();
 
@@ -608,12 +701,12 @@ async fn parent_auto_completes_after_children_finish() {
     });
 
     // Wait for parent Completed event.
-    let parent_key = crate::task::generate_dedup_key("parent", Some(b"p-complete"));
+    let parent_key = crate::task::generate_dedup_key("parent::parent", Some(b"p-complete"));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut parent_completed = false;
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
-            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent" => {
+            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent::parent" => {
                 parent_completed = true;
                 break;
             }
@@ -638,28 +731,28 @@ async fn parent_auto_completes_after_children_finish() {
 async fn finalize_called_after_children_complete() {
     let finalized = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased(
-        "parent",
-        arc_erased(FinalizeTrackingExecutor {
-            children: 1,
-            finalized: finalized.clone(),
-        }),
-    );
-    registry.register_erased("child", arc_erased(InstantExecutor));
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(
+            Domain::<ParentDomain>::new()
+                .task::<ParentTask>(FinalizeTrackingExecutor {
+                    children: 1,
+                    finalized: finalized.clone(),
+                })
+                .task::<ChildTask>(InstantExecutor),
+        )
+        .build()
+        .await
+        .unwrap();
 
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
     let mut rx = sched.subscribe();
 
     sched
-        .submit(&TaskSubmission::new("parent").key("p-finalize"))
+        .submit(
+            &TaskSubmission::new("parent::parent")
+                .key("p-finalize")
+                .payload_json(&ParentTask),
+        )
         .await
         .unwrap();
 
@@ -674,7 +767,7 @@ async fn finalize_called_after_children_complete() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
-            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent" => {
+            Ok(Ok(SchedulerEvent::Completed(ref h))) if h.task_type == "parent::parent" => {
                 break;
             }
             _ => {}
@@ -692,21 +785,23 @@ async fn finalize_called_after_children_complete() {
 
 #[tokio::test]
 async fn cancel_parent_cascades_to_children() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 3 }));
-    registry.register_erased("child", arc_erased(SlowExecutor));
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(
+            Domain::<ParentDomain>::new()
+                .task::<ParentTask>(SpawningExecutor { num_children: 3 })
+                .task::<ChildTask>(SlowExecutor),
+        )
+        .build()
+        .await
+        .unwrap();
 
     let parent_id = sched
-        .submit(&TaskSubmission::new("parent").key("p-cancel"))
+        .submit(
+            &TaskSubmission::new("parent::parent")
+                .key("p-cancel")
+                .payload_json(&ParentTask),
+        )
         .await
         .unwrap()
         .id()
@@ -728,17 +823,14 @@ async fn cancel_parent_cascades_to_children() {
 #[tokio::test]
 async fn no_children_completes_normally() {
     // Task without children should complete as before (backward compat).
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    sched
-        .submit(&TaskSubmission::new("test").key("no-kids"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("no-kids")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let key = crate::task::generate_dedup_key("test", Some(b"no-kids"));
+    let key = crate::task::generate_dedup_key("test::test", Some(b"no-kids"));
     let lookup = sched.store().task_lookup(&key).await.unwrap();
     assert!(matches!(lookup, crate::task::TaskLookup::History(_)));
 }
@@ -748,8 +840,12 @@ async fn no_children_completes_normally() {
 /// An executor that reports byte-level progress incrementally.
 struct ByteProgressExecutor;
 
-impl TaskExecutor for ByteProgressExecutor {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<ByteTestTask> for ByteProgressExecutor {
+    async fn execute<'a>(
+        &'a self,
+        _payload: ByteTestTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         ctx.set_bytes_total(1_048_576);
         for _ in 0..1024 {
             ctx.add_bytes(1024);
@@ -759,31 +855,26 @@ impl TaskExecutor for ByteProgressExecutor {
     }
 }
 
+/// Helper: create a byte-test submission with a serialized payload.
+fn byte_test_sub(key: &str) -> TaskSubmission {
+    TaskSubmission::new("byte-test::byte-test")
+        .key(key)
+        .payload_json(&ByteTestTask)
+}
+
 #[tokio::test]
 async fn byte_progress_events_received() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
-
-    let config = SchedulerConfig {
-        progress_interval: Some(Duration::from_millis(50)),
-        ..Default::default()
-    };
-
-    let sched = Scheduler::new(
-        store,
-        config,
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<ByteTestDomain>::new().task::<ByteTestTask>(ByteProgressExecutor))
+        .progress_interval(Duration::from_millis(50))
+        .build()
+        .await
+        .unwrap();
 
     let mut progress_rx = sched.subscribe_progress();
 
-    sched
-        .submit(&TaskSubmission::new("byte-test").key("bp1"))
-        .await
-        .unwrap();
+    sched.submit(&byte_test_sub("bp1")).await.unwrap();
 
     // Run the scheduler.
     let token = CancellationToken::new();
@@ -832,29 +923,17 @@ async fn byte_progress_events_received() {
 
 #[tokio::test]
 async fn lifecycle_events_not_polluted_by_byte_progress() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
-
-    let config = SchedulerConfig {
-        progress_interval: Some(Duration::from_millis(50)),
-        ..Default::default()
-    };
-
-    let sched = Scheduler::new(
-        store,
-        config,
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<ByteTestDomain>::new().task::<ByteTestTask>(ByteProgressExecutor))
+        .progress_interval(Duration::from_millis(50))
+        .build()
+        .await
+        .unwrap();
 
     let mut lifecycle_rx = sched.subscribe();
 
-    sched
-        .submit(&TaskSubmission::new("byte-test").key("bp-lifecycle"))
-        .await
-        .unwrap();
+    sched.submit(&byte_test_sub("bp-lifecycle")).await.unwrap();
 
     let token = CancellationToken::new();
     let sched_clone = sched.clone();
@@ -899,22 +978,14 @@ async fn lifecycle_events_not_polluted_by_byte_progress() {
 
 #[tokio::test]
 async fn byte_progress_in_snapshot() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("byte-test", arc_erased(ByteProgressExecutor));
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
-
-    sched
-        .submit(&TaskSubmission::new("byte-test").key("bp-snap"))
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<ByteTestDomain>::new().task::<ByteTestTask>(ByteProgressExecutor))
+        .build()
         .await
         .unwrap();
+
+    sched.submit(&byte_test_sub("bp-snap")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
     // Let the executor run a bit so bytes are reported.
@@ -931,11 +1002,15 @@ async fn byte_progress_in_snapshot() {
 
 #[tokio::test]
 async fn batch_submitted_event() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let mut rx = sched.subscribe();
 
     let subs: Vec<_> = (0..3)
-        .map(|i| TaskSubmission::new("test").key(format!("ev-{i}")))
+        .map(|i| {
+            TaskSubmission::new("test::test")
+                .key(format!("ev-{i}"))
+                .payload_json(&TestTask)
+        })
         .collect();
 
     let outcome = sched.submit_batch(&subs).await.unwrap();
@@ -959,19 +1034,12 @@ async fn batch_submitted_event() {
 
 #[tokio::test]
 async fn batch_outcome_convenience_methods() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     // Submit one task first so re-submitting it produces a Duplicate.
-    sched
-        .submit(&TaskSubmission::new("test").key("existing"))
-        .await
-        .unwrap();
+    sched.submit(&test_sub("existing")).await.unwrap();
 
-    let subs = vec![
-        TaskSubmission::new("test").key("new-1"),
-        TaskSubmission::new("test").key("existing"),
-        TaskSubmission::new("test").key("new-2"),
-    ];
+    let subs = vec![test_sub("new-1"), test_sub("existing"), test_sub("new-2")];
 
     let outcome = sched.submit_batch(&subs).await.unwrap();
     assert_eq!(outcome.len(), 3);
@@ -985,13 +1053,13 @@ async fn batch_outcome_convenience_methods() {
 async fn submit_built_applies_defaults() {
     use crate::task::BatchSubmission;
 
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     let batch = BatchSubmission::new()
         .default_group("g1")
         .default_priority(Priority::HIGH)
-        .task(TaskSubmission::new("test").key("built-1"))
-        .task(TaskSubmission::new("test").key("built-2"));
+        .task(test_sub("built-1"))
+        .task(test_sub("built-2"));
 
     let outcome = sched.submit_built(batch).await.unwrap();
     assert_eq!(outcome.inserted().len(), 2);
@@ -1001,10 +1069,10 @@ async fn submit_built_applies_defaults() {
 
 #[tokio::test]
 async fn cancel_pending_records_history() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     let id = sched
-        .submit(&TaskSubmission::new("test").key("cancel-hist"))
+        .submit(&test_sub("cancel-hist"))
         .await
         .unwrap()
         .id()
@@ -1014,7 +1082,7 @@ async fn cancel_pending_records_history() {
     assert!(cancelled);
 
     // Task should be gone from active queue.
-    let key = crate::task::generate_dedup_key("test", Some(b"cancel-hist"));
+    let key = crate::task::generate_dedup_key("test::test", Some(b"cancel-hist"));
     assert!(sched.store().task_by_key(&key).await.unwrap().is_none());
 
     // History should have a cancelled entry.
@@ -1030,20 +1098,15 @@ async fn cancel_running_records_history_and_fires_hook() {
         cancel_called: cancel_called.clone(),
     };
 
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("test", arc_erased(executor));
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(executor))
+        .build()
+        .await
+        .unwrap();
 
     let id = sched
-        .submit(&TaskSubmission::new("test").key("cancel-running-hist"))
+        .submit(&test_sub("cancel-running-hist"))
         .await
         .unwrap()
         .id()
@@ -1065,7 +1128,7 @@ async fn cancel_running_records_history_and_fires_hook() {
     );
 
     // History should have a cancelled entry.
-    let key = crate::task::generate_dedup_key("test", Some(b"cancel-running-hist"));
+    let key = crate::task::generate_dedup_key("test::test", Some(b"cancel-running-hist"));
     let hist = sched.store().history_by_key(&key).await.unwrap();
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].status, crate::task::HistoryStatus::Cancelled);
@@ -1073,21 +1136,23 @@ async fn cancel_running_records_history_and_fires_hook() {
 
 #[tokio::test]
 async fn cancel_parent_cascade_records_history() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("parent", arc_erased(SpawningExecutor { num_children: 2 }));
-    registry.register_erased("child", arc_erased(SlowExecutor));
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(
+            Domain::<ParentDomain>::new()
+                .task::<ParentTask>(SpawningExecutor { num_children: 2 })
+                .task::<ChildTask>(SlowExecutor),
+        )
+        .build()
+        .await
+        .unwrap();
 
     let parent_id = sched
-        .submit(&TaskSubmission::new("parent").key("p-cancel-hist"))
+        .submit(
+            &TaskSubmission::new("parent::parent")
+                .key("p-cancel-hist")
+                .payload_json(&ParentTask),
+        )
         .await
         .unwrap()
         .id()
@@ -1128,19 +1193,19 @@ async fn check_cancelled_returns_error() {
 
 #[tokio::test]
 async fn cancel_group_cancels_matching_tasks() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     // Submit tasks in different groups.
     sched
-        .submit(&TaskSubmission::new("test").key("g-a1").group("group-a"))
+        .submit(&test_sub("g-a1").group("group-a"))
         .await
         .unwrap();
     sched
-        .submit(&TaskSubmission::new("test").key("g-a2").group("group-a"))
+        .submit(&test_sub("g-a2").group("group-a"))
         .await
         .unwrap();
     sched
-        .submit(&TaskSubmission::new("test").key("g-b1").group("group-b"))
+        .submit(&test_sub("g-b1").group("group-b"))
         .await
         .unwrap();
 
@@ -1153,33 +1218,40 @@ async fn cancel_group_cancels_matching_tasks() {
 
 #[tokio::test]
 async fn cancel_type_cancels_matching_tasks() {
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("alpha", arc_erased(InstantExecutor));
-    registry.register_erased("beta", arc_erased(InstantExecutor));
-
-    let sched = Scheduler::new(
-        store,
-        SchedulerConfig::default(),
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
-
-    sched
-        .submit(&TaskSubmission::new("alpha").key("a1"))
-        .await
-        .unwrap();
-    sched
-        .submit(&TaskSubmission::new("alpha").key("a2"))
-        .await
-        .unwrap();
-    sched
-        .submit(&TaskSubmission::new("beta").key("b1"))
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<AlphaDomain>::new().task::<AlphaTask>(InstantExecutor))
+        .domain(Domain::<BetaDomain>::new().task::<BetaTask>(InstantExecutor))
+        .build()
         .await
         .unwrap();
 
-    let cancelled = sched.cancel_type("alpha").await.unwrap();
+    sched
+        .submit(
+            &TaskSubmission::new("alpha::alpha")
+                .key("a1")
+                .payload_json(&AlphaTask),
+        )
+        .await
+        .unwrap();
+    sched
+        .submit(
+            &TaskSubmission::new("alpha::alpha")
+                .key("a2")
+                .payload_json(&AlphaTask),
+        )
+        .await
+        .unwrap();
+    sched
+        .submit(
+            &TaskSubmission::new("beta::beta")
+                .key("b1")
+                .payload_json(&BetaTask),
+        )
+        .await
+        .unwrap();
+
+    let cancelled = sched.cancel_type("alpha::alpha").await.unwrap();
     assert_eq!(cancelled.len(), 2);
 
     // beta task should still exist.
@@ -1188,13 +1260,10 @@ async fn cancel_type_cancels_matching_tasks() {
 
 #[tokio::test]
 async fn cancel_where_filters_correctly() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     for i in 0..5 {
-        sched
-            .submit(&TaskSubmission::new("test").key(format!("cw-{i}")))
-            .await
-            .unwrap();
+        sched.submit(&test_sub(&format!("cw-{i}"))).await.unwrap();
     }
 
     // Cancel only tasks whose key contains "cw-3" or "cw-4".
@@ -1210,40 +1279,39 @@ async fn cancel_where_filters_correctly() {
 async fn on_cancel_hook_timeout_does_not_block() {
     struct SlowCancelExecutor;
 
-    impl TaskExecutor for SlowCancelExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<TestTask> for SlowCancelExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: TestTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             tokio::select! {
                 _ = ctx.token().cancelled() => Err(TaskError::new("cancelled")),
                 _ = tokio::time::sleep(Duration::from_secs(60)) => Ok(()),
             }
         }
 
-        async fn on_cancel<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+        async fn on_cancel<'a>(
+            &'a self,
+            _payload: TestTask,
+            _ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             // Simulate a very slow cancel hook.
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok(())
         }
     }
 
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("test", arc_erased(SlowCancelExecutor));
-
-    let config = SchedulerConfig {
-        cancel_hook_timeout: Duration::from_millis(50),
-        ..Default::default()
-    };
-
-    let sched = Scheduler::new(
-        store,
-        config,
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(SlowCancelExecutor))
+        .cancel_hook_timeout(Duration::from_millis(50))
+        .build()
+        .await
+        .unwrap();
 
     let id = sched
-        .submit(&TaskSubmission::new("test").key("timeout-hook"))
+        .submit(&test_sub("timeout-hook"))
         .await
         .unwrap()
         .id()
@@ -1271,11 +1339,9 @@ async fn on_cancel_hook_timeout_does_not_block() {
 
 #[tokio::test]
 async fn reject_returns_rejected() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
-    let sub = TaskSubmission::new("test")
-        .key("dup")
-        .on_duplicate(DuplicateStrategy::Reject);
+    let sub = test_sub("dup").on_duplicate(DuplicateStrategy::Reject);
     let first = sched.submit(&sub).await.unwrap();
     assert!(first.is_inserted());
 
@@ -1285,10 +1351,10 @@ async fn reject_returns_rejected() {
 
 #[tokio::test]
 async fn supersede_pending_replaces_in_place() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     // Submit initial task.
-    let sub1 = TaskSubmission::new("test")
+    let sub1 = TaskSubmission::new("test::test")
         .key("replace-me")
         .priority(Priority::NORMAL)
         .payload_raw(b"old".to_vec());
@@ -1296,7 +1362,7 @@ async fn supersede_pending_replaces_in_place() {
     let first_id = first.id().unwrap();
 
     // Supersede with new payload and higher priority.
-    let sub2 = TaskSubmission::new("test")
+    let sub2 = TaskSubmission::new("test::test")
         .key("replace-me")
         .priority(Priority::HIGH)
         .payload_raw(b"new".to_vec())
@@ -1326,10 +1392,10 @@ async fn supersede_running_cancels_and_inserts_new() {
     let executor = CancelHookExecutor {
         cancel_called: cancel_called.clone(),
     };
-    let sched = setup(arc_erased(executor)).await;
+    let sched = setup(executor).await;
 
     // Submit and dispatch (now running).
-    let sub1 = TaskSubmission::new("test").key("running-sup");
+    let sub1 = test_sub("running-sup");
     sched.submit(&sub1).await.unwrap();
     sched.try_dispatch().await.unwrap();
 
@@ -1337,7 +1403,7 @@ async fn supersede_running_cancels_and_inserts_new() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Supersede the running task.
-    let sub2 = TaskSubmission::new("test")
+    let sub2 = TaskSubmission::new("test::test")
         .key("running-sup")
         .payload_raw(b"replacement".to_vec())
         .on_duplicate(DuplicateStrategy::Supersede);
@@ -1369,15 +1435,13 @@ async fn supersede_running_cancels_and_inserts_new() {
 
 #[tokio::test]
 async fn supersede_emits_event() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
     let mut rx = sched.subscribe();
 
-    let sub1 = TaskSubmission::new("test").key("evt");
+    let sub1 = test_sub("evt");
     sched.submit(&sub1).await.unwrap();
 
-    let sub2 = TaskSubmission::new("test")
-        .key("evt")
-        .on_duplicate(DuplicateStrategy::Supersede);
+    let sub2 = test_sub("evt").on_duplicate(DuplicateStrategy::Supersede);
     sched.submit(&sub2).await.unwrap();
 
     // Drain events and look for Superseded.
@@ -1392,14 +1456,14 @@ async fn supersede_emits_event() {
 
 #[tokio::test]
 async fn supersede_in_batch() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     // Pre-submit a task.
-    let sub1 = TaskSubmission::new("test").key("batch-sup");
+    let sub1 = test_sub("batch-sup");
     sched.submit(&sub1).await.unwrap();
 
     // Batch supersede it.
-    let sub2 = TaskSubmission::new("test")
+    let sub2 = TaskSubmission::new("test::test")
         .key("batch-sup")
         .payload_raw(b"batch-new".to_vec())
         .on_duplicate(DuplicateStrategy::Supersede);
@@ -1418,17 +1482,17 @@ async fn supersede_in_batch() {
 
 #[tokio::test]
 async fn chain_of_supersedes() {
-    let sched = setup(arc_erased(InstantExecutor)).await;
+    let sched = setup(InstantExecutor).await;
 
     // A supersedes nothing (fresh insert).
-    let sub_a = TaskSubmission::new("test")
+    let sub_a = TaskSubmission::new("test::test")
         .key("chain")
         .payload_raw(b"A".to_vec());
     let out_a = sched.submit(&sub_a).await.unwrap();
     assert!(matches!(out_a, SubmitOutcome::Inserted(_)));
 
     // B supersedes A.
-    let sub_b = TaskSubmission::new("test")
+    let sub_b = TaskSubmission::new("test::test")
         .key("chain")
         .payload_raw(b"B".to_vec())
         .on_duplicate(DuplicateStrategy::Supersede);
@@ -1436,7 +1500,7 @@ async fn chain_of_supersedes() {
     assert!(matches!(out_b, SubmitOutcome::Superseded { .. }));
 
     // C supersedes B.
-    let sub_c = TaskSubmission::new("test")
+    let sub_c = TaskSubmission::new("test::test")
         .key("chain")
         .payload_raw(b"C".to_vec())
         .on_duplicate(DuplicateStrategy::Supersede);
@@ -1461,33 +1525,18 @@ async fn chain_of_supersedes() {
 #[tokio::test]
 async fn retry_dead_letter_resubmits_with_reset_retry_count() {
     // Use max_retries=0 so a retryable failure immediately dead-letters.
-    let store = TaskStore::open_memory().await.unwrap();
-    let mut registry = TaskTypeRegistry::new();
-    registry.register_erased("test", arc_erased(FailingExecutor));
-    let config = SchedulerConfig {
-        max_retries: 0,
-        ..SchedulerConfig::default()
-    };
-
-    let sched = Scheduler::new(
-        store,
-        config,
-        Arc::new(registry),
-        CompositePressure::new(),
-        ThrottlePolicy::default_three_tier(),
-    );
+    let sched = Scheduler::builder()
+        .store(TaskStore::open_memory().await.unwrap())
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(FailingExecutor))
+        .max_retries(0)
+        .build()
+        .await
+        .unwrap();
 
     let mut rx = sched.subscribe();
 
     // Submit and dispatch — will fail with retryable error and dead-letter.
-    sched
-        .submit(
-            &TaskSubmission::new("test")
-                .key("dl-retry")
-                .payload_raw(b"payload".to_vec()),
-        )
-        .await
-        .unwrap();
+    sched.submit(&test_sub("dl-retry")).await.unwrap();
 
     sched.try_dispatch().await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1519,8 +1568,7 @@ async fn retry_dead_letter_resubmits_with_reset_retry_count() {
     assert!(dl_after.is_empty());
 
     // New task should be in the active queue with retry_count=0.
-    let key = crate::task::generate_dedup_key("test", Some(b"dl-retry"));
+    let key = crate::task::generate_dedup_key("test::test", Some(b"dl-retry"));
     let task = sched.store().task_by_key(&key).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 0);
-    assert_eq!(task.payload.as_deref(), Some(b"payload".as_slice()));
 }

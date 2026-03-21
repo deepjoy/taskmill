@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 #[cfg(feature = "profile")]
 use pprof::criterion::{Output, PProfProfiler};
+use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskExecutor, TaskStore,
-    TaskSubmission,
+    Domain, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
+    TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
@@ -19,10 +20,17 @@ impl DomainKey for BenchDomain {
     const NAME: &'static str = "bench";
 }
 
+#[derive(Serialize, Deserialize)]
+struct BenchTask;
+impl TypedTask for BenchTask {
+    type Domain = BenchDomain;
+    const TASK_TYPE: &'static str = "test";
+}
+
 struct NoopExecutor;
 
-impl TaskExecutor for NoopExecutor {
-    async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<BenchTask> for NoopExecutor {
+    async fn execute(&self, _payload: BenchTask, _ctx: &TaskContext) -> Result<(), TaskError> {
         Ok(())
     }
 }
@@ -30,7 +38,7 @@ impl TaskExecutor for NoopExecutor {
 async fn build_scheduler(max_concurrency: usize) -> Scheduler {
     Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<BenchDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<BenchDomain>::new().task::<BenchTask>(NoopExecutor))
         .max_concurrency(max_concurrency)
         .poll_interval(Duration::from_millis(10))
         .build()

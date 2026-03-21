@@ -4,30 +4,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use taskmill::{
     Domain, DomainHandle, DomainKey, Scheduler, SchedulerEvent, TaskStatus, TaskStore,
-    TaskSubmission,
+    TaskSubmission, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
 
-// ── Domain key structs ──────────────────────────────────────────────
-
-struct MediaDomain;
-impl DomainKey for MediaDomain {
-    const NAME: &'static str = "media";
-}
-
-struct SyncDomain;
-impl DomainKey for SyncDomain {
-    const NAME: &'static str = "sync";
-}
-
-struct AnalyticsDomain;
-impl DomainKey for AnalyticsDomain {
-    const NAME: &'static str = "analytics";
-}
+// ── Local task type for analytics::thumb (not in common.rs) ─────────
+define_task!(AnalyticsThumbTask, AnalyticsDomain, "thumb");
 
 // ═══════════════════════════════════════════════════════════════════
 // N. Module Registration (Step 3)
@@ -40,18 +27,16 @@ async fn two_modules_route_to_correct_executors() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor(
-            "thumb",
-            CountingExecutor {
+        .domain(
+            Domain::<MediaDomain>::new().task::<ThumbTask>(CountingExecutor {
                 count: media_count.clone(),
-            },
-        ))
-        .domain(Domain::<SyncDomain>::new().raw_executor(
-            "push",
-            CountingExecutor {
+            }),
+        )
+        .domain(
+            Domain::<SyncDomain>::new().task::<PushTask>(CountingExecutor {
                 count: sync_count.clone(),
-            },
-        ))
+            }),
+        )
         .max_concurrency(4)
         .build()
         .await
@@ -101,8 +86,8 @@ async fn zero_modules_build_returns_error() {
 async fn duplicate_module_names_build_returns_error() {
     let result = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
-        .domain(Domain::<MediaDomain>::new().raw_executor("transcode", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<TranscodeTask>(NoopExecutor))
         .build()
         .await;
 
@@ -123,8 +108,8 @@ async fn task_type_collision_across_modules_returns_error() {
     // Instead, verify that two distinct modules with distinct types succeed.
     let result = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
-        .domain(Domain::<AnalyticsDomain>::new().raw_executor("thumb", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
+        .domain(Domain::<AnalyticsDomain>::new().task::<AnalyticsThumbTask>(NoopExecutor))
         .build()
         .await;
 
@@ -146,8 +131,8 @@ async fn two_module_scheduler() -> (
 ) {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
-        .domain(Domain::<SyncDomain>::new().raw_executor("push", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
+        .domain(Domain::<SyncDomain>::new().task::<PushTask>(NoopExecutor))
         .poll_interval(Duration::from_millis(20))
         .max_concurrency(8)
         .build()
@@ -284,12 +269,9 @@ async fn module_active_tasks_returns_only_own_module() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
-            Domain::<MediaDomain>::new()
-                .raw_executor("thumb", DelayExecutor(Duration::from_secs(5))),
+            Domain::<MediaDomain>::new().task::<ThumbTask>(DelayExecutor(Duration::from_secs(5))),
         )
-        .domain(
-            Domain::<SyncDomain>::new().raw_executor("push", DelayExecutor(Duration::from_secs(5))),
-        )
+        .domain(Domain::<SyncDomain>::new().task::<PushTask>(DelayExecutor(Duration::from_secs(5))))
         .poll_interval(Duration::from_millis(20))
         .max_concurrency(8)
         .build()
@@ -347,18 +329,16 @@ async fn module_subscribe_receives_only_own_events() {
     let count = Arc::new(AtomicUsize::new(0));
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor(
-            "thumb",
-            CountingExecutor {
+        .domain(
+            Domain::<MediaDomain>::new().task::<ThumbTask>(CountingExecutor {
                 count: count.clone(),
-            },
-        ))
-        .domain(Domain::<SyncDomain>::new().raw_executor(
-            "push",
-            CountingExecutor {
+            }),
+        )
+        .domain(
+            Domain::<SyncDomain>::new().task::<PushTask>(CountingExecutor {
                 count: count.clone(),
-            },
-        ))
+            }),
+        )
         .poll_interval(Duration::from_millis(20))
         .max_concurrency(8)
         .build()
@@ -440,7 +420,7 @@ impl DomainKey for NonexistentDomain {
 async fn scheduler_module_nonexistent_panics() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
         .build()
         .await
         .unwrap();
@@ -452,7 +432,7 @@ async fn scheduler_module_nonexistent_panics() {
 async fn scheduler_try_module_nonexistent_returns_none() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
         .build()
         .await
         .unwrap();
@@ -491,8 +471,8 @@ async fn scheduler_task_returns_regardless_of_module() {
 async fn module_registry_stored_in_scheduler() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumb", NoopExecutor))
-        .domain(Domain::<SyncDomain>::new().raw_executor("push", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor))
+        .domain(Domain::<SyncDomain>::new().task::<PushTask>(NoopExecutor))
         .build()
         .await
         .unwrap();

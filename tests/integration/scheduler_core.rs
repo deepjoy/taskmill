@@ -7,16 +7,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use taskmill::{Domain, DomainKey, Priority, Scheduler, SchedulerEvent, TaskStore, TaskSubmission};
+use serde::{Deserialize, Serialize};
+use taskmill::{Domain, Priority, Scheduler, SchedulerEvent, TaskStore, TaskSubmission, TypedTask};
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
 
-/// Domain key for all tests in this module.
-pub struct TestDomain;
-impl DomainKey for TestDomain {
-    const NAME: &'static str = "test";
-}
+// Additional task type not in common.rs
+define_task!(CountingTask, TestDomain, "counting");
 
 // ═══════════════════════════════════════════════════════════════════
 // A. Priority & Ordering
@@ -26,7 +24,7 @@ impl DomainKey for TestDomain {
 async fn priority_ordering_dispatches_highest_first() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .max_concurrency(1) // dispatch one at a time
         .build()
         .await
@@ -85,13 +83,12 @@ async fn priority_ordering_dispatches_highest_first() {
 async fn retryable_error_retries_then_succeeds() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            FailNTimesExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(FailNTimesExecutor {
                 failures: std::sync::atomic::AtomicI32::new(0),
                 max_failures: 2,
-            },
-        ))
+            }),
+        )
         .max_retries(3)
         .max_concurrency(1)
         .build()
@@ -130,13 +127,12 @@ async fn retryable_error_retries_then_succeeds() {
 async fn retryable_error_exhausts_retries() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            FailNTimesExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(FailNTimesExecutor {
                 failures: std::sync::atomic::AtomicI32::new(0),
                 max_failures: 100, // will never succeed
-            },
-        ))
+            }),
+        )
         .max_retries(2)
         .max_concurrency(1)
         .build()
@@ -183,8 +179,8 @@ async fn preemption_resumes_after_preemptor_completes() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .raw_executor("slow", DelayExecutor(Duration::from_secs(10)))
-                .raw_executor("fast", NoopExecutor),
+                .task::<SlowTask>(DelayExecutor(Duration::from_secs(10)))
+                .task::<FastTask>(NoopExecutor),
         )
         .max_concurrency(1)
         .preempt_priority(Priority::REALTIME)
@@ -261,7 +257,7 @@ async fn backpressure_throttles_low_priority_tasks() {
     // Default three-tier policy: BACKGROUND throttled >50%.
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .pressure_source(Box::new(FixedPressure {
             value: 0.6,
             name: "test-pressure",
@@ -305,7 +301,7 @@ async fn backpressure_throttles_low_priority_tasks() {
 async fn backpressure_blocks_normal_at_high_pressure() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .pressure_source(Box::new(FixedPressure {
             value: 0.8,
             name: "test-pressure",
@@ -356,14 +352,13 @@ async fn group_concurrency_limits_dispatch() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            ConcurrencyTrackingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(ConcurrencyTrackingExecutor {
                 current: current.clone(),
                 max_seen: max_seen.clone(),
                 delay: Duration::from_millis(100),
-            },
-        ))
+            }),
+        )
         .max_concurrency(10) // high global limit
         .group_concurrency("s3-bucket", 2) // but group capped at 2
         .poll_interval(Duration::from_millis(50))
@@ -424,12 +419,11 @@ async fn run_loop_processes_queue_to_completion() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            CountingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(CountingExecutor {
                 count: count.clone(),
-            },
-        ))
+            }),
+        )
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(50))
         .build()
@@ -481,14 +475,13 @@ async fn concurrent_tasks_respect_max_concurrency() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            ConcurrencyTrackingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(ConcurrencyTrackingExecutor {
                 current: current.clone(),
                 max_seen: max_seen.clone(),
                 delay: Duration::from_millis(50),
-            },
-        ))
+            }),
+        )
         .max_concurrency(2)
         .poll_interval(Duration::from_millis(20))
         .build()
@@ -542,15 +535,12 @@ async fn fail_fast_cancels_siblings_on_child_failure() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .raw_executor(
-                    "parent",
-                    ChildSpawnerExecutor {
-                        child_type: "child",
-                        count: 3,
-                        fail_fast: true,
-                    },
-                )
-                .raw_executor("child", AlwaysFailExecutor),
+                .task::<ParentTask>(ChildSpawnerExecutor {
+                    child_type: "child",
+                    count: 3,
+                    fail_fast: true,
+                })
+                .task::<ChildTask>(AlwaysFailExecutor),
         )
         .max_concurrency(4)
         .max_retries(0) // no retries so failures are permanent
@@ -603,14 +593,11 @@ async fn non_fail_fast_waits_for_all_children() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .raw_executor(
-                    "parent",
-                    FinalizeTracker {
-                        child_count: 2,
-                        finalized: finalized.clone(),
-                    },
-                )
-                .raw_executor("child", NoopExecutor),
+                .task::<ParentTask>(FinalizeTracker {
+                    child_count: 2,
+                    finalized: finalized.clone(),
+                })
+                .task::<ChildTask>(NoopExecutor),
         )
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(50))
@@ -703,7 +690,7 @@ async fn running_tasks_reset_to_pending_on_restart() {
 async fn submit_batch_enqueues_all_tasks() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .build()
         .await
         .unwrap();
@@ -731,13 +718,12 @@ async fn submit_batch_enqueues_all_tasks() {
 async fn io_metrics_recorded_in_history() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "test",
-            IoReportingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<TestTask>(IoReportingExecutor {
                 read: 4096,
                 write: 1024,
-            },
-        ))
+            }),
+        )
         .build()
         .await
         .unwrap();
@@ -767,7 +753,7 @@ async fn io_metrics_recorded_in_history() {
 async fn snapshot_reflects_pressure_breakdown() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .pressure_source(Box::new(FixedPressure {
             value: 0.42,
             name: "api-load",
@@ -1004,12 +990,11 @@ async fn delayed_task_full_scheduler_lifecycle() {
     let count = Arc::new(AtomicUsize::new(0));
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor(
-            "counting",
-            CountingExecutor {
+        .domain(
+            Domain::<TestDomain>::new().task::<CountingTask>(CountingExecutor {
                 count: count.clone(),
-            },
-        ))
+            }),
+        )
         .poll_interval(Duration::from_millis(50))
         .build()
         .await
@@ -1035,7 +1020,7 @@ async fn delayed_task_full_scheduler_lifecycle() {
 async fn recurring_task_snapshot_includes_schedules() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("test", NoopExecutor))
+        .domain(Domain::<TestDomain>::new().task::<TestTask>(NoopExecutor))
         .build()
         .await
         .unwrap();

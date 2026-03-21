@@ -5,13 +5,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use taskmill::{
-    Domain, DomainHandle, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError,
-    TaskExecutor, TaskStore, TaskSubmission,
+    Domain, DomainHandle, DomainKey, Scheduler, SchedulerEvent, TaskContext, TaskError, TaskStore,
+    TaskSubmission, TypedExecutor, TypedTask,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::common::*;
+
+// ── Extra task types not defined in common.rs ───────────────────────────
+define_task!(MediaThumbnailTask, MediaDomain, "thumbnail");
+define_task!(MediaChildTask, MediaDomain, "child");
 
 // ── Step 8: TaskContext domain access ─────────────────────────────────────
 
@@ -20,8 +25,12 @@ struct CrossDomainSubmitter {
     submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for CrossDomainSubmitter {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<TriggerTask> for CrossDomainSubmitter {
+    async fn execute<'a>(
+        &'a self,
+        _payload: TriggerTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         let b: DomainHandle<DomainB> = ctx.domain::<DomainB>();
         b.submit_raw(TaskSubmission::new("task").key("cross-module-child"))
             .await
@@ -40,16 +49,19 @@ async fn ctx_domain_submits_to_other_module_with_prefix_and_defaults() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<DomainA>::new().raw_executor(
-            "trigger",
-            CrossDomainSubmitter {
+        .domain(
+            Domain::<DomainA>::new().task::<TriggerTask>(CrossDomainSubmitter {
                 submitted: submitted_clone,
-            },
-        ))
-        .domain(Domain::<DomainB>::new().raw_executor("task", {
+            }),
+        )
+        .domain(Domain::<DomainB>::new().task::<DomainBTask>({
             struct B(Arc<AtomicBool>);
-            impl TaskExecutor for B {
-                async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            impl TypedExecutor<DomainBTask> for B {
+                async fn execute<'a>(
+                    &'a self,
+                    _payload: DomainBTask,
+                    _ctx: &'a TaskContext,
+                ) -> Result<(), TaskError> {
                     self.0.store(true, Ordering::SeqCst);
                     Ok(())
                 }
@@ -92,8 +104,12 @@ struct SameDomainSubmitter {
     submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for SameDomainSubmitter {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<MediaLeaderTask> for SameDomainSubmitter {
+    async fn execute<'a>(
+        &'a self,
+        _payload: MediaLeaderTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         let media: DomainHandle<MediaDomain> = ctx.domain::<MediaDomain>();
         media
             .submit_raw(TaskSubmission::new("follower").key("same-module-follower"))
@@ -115,17 +131,15 @@ async fn ctx_domain_self_submit_applies_owning_module_defaults() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor(
-                    "leader",
-                    SameDomainSubmitter {
-                        submitted: submitted_clone,
-                    },
-                )
-                .raw_executor("follower", {
+                .task::<MediaLeaderTask>(SameDomainSubmitter {
+                    submitted: submitted_clone,
+                })
+                .task::<MediaFollowerTask>({
                     struct Follower(Arc<AtomicBool>);
-                    impl TaskExecutor for Follower {
+                    impl TypedExecutor<MediaFollowerTask> for Follower {
                         async fn execute<'a>(
                             &'a self,
+                            _payload: MediaFollowerTask,
                             _ctx: &'a TaskContext,
                         ) -> Result<(), TaskError> {
                             self.0.store(true, Ordering::SeqCst);
@@ -177,8 +191,12 @@ async fn ctx_try_domain_returns_none_for_unknown_domain() {
     }
 
     struct TryDomainExecutor(Arc<std::sync::Mutex<Option<bool>>>);
-    impl TaskExecutor for TryDomainExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<ProbeTask> for TryDomainExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: ProbeTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             let found = ctx.try_domain::<NonexistentDomain>().is_some();
             *self.0.lock().unwrap() = Some(found);
             Ok(())
@@ -187,7 +205,7 @@ async fn ctx_try_domain_returns_none_for_unknown_domain() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<TestDomain>::new().raw_executor("probe", TryDomainExecutor(result_clone)))
+        .domain(Domain::<TestDomain>::new().task::<ProbeTask>(TryDomainExecutor(result_clone)))
         .max_concurrency(2)
         .poll_interval(Duration::from_millis(20))
         .build()
@@ -223,8 +241,12 @@ async fn spawn_child_routes_through_owning_module() {
     let child_ran_clone = child_ran.clone();
 
     struct SpawnChildExecutor;
-    impl TaskExecutor for SpawnChildExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<SpawnerTask> for SpawnChildExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: SpawnerTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             ctx.spawn_child(TaskSubmission::new("worker").key("spawned-child"))
                 .await?;
             Ok(())
@@ -232,8 +254,12 @@ async fn spawn_child_routes_through_owning_module() {
     }
 
     struct WorkerExecutor(Arc<AtomicBool>);
-    impl TaskExecutor for WorkerExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<WorkerTask> for WorkerExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: WorkerTask,
+            _ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             self.0.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -243,8 +269,8 @@ async fn spawn_child_routes_through_owning_module() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<TestDomain>::new()
-                .raw_executor("spawner", SpawnChildExecutor)
-                .raw_executor("worker", WorkerExecutor(child_ran_clone)),
+                .task::<SpawnerTask>(SpawnChildExecutor)
+                .task::<WorkerTask>(WorkerExecutor(child_ran_clone)),
         )
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(20))
@@ -280,8 +306,12 @@ struct CrossDomainParentExec {
     child_submitted: Arc<AtomicBool>,
 }
 
-impl TaskExecutor for CrossDomainParentExec {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl TypedExecutor<MediaParentTask> for CrossDomainParentExec {
+    async fn execute<'a>(
+        &'a self,
+        _payload: MediaParentTask,
+        ctx: &'a TaskContext,
+    ) -> Result<(), TaskError> {
         let analytics: DomainHandle<AnalyticsDomain> = ctx.domain::<AnalyticsDomain>();
         analytics
             .submit_raw(TaskSubmission::new("work").key("cross-child"))
@@ -304,16 +334,19 @@ async fn cross_domain_parent_child_lifecycle() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor(
-            "parent",
-            CrossDomainParentExec {
+        .domain(
+            Domain::<MediaDomain>::new().task::<MediaParentTask>(CrossDomainParentExec {
                 child_submitted: child_submitted_clone,
-            },
-        ))
-        .domain(Domain::<AnalyticsDomain>::new().raw_executor("work", {
+            }),
+        )
+        .domain(Domain::<AnalyticsDomain>::new().task::<AnalyticsWorkTask>({
             struct AnalyticsExec(Arc<AtomicBool>);
-            impl TaskExecutor for AnalyticsExec {
-                async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+            impl TypedExecutor<AnalyticsWorkTask> for AnalyticsExec {
+                async fn execute<'a>(
+                    &'a self,
+                    _payload: AnalyticsWorkTask,
+                    _ctx: &'a TaskContext,
+                ) -> Result<(), TaskError> {
                     self.0.store(true, Ordering::SeqCst);
                     Ok(())
                 }
@@ -371,13 +404,12 @@ async fn cross_domain_parent_child_lifecycle() {
 async fn cross_domain_failure_cascade() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor(
-            "parent",
-            CrossDomainParentExec {
+        .domain(
+            Domain::<MediaDomain>::new().task::<MediaParentTask>(CrossDomainParentExec {
                 child_submitted: Arc::new(AtomicBool::new(false)),
-            },
-        ))
-        .domain(Domain::<AnalyticsDomain>::new().raw_executor("work", AlwaysFailExecutor))
+            }),
+        )
+        .domain(Domain::<AnalyticsDomain>::new().task::<AnalyticsWorkTask>(AlwaysFailExecutor))
         .max_concurrency(4)
         .max_retries(0)
         .poll_interval(Duration::from_millis(20))
@@ -427,9 +459,9 @@ async fn cross_domain_failure_cascade() {
 async fn scheduler_domains_returns_registered_modules() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<AlphaDomain>::new().raw_executor("work", NoopExecutor))
-        .domain(Domain::<BetaDomain>::new().raw_executor("work", NoopExecutor))
-        .domain(Domain::<GammaDomain>::new().raw_executor("work", NoopExecutor))
+        .domain(Domain::<AlphaDomain>::new().task::<AlphaWorkTask>(NoopExecutor))
+        .domain(Domain::<BetaDomain>::new().task::<BetaWorkTask>(NoopExecutor))
+        .domain(Domain::<GammaDomain>::new().task::<GammaWorkTask>(NoopExecutor))
         .max_concurrency(4)
         .build()
         .await
@@ -447,8 +479,29 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
 
     let barrier_clone = barrier.clone();
     struct BarrierExecutor(Arc<tokio::sync::Barrier>);
-    impl TaskExecutor for BarrierExecutor {
-        async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl TypedExecutor<AlphaWorkTask> for BarrierExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: AlphaWorkTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
+            self.0.wait().await;
+            tokio::select! {
+                _ = ctx.token().cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+            }
+            Ok(())
+        }
+    }
+
+    // Need a separate type for BetaWorkTask since BarrierExecutor already impls for AlphaWorkTask
+    struct BarrierExecutorBeta(Arc<tokio::sync::Barrier>);
+    impl TypedExecutor<BetaWorkTask> for BarrierExecutorBeta {
+        async fn execute<'a>(
+            &'a self,
+            _payload: BetaWorkTask,
+            ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             self.0.wait().await;
             tokio::select! {
                 _ = ctx.token().cancelled() => {},
@@ -460,8 +513,12 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
 
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<AlphaDomain>::new().raw_executor("work", BarrierExecutor(barrier.clone())))
-        .domain(Domain::<BetaDomain>::new().raw_executor("work", BarrierExecutor(barrier_clone)))
+        .domain(
+            Domain::<AlphaDomain>::new().task::<AlphaWorkTask>(BarrierExecutor(barrier.clone())),
+        )
+        .domain(
+            Domain::<BetaDomain>::new().task::<BetaWorkTask>(BarrierExecutorBeta(barrier_clone)),
+        )
         .max_concurrency(4)
         .poll_interval(Duration::from_millis(10))
         .build()
@@ -509,8 +566,8 @@ async fn scheduler_active_tasks_returns_tasks_from_all_modules() {
 async fn cross_domain_cancel_by_tag_via_domain_handles() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<AlphaDomain>::new().raw_executor("work", NoopExecutor))
-        .domain(Domain::<BetaDomain>::new().raw_executor("work", NoopExecutor))
+        .domain(Domain::<AlphaDomain>::new().task::<AlphaWorkTask>(NoopExecutor))
+        .domain(Domain::<BetaDomain>::new().task::<BetaWorkTask>(NoopExecutor))
         .max_concurrency(8)
         .build()
         .await
@@ -595,8 +652,8 @@ async fn parent_method_inherits_ttl_and_tags() {
         .store(TaskStore::open_memory().await.unwrap())
         .domain(
             Domain::<MediaDomain>::new()
-                .raw_executor("parent", NoopExecutor)
-                .raw_executor("child", NoopExecutor),
+                .task::<MediaParentTask>(NoopExecutor)
+                .task::<MediaChildTask>(NoopExecutor),
         )
         .max_concurrency(2)
         .build()
@@ -671,7 +728,7 @@ async fn parent_method_inherits_ttl_and_tags() {
 async fn event_header_module_field_populated_from_task_type_prefix() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumbnail", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<MediaThumbnailTask>(NoopExecutor))
         .max_concurrency(4)
         .build()
         .await
@@ -719,8 +776,8 @@ async fn event_header_module_field_populated_from_task_type_prefix() {
 async fn module_receiver_events_match_module_field() {
     let sched = Scheduler::builder()
         .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<MediaDomain>::new().raw_executor("thumbnail", NoopExecutor))
-        .domain(Domain::<SyncDomain>::new().raw_executor("push", NoopExecutor))
+        .domain(Domain::<MediaDomain>::new().task::<MediaThumbnailTask>(NoopExecutor))
+        .domain(Domain::<SyncDomain>::new().task::<PushTask>(NoopExecutor))
         .max_concurrency(8)
         .build()
         .await

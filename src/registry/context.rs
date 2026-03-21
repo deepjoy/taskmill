@@ -99,10 +99,14 @@ impl TaskContext {
     /// }
     /// ```
     pub fn payload<T: TypedTask>(&self) -> Result<T, TaskError> {
-        self.record
-            .deserialize_payload()
-            .map_err(TaskError::from)?
-            .ok_or_else(|| TaskError::new("missing payload"))
+        match self.record.deserialize_payload().map_err(TaskError::from)? {
+            Some(v) => Ok(v),
+            // No payload stored — try deserializing from JSON `null`.
+            // This succeeds for unit-struct typed tasks (e.g. `struct Noop;`)
+            // that are submitted via raw `TaskSubmission::new(...)`.
+            None => serde_json::from_value::<T>(serde_json::Value::Null)
+                .map_err(|_| TaskError::new("missing payload")),
+        }
     }
 
     // ── Shared state ─────────────────────────────────────────────────

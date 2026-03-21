@@ -891,11 +891,11 @@ impl ModuleHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::domain::{Domain, DomainKey, TypedExecutor};
     use crate::priority::Priority;
-    use crate::registry::{TaskContext, TaskExecutor};
+    use crate::registry::TaskContext;
     use crate::task::retry::{BackoffStrategy, RetryPolicy};
     use crate::task::{TaskError, TypedTask};
 
@@ -903,8 +903,12 @@ mod tests {
 
     struct NoopExecutor;
 
-    impl TaskExecutor for NoopExecutor {
-        async fn execute<'a>(&'a self, _ctx: &'a TaskContext) -> Result<(), TaskError> {
+    impl<T: TypedTask> TypedExecutor<T> for NoopExecutor {
+        async fn execute<'a>(
+            &'a self,
+            _payload: T,
+            _ctx: &'a TaskContext,
+        ) -> Result<(), TaskError> {
             Ok(())
         }
     }
@@ -914,19 +918,20 @@ mod tests {
         path: String,
     }
 
-    struct TestDomain;
-    impl crate::domain::DomainKey for TestDomain {
-        const NAME: &'static str = "test";
+    struct MediaDomain;
+    impl DomainKey for MediaDomain {
+        const NAME: &'static str = "media";
     }
 
     impl TypedTask for ThumbTask {
-        type Domain = TestDomain;
+        type Domain = MediaDomain;
         const TASK_TYPE: &'static str = "thumbnail";
     }
 
     #[test]
     fn new_stores_name_and_typed_executor_reads_task_type() {
-        let module = Module::new("media").typed_executor::<ThumbTask, _>(Arc::new(NoopExecutor));
+        let domain = Domain::<MediaDomain>::new().task::<ThumbTask>(NoopExecutor);
+        let module = domain.into_module();
 
         assert_eq!(module.name(), "media");
         assert_eq!(module.prefix(), "media::");
