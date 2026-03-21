@@ -18,6 +18,8 @@ mod common;
 mod cross_module;
 #[path = "integration/dependencies.rs"]
 mod dependencies;
+#[path = "integration/memo.rs"]
+mod memo;
 #[path = "integration/module_features.rs"]
 mod module_features;
 #[path = "integration/modules.rs"]

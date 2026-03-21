@@ -10,13 +10,15 @@ use super::{StoreError, TaskStore};
 impl TaskStore {
     // ── Hierarchy ───────────────────────────────────────────────────
 
-    /// Transition a running parent task to `waiting` status.
+    /// Transition a running parent task to `waiting` status, optionally
+    /// persisting a memo blob from `execute()`.
     ///
     /// Called after the parent's executor returns when it has spawned children.
-    pub async fn set_waiting(&self, id: i64) -> Result<(), StoreError> {
+    pub async fn set_waiting(&self, id: i64, memo: Option<&[u8]>) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE tasks SET status = 'waiting', started_at = NULL WHERE id = ? AND status = 'running'",
+            "UPDATE tasks SET status = 'waiting', started_at = NULL, memo = ? WHERE id = ? AND status = 'running'",
         )
+        .bind(memo)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -242,7 +244,7 @@ mod tests {
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
 
-        store.set_waiting(task.id).await.unwrap();
+        store.set_waiting(task.id, None).await.unwrap();
 
         let t = store.task_by_id(task.id).await.unwrap().unwrap();
         assert_eq!(t.status, TaskStatus::Waiting);
@@ -259,7 +261,7 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
         store.pop_next().await.unwrap();
-        store.set_waiting(parent_id).await.unwrap();
+        store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
@@ -281,7 +283,7 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
         store.pop_next().await.unwrap();
-        store.set_waiting(parent_id).await.unwrap();
+        store.set_waiting(parent_id, None).await.unwrap();
 
         for i in 0..2 {
             let mut sub = make_submission(&format!("child-{i}"), Priority::NORMAL);
@@ -305,7 +307,7 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
         store.pop_next().await.unwrap();
-        store.set_waiting(parent_id).await.unwrap();
+        store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
@@ -402,7 +404,7 @@ mod tests {
         let sub = make_submission("fin", Priority::NORMAL);
         store.submit(&sub).await.unwrap();
         let task = store.pop_next().await.unwrap().unwrap();
-        store.set_waiting(task.id).await.unwrap();
+        store.set_waiting(task.id, None).await.unwrap();
 
         store.set_running_for_finalize(task.id).await.unwrap();
         let t = store.task_by_id(task.id).await.unwrap().unwrap();
@@ -490,7 +492,7 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
         store.pop_next().await.unwrap();
-        store.set_waiting(parent_id).await.unwrap();
+        store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);

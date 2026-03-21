@@ -613,6 +613,7 @@ impl TypedExecutor<ParentTask> for FinalizeTrackingExecutor {
     async fn finalize<'a>(
         &'a self,
         _payload: ParentTask,
+        _memo: (),
         _ctx: DomainTaskContext<'a, ParentDomain>,
     ) -> Result<(), TaskError> {
         self.finalized

@@ -73,8 +73,8 @@ pub(crate) async fn insert_history(
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
             retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key,
-            ttl_seconds, ttl_from, expires_at, run_after, max_retries)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ttl_seconds, ttl_from, expires_at, run_after, max_retries, memo)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.task_type)
     .bind(&task.key)
@@ -112,6 +112,7 @@ pub(crate) async fn insert_history(
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
     )
     .bind(task.max_retries)
+    .bind(&task.memo)
     .execute(&mut **conn)
     .await?;
 

@@ -111,7 +111,9 @@ pub(crate) async fn spawn_task(
 
         let result = match phase {
             ExecutionPhase::Execute => executor.execute_erased(&prepared.ctx).await,
-            ExecutionPhase::Finalize => executor.finalize_erased(&prepared.ctx).await,
+            ExecutionPhase::Finalize => {
+                executor.finalize_erased(&prepared.ctx).await.map(|()| None)
+            } // finalize doesn't produce a memo
         };
 
         // Read IO bytes from the context tracker.
@@ -121,11 +123,12 @@ pub(crate) async fn spawn_task(
         drop(prepared.ctx);
 
         match result {
-            Ok(()) => {
+            Ok(memo) => {
                 completion::handle_success(
                     &task,
                     phase,
                     &metrics,
+                    memo,
                     &completion_deps,
                     decrement_module,
                 )

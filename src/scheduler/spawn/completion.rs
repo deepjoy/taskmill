@@ -30,6 +30,7 @@ pub(crate) async fn handle_success(
     task: &TaskRecord,
     phase: ExecutionPhase,
     metrics: &IoBudget,
+    memo: Option<Vec<u8>>,
     deps: &CompletionDeps,
     decrement_module: impl FnOnce(),
 ) {
@@ -46,7 +47,7 @@ pub(crate) async fn handle_success(
     {
         match deps.store.active_children_count(task_id).await {
             Ok(count) if count > 0 => {
-                if let Err(e) = deps.store.set_waiting(task_id).await {
+                if let Err(e) = deps.store.set_waiting(task_id, memo.as_deref()).await {
                     tracing::error!(task_id, error = %e, "failed to set task to waiting");
                 }
                 decrement_module();

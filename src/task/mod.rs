@@ -243,6 +243,9 @@ pub struct TaskRecord {
     /// with pre-migration tasks). Resolved at submit time from: per-type
     /// retry policy → global `SchedulerConfig::max_retries`.
     pub max_retries: Option<i32>,
+    /// Serialized memo from `execute()`, delivered to `finalize()`.
+    /// `None` when no memo was produced (e.g. `Memo = ()`).
+    pub memo: Option<Vec<u8>>,
 }
 
 impl TaskRecord {
@@ -319,6 +322,8 @@ pub struct TaskHistoryRecord {
     pub tags: HashMap<String, String>,
     /// Per-task retry limit. `None` means use global default.
     pub max_retries: Option<i32>,
+    /// Serialized memo from `execute()`, preserved for debugging/observability.
+    pub memo: Option<Vec<u8>>,
 }
 
 /// IO budget for a task: expected or actual disk and network IO bytes.

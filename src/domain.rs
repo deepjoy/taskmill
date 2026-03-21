@@ -20,6 +20,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{de::DeserializeOwned, Serialize};
+
 use crate::module::{ExecutorOptions, ModuleExecutor, ModuleHandle};
 use crate::priority::Priority;
 use crate::registry::{DomainTaskContext, ErasedExecutor, TaskContext, TaskExecutor};
@@ -181,19 +183,29 @@ pub struct TaskTypeOptions {
 ///     }
 /// }
 /// ```
-pub trait TypedExecutor<T: TypedTask>: Send + Sync + 'static {
+pub trait TypedExecutor<
+    T: TypedTask,
+    Memo: Serialize + DeserializeOwned + Send + Sync + 'static = (),
+>: Send + Sync + 'static
+{
     /// Primary execution. Called once per dispatch.
+    ///
+    /// Returns a `Memo` that will be persisted and passed to [`finalize()`](Self::finalize)
+    /// after all children complete. For the default `Memo = ()`, the return type
+    /// is `Result<(), TaskError>` — identical to the pre-memo API.
     fn execute<'a>(
         &'a self,
         payload: T,
         ctx: DomainTaskContext<'a, T::Domain>,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<Memo, TaskError>> + Send + 'a;
 
     /// Called when all child tasks spawned by this task have settled.
+    /// Receives the `Memo` returned by [`execute()`](Self::execute).
     /// Default: no-op.
     fn finalize<'a>(
         &'a self,
         _payload: T,
+        _memo: Memo,
         _ctx: DomainTaskContext<'a, T::Domain>,
     ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a {
         async { Ok(()) }
@@ -212,26 +224,46 @@ pub trait TypedExecutor<T: TypedTask>: Send + Sync + 'static {
 
 // ── TypedExecutorAdapter ─────────────────────────────────────────────
 
-/// Internal adapter that wraps a [`TypedExecutor<T>`] into a [`TaskExecutor`]
+/// Internal adapter that wraps a [`TypedExecutor<T, Memo>`] into a [`TaskExecutor`]
 /// for the scheduler engine.
 ///
-/// Handles payload deserialization before delegating to the typed executor.
-struct TypedExecutorAdapter<T, E> {
+/// Handles payload deserialization and memo serialization/deserialization.
+struct TypedExecutorAdapter<T, M, E> {
     executor: E,
-    _marker: PhantomData<fn() -> T>,
+    _marker: PhantomData<fn() -> (T, M)>,
 }
 
-impl<T: TypedTask, E: TypedExecutor<T>> TaskExecutor for TypedExecutorAdapter<T, E> {
-    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
+impl<T, M, E> TaskExecutor for TypedExecutorAdapter<T, M, E>
+where
+    T: TypedTask,
+    M: Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: TypedExecutor<T, M>,
+{
+    async fn execute<'a>(&'a self, ctx: &'a TaskContext) -> Result<Option<Vec<u8>>, TaskError> {
         let payload: T = ctx.payload()?;
         let dctx = DomainTaskContext::<T::Domain>::new(ctx);
-        self.executor.execute(payload, dctx).await
+        let memo = self.executor.execute(payload, dctx).await?;
+
+        // Don't persist () — serialize to None.
+        if std::any::TypeId::of::<M>() == std::any::TypeId::of::<()>() {
+            return Ok(None);
+        }
+
+        let bytes = serde_json::to_vec(&memo)
+            .map_err(|e| TaskError::permanent(format!("memo serialization: {e}")))?;
+        Ok(Some(bytes))
     }
 
     async fn finalize<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
         let payload: T = ctx.payload()?;
+        let memo: M = match &ctx.record().memo {
+            Some(bytes) => serde_json::from_slice(bytes)
+                .map_err(|e| TaskError::permanent(format!("memo deserialization: {e}")))?,
+            None => serde_json::from_value(serde_json::Value::Null)
+                .map_err(|e| TaskError::permanent(format!("memo deserialization: {e}")))?,
+        };
         let dctx = DomainTaskContext::<T::Domain>::new(ctx);
-        self.executor.finalize(payload, dctx).await
+        self.executor.finalize(payload, memo, dctx).await
     }
 
     async fn on_cancel<'a>(&'a self, ctx: &'a TaskContext) -> Result<(), TaskError> {
@@ -239,6 +271,19 @@ impl<T: TypedTask, E: TypedExecutor<T>> TaskExecutor for TypedExecutorAdapter<T,
         let dctx = DomainTaskContext::<T::Domain>::new(ctx);
         self.executor.on_cancel(payload, dctx).await
     }
+}
+
+/// Build an erased executor from a typed executor and memo type.
+fn erase_executor<T, M, E>(executor: E) -> Arc<dyn ErasedExecutor>
+where
+    T: TypedTask,
+    M: Serialize + DeserializeOwned + Send + Sync + 'static,
+    E: TypedExecutor<T, M>,
+{
+    Arc::new(TypedExecutorAdapter {
+        executor,
+        _marker: PhantomData::<fn() -> (T, M)>,
+    })
 }
 
 // ── Domain<D> ────────────────────────────────────────────────────────
@@ -317,7 +362,36 @@ impl<D: DomainKey> Domain<D> {
         T: TypedTask<Domain = D>,
     {
         let config = T::config();
-        self.task_inner::<T>(executor, config.ttl, config.retry_policy)
+        self.task_inner::<T>(
+            erase_executor::<T, (), _>(executor),
+            config.ttl,
+            config.retry_policy,
+        )
+    }
+
+    /// Register a typed executor that produces a memo in `execute()` which
+    /// is persisted and passed to `finalize()`.
+    ///
+    /// Both `T` and `Memo` are inferred from the executor's
+    /// `TypedExecutor<T, Memo>` impl — turbofish is only needed when the
+    /// executor is generic over task types.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// domain.task_memo(ScanL1Executor)
+    /// ```
+    pub fn task_memo<T, Memo>(self, executor: impl TypedExecutor<T, Memo>) -> Self
+    where
+        T: TypedTask<Domain = D>,
+        Memo: Serialize + DeserializeOwned + Send + Sync + 'static,
+    {
+        let config = T::config();
+        self.task_inner::<T>(
+            erase_executor::<T, Memo, _>(executor),
+            config.ttl,
+            config.retry_policy,
+        )
     }
 
     /// Register a typed executor with per-type option overrides.
@@ -332,25 +406,35 @@ impl<D: DomainKey> Domain<D> {
         let config = T::config();
         let ttl = options.ttl.or(config.ttl);
         let retry_policy = options.retry_policy.or(config.retry_policy);
-        self.task_inner::<T>(executor, ttl, retry_policy)
+        self.task_inner::<T>(erase_executor::<T, (), _>(executor), ttl, retry_policy)
     }
 
-    fn task_inner<T>(
-        mut self,
-        executor: impl TypedExecutor<T>,
-        ttl: Option<Duration>,
-        retry_policy: Option<RetryPolicy>,
+    /// Like [`task_with()`](Self::task_with), but for executors that produce
+    /// a memo (see [`task_memo()`](Self::task_memo)).
+    pub fn task_with_memo<T, Memo>(
+        self,
+        executor: impl TypedExecutor<T, Memo>,
+        options: TaskTypeOptions,
     ) -> Self
     where
-        T: TypedTask,
+        T: TypedTask<Domain = D>,
+        Memo: Serialize + DeserializeOwned + Send + Sync + 'static,
     {
-        let adapter = TypedExecutorAdapter {
-            executor,
-            _marker: PhantomData::<fn() -> T>,
-        };
+        let config = T::config();
+        let ttl = options.ttl.or(config.ttl);
+        let retry_policy = options.retry_policy.or(config.retry_policy);
+        self.task_inner::<T>(erase_executor::<T, Memo, _>(executor), ttl, retry_policy)
+    }
+
+    fn task_inner<T: TypedTask>(
+        mut self,
+        executor: Arc<dyn ErasedExecutor>,
+        ttl: Option<Duration>,
+        retry_policy: Option<RetryPolicy>,
+    ) -> Self {
         self.executors.push(ModuleExecutor {
             task_type: T::TASK_TYPE.to_string(),
-            executor: Arc::new(adapter) as Arc<dyn ErasedExecutor>,
+            executor,
             options: ExecutorOptions { ttl, retry_policy },
         });
         self

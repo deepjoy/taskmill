@@ -119,6 +119,7 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         // Tags are populated separately from the task_tags table.
         tags: std::collections::HashMap::new(),
         max_retries: row.get("max_retries"),
+        memo: row.get("memo"),
     }
 }
 
@@ -178,6 +179,7 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         // Tags are populated separately from the task_history_tags table.
         tags: std::collections::HashMap::new(),
         max_retries: row.get("max_retries"),
+        memo: row.get("memo"),
     }
 }
 

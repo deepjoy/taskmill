@@ -61,13 +61,14 @@ pub(crate) trait TaskExecutor: Send + Sync + 'static {
     /// - `ctx`: Execution context with the task record, cancellation token,
     ///   and progress reporter.
     ///
-    /// On success, return `Ok(())`. Use [`TaskContext::record_read_bytes`]
+    /// On success, return `Ok(None)` or `Ok(Some(bytes))` with serialized
+    /// memo data to pass to `finalize()`. Use [`TaskContext::record_read_bytes`]
     /// and [`TaskContext::record_write_bytes`] to report IO during execution.
     /// On failure, return a [`TaskError`] indicating whether retry is appropriate.
     fn execute<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> impl Future<Output = Result<(), TaskError>> + Send + 'a;
+    ) -> impl Future<Output = Result<Option<Vec<u8>>, TaskError>> + Send + 'a;
 
     /// Called after all children of a parent task have completed.
     ///
@@ -110,6 +111,9 @@ pub struct TaskTypeRegistry {
     type_retry_policies: HashMap<String, RetryPolicy>,
 }
 
+/// Serialized memo bytes returned by `execute_erased`.
+type MemoBytes = Option<Vec<u8>>;
+
 /// Object-safe wrapper around [`TaskExecutor`] for dynamic dispatch in the registry.
 ///
 /// This trait exists because RPITIT (`impl Future`) in `TaskExecutor` is not
@@ -119,7 +123,7 @@ pub(crate) trait ErasedExecutor: Send + Sync + 'static {
     fn execute_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>>;
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<MemoBytes, TaskError>> + Send + 'a>>;
 
     fn finalize_erased<'a>(
         &'a self,
@@ -136,7 +140,7 @@ impl<T: TaskExecutor> ErasedExecutor for T {
     fn execute_erased<'a>(
         &'a self,
         ctx: &'a TaskContext,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), TaskError>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<MemoBytes, TaskError>> + Send + 'a>> {
         Box::pin(self.execute(ctx))
     }
 
