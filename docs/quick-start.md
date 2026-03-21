@@ -277,7 +277,7 @@ impl TypedExecutor<MultipartUpload> for MultipartUploader {
     }
 
     async fn finalize(
-        &self, upload: MultipartUpload, ctx: &TaskContext,
+        &self, upload: MultipartUpload, _memo: (), ctx: &TaskContext,
     ) -> Result<(), TaskError> {
         // Called after all children complete
         complete_multipart_upload(&upload).await

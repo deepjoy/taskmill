@@ -534,7 +534,7 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn finalize(&self, upload: MultipartUpload, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
+//!     async fn finalize(&self, upload: MultipartUpload, _memo: (), ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
 //!         // All parts uploaded — complete the multipart upload.
 //!         complete_multipart(&upload).await?;
 //!         Ok(())

@@ -165,7 +165,7 @@ The `finalize` and `on_cancel` hooks follow the same pattern:
 
 ```rust
 impl TypedExecutor<Thumbnail> for ThumbnailExec {
-    async fn finalize(&self, thumb: Thumbnail, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn finalize(&self, thumb: Thumbnail, _memo: (), ctx: &TaskContext) -> Result<(), TaskError> {
         // called after all children settle
         Ok(())
     }
