@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774141989667,
+  "lastUpdate": 1774148864312,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -4793,6 +4793,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 458530,
             "range": "± 7878",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "61ce1ca1a34e51beea7cd126015c438bc85c0c6e",
+          "message": "fix: use distinct critcmp group names for PR benchmark comparison (#72)\n\n## Summary\n\n- The cached main baseline and the PR benchmark results were both saved\nunder the critcmp group name `current`, causing `critcmp` to merge them\ninto a single column instead of producing a two-column comparison with\nratios.\n- Import the cached baseline under the group name `main` before\ncomparing, so `critcmp` sees two distinct groups (`main` vs `current`)\nand renders a proper side-by-side diff.",
+          "timestamp": "2026-03-22T02:39:26Z",
+          "tree_id": "b02e22a2c141e6df5c13b925d7a5bf5bd6d4d501",
+          "url": "https://github.com/deepjoy/taskmill/commit/61ce1ca1a34e51beea7cd126015c438bc85c0c6e"
+        },
+        "date": 1774148863970,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3501397,
+            "range": "± 240171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 18294590,
+            "range": "± 1237482",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 78670327,
+            "range": "± 4966783",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 11771885,
+            "range": "± 153928",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 28560460,
+            "range": "± 447241",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 56838309,
+            "range": "± 1233869",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 7744411,
+            "range": "± 129279",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 29354580,
+            "range": "± 482984",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 56389982,
+            "range": "± 1263792",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups_500",
+            "value": 257833605,
+            "range": "± 5390594",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group_500",
+            "value": 440304163,
+            "range": "± 6462702",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 438823262,
+            "range": "± 6407058",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 441528191,
+            "range": "± 7200077",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 440252466,
+            "range": "± 6427872",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 442205787,
+            "range": "± 6549021",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 558031,
+            "range": "± 15034",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 561638,
+            "range": "± 7850",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 581028,
+            "range": "± 10358",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 151299,
+            "range": "± 1525",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 363868,
+            "range": "± 911",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1311933,
+            "range": "± 3626",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 916639,
+            "range": "± 35263",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 946070,
+            "range": "± 24259",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 968180,
+            "range": "± 33326",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 43,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 80,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 193,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 451,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure_500",
+            "value": 392820122,
+            "range": "± 5278810",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 160409624,
+            "range": "± 2008784",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 160665518,
+            "range": "± 1734192",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 160671036,
+            "range": "± 1838892",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 161233900,
+            "range": "± 2201473",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_1000_tasks",
+            "value": 189786342,
+            "range": "± 7562802",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit_1000",
+            "value": 249366626,
+            "range": "± 10916942",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete_1000",
+            "value": 515646386,
+            "range": "± 8567213",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 125057,
+            "range": "± 4328",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 125336,
+            "range": "± 4974",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 124703,
+            "range": "± 6396",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 393933317,
+            "range": "± 7103147",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 331761869,
+            "range": "± 5230295",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 286298427,
+            "range": "± 7069046",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 256391029,
+            "range": "± 4989636",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit_1000",
+            "value": 35180026,
+            "range": "± 3244345",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch_500",
+            "value": 288181281,
+            "range": "± 5640847",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 257817574,
+            "range": "± 5209899",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 260348003,
+            "range": "± 5367053",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot_100_tasks",
+            "value": 86534071,
+            "range": "± 2703929",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 92876901,
+            "range": "± 4889180",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 167018416,
+            "range": "± 10058378",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 243535154,
+            "range": "± 14786986",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 411155421,
+            "range": "± 25084306",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1118495,
+            "range": "± 147100",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9614719,
+            "range": "± 1628845",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 54129790,
+            "range": "± 6680166",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 132002,
+            "range": "± 4912",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 224043,
+            "range": "± 4168",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 608101,
+            "range": "± 6348",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 136755,
+            "range": "± 6907",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 196195,
+            "range": "± 6591",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 464025,
+            "range": "± 7231",
             "unit": "ns/iter"
           }
         ]
