@@ -63,7 +63,10 @@ jobs:
 
       - name: Cache baseline for PR comparison
         if: github.event_name == 'push'
-        run: critcmp --export current > baseline.json
+        run: |
+          critcmp --export current > baseline.json
+          # Rename the group inside the JSON so critcmp can diff two distinct columns.
+          sed -i 's/"current"/"main"/' baseline.json
 
       - name: Save baseline to cache
         if: github.event_name == 'push'
@@ -90,7 +93,10 @@ jobs:
             echo "::warning::No benchmark baseline found. Merge to main to generate one."
             exit 0
           fi
-          critcmp --export current > pr.json
+          critcmp --export current > pr-raw.json
+          # Rename so critcmp sees "pr" vs "main" as two distinct columns.
+          sed -i 's/"current"/"pr"/' pr-raw.json
+          mv pr-raw.json pr.json
           echo 'result<<EOF' >> $GITHUB_OUTPUT
           critcmp baseline.json pr.json >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
