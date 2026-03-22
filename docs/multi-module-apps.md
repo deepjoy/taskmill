@@ -271,6 +271,29 @@ process.cancel_where(|task| {
 }).await?;
 ```
 
+### Namespace-scoped queries with tag key prefixes
+
+When multiple libraries share a scheduler, each naturally namespaces its tags with a prefix (`billing.customer_id`, `media.pipeline`, etc.). Use the tag key prefix APIs to discover and operate on an entire namespace without knowing every possible key upfront:
+
+```rust
+let billing: DomainHandle<Billing> = scheduler.domain::<Billing>();
+
+// Discover all billing.* tag keys in use
+let keys = billing.tag_keys_by_prefix("billing.").await?;
+// e.g. ["billing.customer_id", "billing.plan", "billing.region"]
+
+// Count how many billing tasks are active
+let count = billing.count_by_tag_key_prefix("billing.", None).await?;
+
+// Fetch those tasks (optionally filter by status)
+let tasks = billing.tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Pending)).await?;
+
+// Cancel all tasks in the billing namespace
+let cancelled = billing.cancel_by_tag_key_prefix("billing.").await?;
+```
+
+LIKE wildcards (`%`, `_`) in the prefix are escaped automatically — only true prefix matching is performed.
+
 ## Module-level pause and resume
 
 Each domain can be independently paused and resumed without affecting other domains.

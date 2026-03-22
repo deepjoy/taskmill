@@ -339,7 +339,7 @@ impl Scheduler {
 
     /// Cancel all active tasks that have any tag key matching the given prefix.
     ///
-    /// Finds tasks via [`TaskStore::tasks_by_tag_key_prefix`] and cancels each.
+    /// Finds tasks via [`crate::TaskStore::tasks_by_tag_key_prefix`] and cancels each.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag_key_prefix(
         &self,

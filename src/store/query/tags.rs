@@ -1,4 +1,4 @@
-//! Tag-based queries: filtering and aggregation by task tags.
+//! Tag-based queries: filtering, aggregation, and prefix discovery by task tags.
 
 use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
