@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 #[cfg(feature = "profile")]
 use pprof::criterion::{Output, PProfProfiler};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,7 @@ fn bench_dep_chain_submit(c: &mut Criterion) {
     let mut group = c.benchmark_group("dep_chain_submit");
 
     for depth in [10usize, 50, 200] {
+        group.throughput(Throughput::Elements(depth as u64));
         group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
             b.to_async(&rt).iter_custom(|iters| async move {
                 let mut total = Duration::ZERO;
@@ -103,6 +104,7 @@ fn bench_dep_chain_dispatch(c: &mut Criterion) {
     group.sample_size(20);
 
     for depth in [10usize, 25, 50] {
+        group.throughput(Throughput::Elements(depth as u64));
         group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
             b.to_async(&rt).iter_custom(|iters| async move {
                 let mut total = Duration::ZERO;
@@ -168,6 +170,7 @@ fn bench_dep_fan_in_dispatch(c: &mut Criterion) {
     group.sample_size(20);
 
     for width in [10usize, 50, 100] {
+        group.throughput(Throughput::Elements((width + 1) as u64));
         group.bench_with_input(BenchmarkId::from_parameter(width), &width, |b, &width| {
             b.to_async(&rt).iter_custom(|iters| async move {
                 let mut total = Duration::ZERO;

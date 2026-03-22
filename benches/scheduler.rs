@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use taskmill::{
     Domain, DomainKey, DomainTaskContext, Priority, Scheduler, SchedulerEvent, TaskError,
@@ -91,7 +91,9 @@ async fn build_scheduler(max_concurrency: usize) -> Scheduler {
 fn bench_submit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("submit_1000_tasks", |b| {
+    let mut group = c.benchmark_group("submit_tasks");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("1000", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -108,12 +110,15 @@ fn bench_submit(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 fn bench_submit_dedup_hit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("submit_dedup_hit_1000", |b| {
+    let mut group = c.benchmark_group("submit_dedup_hit");
+    group.throughput(Throughput::Elements(999));
+    group.bench_function("1000", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -136,12 +141,15 @@ fn bench_submit_dedup_hit(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 fn bench_dispatch_and_complete(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("dispatch_and_complete_1000", |b| {
+    let mut group = c.benchmark_group("dispatch_and_complete");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("1000", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -177,11 +185,13 @@ fn bench_dispatch_and_complete(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 fn bench_peek_next_varying_depth(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("peek_next");
+    group.throughput(Throughput::Elements(1));
 
     for size in [100, 1000, 5000] {
         let store = rt.block_on(async {
@@ -215,6 +225,7 @@ fn bench_peek_next_varying_depth(c: &mut Criterion) {
 fn bench_concurrency_scaling(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("concurrency_scaling");
+    group.throughput(Throughput::Elements(500));
 
     for concurrency in [1, 2, 4, 8] {
         group.bench_with_input(
@@ -265,7 +276,9 @@ fn bench_concurrency_scaling(c: &mut Criterion) {
 fn bench_batch_submit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("batch_submit_1000", |b| {
+    let mut group = c.benchmark_group("batch_submit");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("1000", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -280,12 +293,15 @@ fn bench_batch_submit(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 fn bench_mixed_priority_dispatch(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("mixed_priority_dispatch_500", |b| {
+    let mut group = c.benchmark_group("mixed_priority_dispatch");
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("500", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -334,11 +350,13 @@ fn bench_mixed_priority_dispatch(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 fn bench_byte_progress_overhead(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("byte_progress");
+    group.throughput(Throughput::Elements(500));
 
     // Baseline: NoopExecutor (no byte reporting).
     group.bench_function("noop_500", |b| {
@@ -435,7 +453,9 @@ fn bench_byte_progress_overhead(c: &mut Criterion) {
 fn bench_byte_progress_snapshot(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("byte_progress_snapshot_100_tasks", |b| {
+    let mut group = c.benchmark_group("byte_progress_snapshot");
+    group.throughput(Throughput::Elements(100));
+    group.bench_function("100_tasks", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -484,6 +504,7 @@ fn bench_byte_progress_snapshot(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 criterion_group!(
