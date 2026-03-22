@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774152374196,
+  "lastUpdate": 1774203809485,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -6353,6 +6353,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 454673,
             "range": "± 5413",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4d1073bbf75cd7dd6e806b3e3dd5bfe96a864138",
+          "message": "feat!: normalize timestamps from TEXT to epoch millisecond INTEGER (#75)\n\n## Summary\n\n- Convert all 9 timestamp columns (`created_at`, `started_at`,\n`completed_at`, `expires_at`, `run_after`) across `tasks` and\n`task_history` tables from `TEXT` to `INTEGER` epoch milliseconds\n- Replace all `datetime('now')` / `strftime(...)` SQL expressions with\nbound `i64` parameters computed in Rust, and all TEXT formatting\n(`format(\"%Y-%m-%d %H:%M:%S\")`) with `.timestamp_millis()` calls\n- Replace the hand-rolled `parse_datetime` / `parse_2` / `parse_4` /\n`parse_frac_nanos` TEXT parser with `epoch_ms()` / `from_epoch_ms()`\nhelpers\n- Add explicit `completed_at` bind to `insert_history` (previously\nrelied on `DEFAULT (datetime('now'))` which is removed)\n- Fix `idx_tasks_expires` partial index to include `'blocked'` status\n(pre-existing bug — `expire_tasks()` queries `status IN ('pending',\n'paused', 'blocked')` but the index only covered `('pending',\n'paused')`)\n- TTL arithmetic now uses integer math (`? + (ttl_seconds * 1000)`)\ninstead of `datetime('now', '+' || ttl_seconds || ' seconds')`\n\n## Motivation\n\n- **SQL arithmetic**: integer comparisons and addition replace\n`strftime('%s', col)` conversions — simpler, faster, less error-prone\n- **Index efficiency**: INTEGER range scans outperform TEXT string\ncomparisons for expiry, `run_after` gating, and pruning\n- **Format consistency**: submission `run_after` used second precision\n(`%H:%M:%S`) while retry backoff used millisecond precision\n(`%H:%M:%S%.3f`) — epoch millis unify both\n- **Forward compatibility**: plan 042 (pause-by-group) will add new\ncolumns as epoch INTEGER; converting existing columns now avoids a\ntwo-format codebase\n\n## Breaking change\n\nStorage-level only — public Rust types remain `DateTime<Utc>`. Requires\n**database recreation** (no live migration). The active `tasks` table is\ntransient (work queue drains) and `task_history` is diagnostic, so data\nloss on recreation is acceptable.",
+          "timestamp": "2026-03-22T17:55:52Z",
+          "tree_id": "dd7131d7fe93e570b0145a18432468cacdb38a2d",
+          "url": "https://github.com/deepjoy/taskmill/commit/4d1073bbf75cd7dd6e806b3e3dd5bfe96a864138"
+        },
+        "date": 1774203809086,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3406219,
+            "range": "± 182941",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 17198729,
+            "range": "± 811413",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 76920449,
+            "range": "± 3254468",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 11168122,
+            "range": "± 101678",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 26743384,
+            "range": "± 484102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 52949513,
+            "range": "± 944402",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 7356106,
+            "range": "± 108015",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 27327146,
+            "range": "± 410070",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 52330120,
+            "range": "± 780302",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups_500",
+            "value": 243226569,
+            "range": "± 4169076",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group_500",
+            "value": 414780457,
+            "range": "± 6138447",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 407659871,
+            "range": "± 5349442",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 415546806,
+            "range": "± 5938493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 416108566,
+            "range": "± 6212515",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 414856843,
+            "range": "± 6504703",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 536509,
+            "range": "± 10678",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 541767,
+            "range": "± 7309",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 552776,
+            "range": "± 5094",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 146196,
+            "range": "± 1409",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 352950,
+            "range": "± 1890",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1268829,
+            "range": "± 5238",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 881470,
+            "range": "± 24089",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 909499,
+            "range": "± 29596",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 941053,
+            "range": "± 36330",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 49,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 75,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 186,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 268,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure_500",
+            "value": 359837344,
+            "range": "± 7820402",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 146764433,
+            "range": "± 2789852",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 146657879,
+            "range": "± 2313958",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 146868762,
+            "range": "± 1945512",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 146254952,
+            "range": "± 2003760",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_1000_tasks",
+            "value": 181227941,
+            "range": "± 5353753",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit_1000",
+            "value": 241098640,
+            "range": "± 6899457",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete_1000",
+            "value": 488988229,
+            "range": "± 8281654",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 121004,
+            "range": "± 3547",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 123836,
+            "range": "± 4885",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 123259,
+            "range": "± 3525",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 377310390,
+            "range": "± 5608108",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 311733165,
+            "range": "± 3670096",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 269211109,
+            "range": "± 5595147",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 243194929,
+            "range": "± 3738256",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit_1000",
+            "value": 32725589,
+            "range": "± 2473420",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch_500",
+            "value": 269618164,
+            "range": "± 5474591",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 243156314,
+            "range": "± 4079246",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 243177859,
+            "range": "± 5027925",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot_100_tasks",
+            "value": 80692310,
+            "range": "± 3595928",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 89375013,
+            "range": "± 3585871",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 163827083,
+            "range": "± 6733907",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 240714728,
+            "range": "± 12292290",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 388803147,
+            "range": "± 16121505",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1156190,
+            "range": "± 145708",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9678745,
+            "range": "± 776143",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 55561779,
+            "range": "± 7957407",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 128450,
+            "range": "± 2809",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 217084,
+            "range": "± 2945",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 596866,
+            "range": "± 7692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 133243,
+            "range": "± 3094",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 194201,
+            "range": "± 2977",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 459625,
+            "range": "± 4124",
             "unit": "ns/iter"
           }
         ]
