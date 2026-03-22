@@ -169,15 +169,18 @@ impl TaskStore {
     pub async fn expire_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
         let mut conn = self.begin_write().await?;
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
         // Find expired tasks (including blocked tasks — TTL ticks normally).
         let rows = sqlx::query(
             "SELECT * FROM tasks
              WHERE expires_at IS NOT NULL
-               AND expires_at <= datetime('now')
+               AND expires_at <= ?
                AND status IN ('pending', 'paused', 'blocked')
              ORDER BY expires_at ASC
              LIMIT 500",
         )
+        .bind(now_ms)
         .fetch_all(&mut *conn)
         .await?;
 
@@ -264,14 +267,16 @@ impl TaskStore {
     pub async fn expire_single(&self, id: i64) -> Result<Option<TaskRecord>, StoreError> {
         let mut conn = self.begin_write().await?;
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
             "SELECT * FROM tasks
              WHERE id = ?
                AND expires_at IS NOT NULL
-               AND expires_at <= datetime('now')
+               AND expires_at <= ?
                AND status IN ('pending', 'paused')",
         )
         .bind(id)
+        .bind(now_ms)
         .fetch_optional(&mut *conn)
         .await?;
 

@@ -382,11 +382,11 @@ impl TaskStore {
     /// Prune history records older than `max_age_days` days.
     /// Returns the number of records deleted.
     pub async fn prune_history_by_age(&self, max_age_days: i64) -> Result<u64, StoreError> {
-        let result =
-            sqlx::query("DELETE FROM task_history WHERE completed_at < datetime('now', ?)")
-                .bind(format!("-{max_age_days} days"))
-                .execute(&self.pool)
-                .await?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(max_age_days)).timestamp_millis();
+        let result = sqlx::query("DELETE FROM task_history WHERE completed_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 
