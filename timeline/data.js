@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774203809485,
+  "lastUpdate": 1774212808386,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -6743,6 +6743,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 459625,
             "range": "± 4124",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a36f033e5de17c217270cf75b197e3b1a066f684",
+          "message": "refactor!: consolidate migrations from 9 chronological files into 4 object-oriented files (#76)\n\n## Summary\n\n- Reorganize 9 chronological migration files into 4 files grouped by\ndatabase object: `tasks`, `task_history`, `task_deps`, and\n`task_tags`/`task_history_tags`\n- Fold all `ALTER TABLE ADD COLUMN` statements (label, net IO, groups,\nTTL, scheduling, dependencies, retries, memo) into their respective\n`CREATE TABLE` definitions, eliminating every ALTER statement\n- Simplify `migrate()` in `store/mod.rs` — all migrations now use\nidempotent `CREATE TABLE/INDEX IF NOT EXISTS`, removing the\n`run_alter_migration` helper\n\n### New migration layout\n\n| File | Object(s) | Indexes |\n|---|---|---|\n| `001_tasks.sql` | `tasks` (32 cols) | 6 partial indexes |\n| `002_task_history.sql` | `task_history` (30 cols) | 5 indexes |\n| `003_task_deps.sql` | `task_deps` | 1 index |\n| `004_task_tags.sql` | `task_tags`, `task_history_tags` | 2 indexes |\n\nBREAKING CHANGE: Existing SQLite databases must be recreated. This is\nacceptable as the project is pre-1.0.",
+          "timestamp": "2026-03-22T13:25:32-07:00",
+          "tree_id": "fdd50731d34b954e289d397621d213ec59c8e673",
+          "url": "https://github.com/deepjoy/taskmill/commit/a36f033e5de17c217270cf75b197e3b1a066f684"
+        },
+        "date": 1774212808050,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3093775,
+            "range": "± 176448",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 17057564,
+            "range": "± 1042052",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 81001254,
+            "range": "± 4750484",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 11643176,
+            "range": "± 187171",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 28380713,
+            "range": "± 440948",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 56867219,
+            "range": "± 670063",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 7351872,
+            "range": "± 162615",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 28948987,
+            "range": "± 755971",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 56101340,
+            "range": "± 804779",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups_500",
+            "value": 260068825,
+            "range": "± 4573074",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group_500",
+            "value": 453475856,
+            "range": "± 6055684",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 451172961,
+            "range": "± 6154912",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 455341140,
+            "range": "± 5698051",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 454836205,
+            "range": "± 4758110",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 453391533,
+            "range": "± 5893960",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 546600,
+            "range": "± 9533",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 562947,
+            "range": "± 9651",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 570463,
+            "range": "± 4231",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 152986,
+            "range": "± 1355",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 385933,
+            "range": "± 918",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1346276,
+            "range": "± 5012",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 901054,
+            "range": "± 14412",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 915157,
+            "range": "± 24805",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 954760,
+            "range": "± 22271",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 50,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 76,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 187,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 268,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure_500",
+            "value": 394984811,
+            "range": "± 4876842",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 160302384,
+            "range": "± 2197626",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 159504844,
+            "range": "± 1846502",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 159405219,
+            "range": "± 1723292",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 159650292,
+            "range": "± 2061818",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_1000_tasks",
+            "value": 191764855,
+            "range": "± 7018234",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit_1000",
+            "value": 253453409,
+            "range": "± 11083088",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete_1000",
+            "value": 522992972,
+            "range": "± 7692931",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 127086,
+            "range": "± 4405",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 128926,
+            "range": "± 3879",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 129219,
+            "range": "± 3674",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 399029862,
+            "range": "± 6737863",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 335895336,
+            "range": "± 4937398",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 290088457,
+            "range": "± 6705191",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 259855943,
+            "range": "± 4982020",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit_1000",
+            "value": 36061896,
+            "range": "± 2806370",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch_500",
+            "value": 290042647,
+            "range": "± 5791368",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 259970085,
+            "range": "± 4798763",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 264655291,
+            "range": "± 5032761",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot_100_tasks",
+            "value": 88137695,
+            "range": "± 2631293",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 93907129,
+            "range": "± 4188157",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 175027494,
+            "range": "± 8684742",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 253161564,
+            "range": "± 14407424",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 412859585,
+            "range": "± 22533385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1138010,
+            "range": "± 145027",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9875266,
+            "range": "± 1147382",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 59761127,
+            "range": "± 2910334",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 137732,
+            "range": "± 6583",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 228644,
+            "range": "± 6425",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 619590,
+            "range": "± 7634",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 140617,
+            "range": "± 6197",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 199347,
+            "range": "± 5559",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 463293,
+            "range": "± 7567",
             "unit": "ns/iter"
           }
         ]
