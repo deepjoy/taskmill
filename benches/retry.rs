@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use taskmill::{
     BackoffStrategy, Domain, DomainKey, DomainTaskContext, RetryPolicy, Scheduler, SchedulerEvent,
@@ -94,6 +94,7 @@ fn bench_backoff_delay_computation(c: &mut Criterion) {
     ];
 
     let mut group = c.benchmark_group("backoff_delay");
+    group.throughput(Throughput::Elements(20));
     for (name, strategy) in strategies {
         group.bench_with_input(
             BenchmarkId::from_parameter(name),
@@ -115,7 +116,9 @@ fn bench_backoff_delay_computation(c: &mut Criterion) {
 fn bench_dispatch_permanent_failure(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("dispatch_permanent_failure_500", |b| {
+    let mut group = c.benchmark_group("dispatch_permanent_failure");
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("500", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -160,6 +163,7 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 /// E2E: retryable failure path across all 4 backoff strategies.
@@ -168,6 +172,7 @@ fn bench_dispatch_permanent_failure(c: &mut Criterion) {
 fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("retryable_dead_letter");
+    group.throughput(Throughput::Elements(100));
 
     let strategies: &[(&str, BackoffStrategy)] = &[
         (

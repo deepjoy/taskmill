@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use taskmill::{
     Domain, DomainKey, DomainTaskContext, Scheduler, SchedulerEvent, TaskError, TaskStore,
@@ -62,7 +62,9 @@ async fn dispatch_all(sched: &Scheduler, expected: usize) {
 fn bench_dispatch_no_groups(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("dispatch_no_groups_500", |b| {
+    let mut group = c.benchmark_group("dispatch_no_groups");
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("500", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -89,6 +91,7 @@ fn bench_dispatch_no_groups(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 /// 500 tasks all in a single group with a high limit (no throttling).
@@ -96,7 +99,9 @@ fn bench_dispatch_no_groups(c: &mut Criterion) {
 fn bench_dispatch_one_group(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
-    c.bench_function("dispatch_one_group_500", |b| {
+    let mut group = c.benchmark_group("dispatch_one_group");
+    group.throughput(Throughput::Elements(500));
+    group.bench_function("500", |b| {
         b.to_async(&rt).iter_custom(|iters| async move {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -128,6 +133,7 @@ fn bench_dispatch_one_group(c: &mut Criterion) {
             total
         });
     });
+    group.finish();
 }
 
 /// Gate check overhead as the number of tracked groups grows.
@@ -138,6 +144,7 @@ fn bench_dispatch_group_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("dispatch_group_scaling");
 
     for n_groups in [1usize, 10, 50, 100] {
+        group.throughput(Throughput::Elements(500));
         group.bench_with_input(
             BenchmarkId::from_parameter(n_groups),
             &n_groups,

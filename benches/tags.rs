@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use taskmill::{
     Domain, DomainKey, DomainTaskContext, Scheduler, TaskError, TaskStore, TaskSubmission,
@@ -59,6 +59,7 @@ async fn store_with_tagged_tasks(n: usize) -> TaskStore {
 fn bench_submit_with_tags(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("submit_with_tags");
+    group.throughput(Throughput::Elements(500));
 
     for tag_count in [0usize, 5, 10, 20] {
         group.bench_with_input(
@@ -100,6 +101,7 @@ fn bench_submit_with_tags(c: &mut Criterion) {
 fn bench_query_by_tags(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("query_by_tags");
+    group.throughput(Throughput::Elements(1));
 
     for queue_depth in [100usize, 1000, 5000] {
         let store = rt.block_on(store_with_tagged_tasks(queue_depth));
@@ -133,6 +135,7 @@ fn bench_query_by_tags(c: &mut Criterion) {
 fn bench_count_by_tags(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("count_by_tags");
+    group.throughput(Throughput::Elements(1));
 
     for queue_depth in [100usize, 1000, 5000] {
         let store = rt.block_on(store_with_tagged_tasks(queue_depth));
@@ -166,6 +169,7 @@ fn bench_count_by_tags(c: &mut Criterion) {
 fn bench_tag_values_scan(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("tag_values");
+    group.throughput(Throughput::Elements(1));
 
     for queue_depth in [100usize, 1000, 5000] {
         let store = rt.block_on(async {

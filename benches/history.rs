@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use taskmill::{
     Domain, DomainKey, DomainTaskContext, Scheduler, SchedulerEvent, TaskError, TaskStore,
@@ -77,6 +77,7 @@ async fn build_scheduler_with_history(n: usize) -> Scheduler {
 fn bench_history_query(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_query");
+    group.throughput(Throughput::Elements(1));
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(30));
 
@@ -109,6 +110,7 @@ fn bench_history_query(c: &mut Criterion) {
 fn bench_history_stats(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_stats");
+    group.throughput(Throughput::Elements(1));
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(30));
 
@@ -141,6 +143,7 @@ fn bench_history_stats(c: &mut Criterion) {
 fn bench_history_by_type(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_by_type");
+    group.throughput(Throughput::Elements(1));
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(30));
 
