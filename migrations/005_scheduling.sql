@@ -1,6 +1,6 @@
 -- Delayed dispatch: task is pending but not eligible until this timestamp.
 -- NULL = immediately eligible (current behavior, backwards compatible).
-ALTER TABLE tasks ADD COLUMN run_after TEXT;
+ALTER TABLE tasks ADD COLUMN run_after INTEGER;
 
 -- Recurring task template fields.
 -- Only set on the "template" row that spawns recurring instances.
@@ -10,7 +10,7 @@ ALTER TABLE tasks ADD COLUMN recurring_execution_count INTEGER NOT NULL DEFAULT 
 ALTER TABLE tasks ADD COLUMN recurring_paused INTEGER NOT NULL DEFAULT 0;
 
 -- History: preserve the scheduling metadata for diagnostics.
-ALTER TABLE task_history ADD COLUMN run_after TEXT;
+ALTER TABLE task_history ADD COLUMN run_after INTEGER;
 
 -- Partial index: only pending tasks with a future run_after need time-gating.
 -- The scheduler's peek query uses this to skip not-yet-ready tasks.

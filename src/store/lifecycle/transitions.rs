@@ -27,16 +27,18 @@ impl TaskStore {
     /// Returns `None` if the queue is empty. Tasks with a future `run_after`
     /// timestamp are excluded (not yet eligible for dispatch).
     pub async fn peek_next(&self) -> Result<Option<TaskRecord>, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
             "SELECT * FROM tasks
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                   AND (run_after IS NULL OR run_after <= ?)
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )",
         )
+        .bind(now_ms)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -55,18 +57,21 @@ impl TaskStore {
     /// first pop (when `expires_at IS NULL` and `ttl_seconds IS NOT NULL`).
     pub async fn pop_by_id(&self, id: i64) -> Result<Option<TaskRecord>, StoreError> {
         tracing::debug!(task_id = id, "store.pop_by_id: UPDATE start");
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
             "UPDATE tasks SET
                 status = 'running',
-                started_at = datetime('now'),
+                started_at = ?,
                 expires_at = CASE
                     WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    THEN ? + (ttl_seconds * 1000)
                     ELSE expires_at
                 END
              WHERE id = ? AND status = 'pending'
              RETURNING *",
         )
+        .bind(now_ms)
+        .bind(now_ms)
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -85,17 +90,20 @@ impl TaskStore {
     /// prior `peek_next` and will update its in-memory fields directly. This
     /// avoids the `RETURNING *` round-trip of [`pop_by_id`](Self::pop_by_id).
     pub(crate) async fn claim_task(&self, id: i64) -> Result<bool, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let result = sqlx::query(
             "UPDATE tasks SET
                 status = 'running',
-                started_at = datetime('now'),
+                started_at = ?,
                 expires_at = CASE
                     WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    THEN ? + (ttl_seconds * 1000)
                     ELSE expires_at
                 END
              WHERE id = ? AND status = 'pending'",
         )
+        .bind(now_ms)
+        .bind(now_ms)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -114,25 +122,30 @@ impl TaskStore {
             return Ok(self.pop_next().await?.into_iter().collect());
         }
 
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let rows = sqlx::query(
             "UPDATE tasks SET
                 status = 'running',
-                started_at = datetime('now'),
+                started_at = ?,
                 expires_at = CASE
                     WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    THEN ? + (ttl_seconds * 1000)
                     ELSE expires_at
                 END
              WHERE id IN (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
-                   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                   AND (run_after IS NULL OR run_after <= ?)
+                   AND (expires_at IS NULL OR expires_at > ?)
                  ORDER BY priority ASC, id ASC
                  LIMIT ?
              )
              RETURNING *",
         )
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(now_ms)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -149,25 +162,30 @@ impl TaskStore {
     /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
     /// the first pop.
     pub async fn pop_next(&self) -> Result<Option<TaskRecord>, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
             "UPDATE tasks SET
                 status = 'running',
-                started_at = datetime('now'),
+                started_at = ?,
                 expires_at = CASE
                     WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN datetime('now', '+' || ttl_seconds || ' seconds')
+                    THEN ? + (ttl_seconds * 1000)
                     ELSE expires_at
                 END
              WHERE id = (
                  SELECT id FROM tasks
                  WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= strftime('%Y-%m-%d %H:%M:%f', 'now'))
-                   AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%d %H:%M:%f', 'now'))
+                   AND (run_after IS NULL OR run_after <= ?)
+                   AND (expires_at IS NULL OR expires_at > ?)
                  ORDER BY priority ASC, id ASC
                  LIMIT 1
              )
              RETURNING *",
         )
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(now_ms)
+        .bind(now_ms)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -534,16 +552,17 @@ impl TaskStore {
                             .await?;
 
                     if existing.is_none() {
-                        let next_run = chrono::Utc::now() + chrono::Duration::seconds(interval);
-                        let next_run_str = next_run.format("%Y-%m-%d %H:%M:%S").to_string();
+                        let now = chrono::Utc::now();
+                        let next_run = now + chrono::Duration::seconds(interval);
+                        let next_run_ms = next_run.timestamp_millis();
+                        let now_ms = now.timestamp_millis();
                         let fail_fast_val: i32 = if task.fail_fast { 1 } else { 0 };
 
                         // Compute TTL columns for the next instance.
-                        let expires_at_str: Option<String> = match (task.ttl_seconds, task.ttl_from)
-                        {
+                        let expires_at_ms: Option<i64> = match (task.ttl_seconds, task.ttl_from) {
                             (Some(ttl_secs), crate::task::TtlFrom::Submission) => {
-                                let exp = chrono::Utc::now() + chrono::Duration::seconds(ttl_secs);
-                                Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+                                let exp = now + chrono::Duration::seconds(ttl_secs);
+                                Some(exp.timestamp_millis())
                             }
                             _ => None,
                         };
@@ -556,8 +575,8 @@ impl TaskStore {
                                 ttl_seconds, ttl_from, expires_at,
                                 run_after, recurring_interval_secs,
                                 recurring_max_executions, recurring_execution_count,
-                                recurring_paused, max_retries)
-                             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                                recurring_paused, max_retries, created_at)
+                             VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
                         )
                         .bind(&task.task_type)
                         .bind(&task.key)
@@ -573,12 +592,13 @@ impl TaskStore {
                         .bind(&task.group_key)
                         .bind(task.ttl_seconds)
                         .bind(task.ttl_from.as_str())
-                        .bind(&expires_at_str)
-                        .bind(&next_run_str)
+                        .bind(expires_at_ms)
+                        .bind(next_run_ms)
                         .bind(task.recurring_interval_secs)
                         .bind(task.recurring_max_executions)
                         .bind(execution_count)
                         .bind(task.max_retries)
+                        .bind(now_ms)
                         .execute(&mut **conn)
                         .await?;
 
@@ -746,7 +766,7 @@ impl TaskStore {
                 // Delayed retry — set run_after.
                 let run_after =
                     chrono::Utc::now() + chrono::Duration::milliseconds(delay.as_millis() as i64);
-                let run_after_str = run_after.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+                let run_after_ms = run_after.timestamp_millis();
                 sqlx::query(
                     "UPDATE tasks SET status = 'pending', started_at = NULL,
                         retry_count = retry_count + 1, last_error = ?,
@@ -754,7 +774,7 @@ impl TaskStore {
                      WHERE id = ?",
                 )
                 .bind(error)
-                .bind(&run_after_str)
+                .bind(run_after_ms)
                 .bind(task.id)
                 .execute(&mut **conn)
                 .await?;

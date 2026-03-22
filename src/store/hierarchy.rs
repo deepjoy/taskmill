@@ -27,9 +27,11 @@ impl TaskStore {
 
     /// Transition a waiting parent task back to `running` for finalization.
     pub async fn set_running_for_finalize(&self, id: i64) -> Result<(), StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         sqlx::query(
-            "UPDATE tasks SET status = 'running', started_at = datetime('now') WHERE id = ? AND status = 'waiting'",
+            "UPDATE tasks SET status = 'running', started_at = ? WHERE id = ? AND status = 'waiting'",
         )
+        .bind(now_ms)
         .bind(id)
         .execute(&self.pool)
         .await?;

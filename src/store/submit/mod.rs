@@ -70,18 +70,16 @@ pub(crate) async fn submit_one(
     // Compute TTL columns.
     let ttl_seconds = sub.ttl.map(|d| d.as_secs() as i64);
     let ttl_from_str = sub.ttl_from.as_str();
-    let expires_at: Option<String> = match (sub.ttl, sub.ttl_from) {
+    let expires_at: Option<i64> = match (sub.ttl, sub.ttl_from) {
         (Some(ttl), TtlFrom::Submission) => {
             let exp = chrono::Utc::now() + ttl;
-            Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+            Some(exp.timestamp_millis())
         }
         _ => None, // FirstAttempt: set on pop; no TTL: NULL
     };
 
     // Compute scheduling columns.
-    let run_after_str: Option<String> = sub
-        .run_after
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+    let run_after_ms: Option<i64> = sub.run_after.map(|dt| dt.timestamp_millis());
     let recurring_interval_secs: Option<i64> =
         sub.recurring.as_ref().map(|r| r.interval.as_secs() as i64);
     let recurring_max_executions: Option<i64> = sub
@@ -98,9 +96,11 @@ pub(crate) async fn submit_one(
 
     let on_dep_failure_str = sub.on_dependency_failure.as_str();
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at, run_after, recurring_interval_secs, recurring_max_executions, on_dep_failure, max_retries)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO tasks (task_type, key, label, priority, payload, expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes, parent_id, fail_fast, group_key, ttl_seconds, ttl_from, expires_at, run_after, recurring_interval_secs, recurring_max_executions, on_dep_failure, max_retries, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&sub.task_type)
     .bind(&key)
@@ -116,12 +116,13 @@ pub(crate) async fn submit_one(
     .bind(&sub.group_key)
     .bind(ttl_seconds)
     .bind(ttl_from_str)
-    .bind(&expires_at)
-    .bind(&run_after_str)
+    .bind(expires_at)
+    .bind(run_after_ms)
     .bind(recurring_interval_secs)
     .bind(recurring_max_executions)
     .bind(on_dep_failure_str)
     .bind(sub.max_retries)
+    .bind(now_ms)
     .execute(&mut **conn)
     .await?;
 

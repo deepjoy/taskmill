@@ -68,13 +68,15 @@ pub(crate) async fn insert_history(
     } else {
         task.retry_count
     };
+    let completed_at_ms = chrono::Utc::now().timestamp_millis();
+
     let result = sqlx::query(
         "INSERT INTO task_history (task_type, key, label, priority, status, payload,
             expected_read_bytes, expected_write_bytes, expected_net_rx_bytes, expected_net_tx_bytes,
             actual_read_bytes, actual_write_bytes, actual_net_rx_bytes, actual_net_tx_bytes,
-            retry_count, last_error, created_at, started_at, duration_ms, parent_id, fail_fast, group_key,
+            retry_count, last_error, created_at, started_at, completed_at, duration_ms, parent_id, fail_fast, group_key,
             ttl_seconds, ttl_from, expires_at, run_after, max_retries, memo)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&task.task_type)
     .bind(&task.key)
@@ -92,25 +94,17 @@ pub(crate) async fn insert_history(
     .bind(metrics.net_tx)
     .bind(retry_count)
     .bind(last_error)
-    .bind(task.created_at.format("%Y-%m-%d %H:%M:%S").to_string())
-    .bind(
-        task.started_at
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-    )
+    .bind(task.created_at.timestamp_millis())
+    .bind(task.started_at.map(|dt| dt.timestamp_millis()))
+    .bind(completed_at_ms)
     .bind(duration_ms)
     .bind(task.parent_id)
     .bind(fail_fast_val)
     .bind(&task.group_key)
     .bind(task.ttl_seconds)
     .bind(task.ttl_from.as_str())
-    .bind(
-        task.expires_at
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-    )
-    .bind(
-        task.run_after
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-    )
+    .bind(task.expires_at.map(|dt| dt.timestamp_millis()))
+    .bind(task.run_after.map(|dt| dt.timestamp_millis()))
     .bind(task.max_retries)
     .bind(&task.memo)
     .execute(&mut **conn)

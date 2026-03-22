@@ -8,7 +8,7 @@ impl TaskStore {
     pub async fn next_run_after(
         &self,
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoreError> {
-        let row: Option<(String,)> = sqlx::query_as(
+        let row: Option<(i64,)> = sqlx::query_as(
             "SELECT run_after FROM tasks
              WHERE status = 'pending' AND run_after IS NOT NULL
              ORDER BY run_after ASC LIMIT 1",
@@ -16,7 +16,7 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(s,)| crate::store::row_mapping::parse_datetime(&s)))
+        Ok(row.map(|(ms,)| crate::store::row_mapping::from_epoch_ms(ms)))
     }
 
     /// List active recurring schedules with their next run times.

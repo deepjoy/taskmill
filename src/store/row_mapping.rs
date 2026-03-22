@@ -9,65 +9,23 @@ use crate::task::{
     TtlFrom,
 };
 
-pub(crate) fn parse_datetime(s: &str) -> DateTime<Utc> {
-    // SQLite stores as "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS.mmm".
-    // Fast fixed-position byte parser instead of the generic chrono parser.
-    let b = s.as_bytes();
-    if b.len() < 19 {
-        return DateTime::<Utc>::default();
-    }
-
-    let year = parse_4(b, 0);
-    let month = parse_2(b, 5);
-    let day = parse_2(b, 8);
-    let hour = parse_2(b, 11);
-    let min = parse_2(b, 14);
-    let sec = parse_2(b, 17);
-
-    let nanos = if b.len() > 20 && b[19] == b'.' {
-        parse_frac_nanos(b, 20)
-    } else {
-        0
-    };
-
-    chrono::NaiveDate::from_ymd_opt(year, month, day)
-        .and_then(|d| d.and_hms_nano_opt(hour, min, sec, nanos))
-        .map(|ndt| ndt.and_utc())
-        .unwrap_or_default()
+/// Convert a `DateTime<Utc>` to epoch milliseconds for SQLite INTEGER storage.
+#[allow(dead_code)]
+pub(crate) fn epoch_ms(dt: DateTime<Utc>) -> i64 {
+    dt.timestamp_millis()
 }
 
-#[inline(always)]
-fn parse_2(b: &[u8], off: usize) -> u32 {
-    (b[off] - b'0') as u32 * 10 + (b[off + 1] - b'0') as u32
-}
-
-#[inline(always)]
-fn parse_4(b: &[u8], off: usize) -> i32 {
-    (b[off] - b'0') as i32 * 1000
-        + (b[off + 1] - b'0') as i32 * 100
-        + (b[off + 2] - b'0') as i32 * 10
-        + (b[off + 3] - b'0') as i32
-}
-
-#[inline(always)]
-fn parse_frac_nanos(b: &[u8], start: usize) -> u32 {
-    let frac_len = (b.len() - start).min(9);
-    let mut val: u32 = 0;
-    for i in 0..frac_len {
-        val = val * 10 + (b[start + i] - b'0') as u32;
-    }
-    // Pad to 9 digits (nanoseconds).
-    for _ in frac_len..9 {
-        val *= 10;
-    }
-    val
+/// Convert epoch milliseconds from SQLite INTEGER back to `DateTime<Utc>`.
+///
+/// Returns `1970-01-01T00:00:00Z` on corrupt/invalid data — same silent-fallback
+/// behavior as the previous `parse_datetime` on malformed TEXT.
+pub(crate) fn from_epoch_ms(ms: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
 
 pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
     let priority_val: i32 = row.get("priority");
     let status_str: String = row.get("status");
-    let created_at_str: String = row.get("created_at");
-    let started_at_str: Option<String> = row.get("started_at");
 
     let requeue_val: i32 = row.get("requeue");
     let requeue_priority_val: Option<i32> = row.get("requeue_priority");
@@ -75,8 +33,6 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
     let fail_fast_val: i32 = row.get("fail_fast");
 
     let ttl_from_str: String = row.get("ttl_from");
-    let expires_at_str: Option<String> = row.get("expires_at");
-    let run_after_str: Option<String> = row.get("run_after");
     let recurring_paused_val: i32 = row.get("recurring_paused");
     let on_dep_failure_str: String = row.get("on_dep_failure");
 
@@ -96,8 +52,8 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         },
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
-        created_at: parse_datetime(&created_at_str),
-        started_at: started_at_str.map(|s| parse_datetime(&s)),
+        created_at: from_epoch_ms(row.get("created_at")),
+        started_at: row.get::<Option<i64>, _>("started_at").map(from_epoch_ms),
         requeue: requeue_val != 0,
         requeue_priority: requeue_priority_val.map(|p| Priority::new(p as u8)),
         parent_id,
@@ -105,8 +61,8 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         group_key: row.get("group_key"),
         ttl_seconds: row.get("ttl_seconds"),
         ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
-        expires_at: expires_at_str.map(|s| parse_datetime(&s)),
-        run_after: run_after_str.map(|s| parse_datetime(&s)),
+        expires_at: row.get::<Option<i64>, _>("expires_at").map(from_epoch_ms),
+        run_after: row.get::<Option<i64>, _>("run_after").map(from_epoch_ms),
         recurring_interval_secs: row.get("recurring_interval_secs"),
         recurring_max_executions: row.get("recurring_max_executions"),
         recurring_execution_count: row.get("recurring_execution_count"),
@@ -126,9 +82,6 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
 pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistoryRecord {
     let priority_val: i32 = row.get("priority");
     let status_str: String = row.get("status");
-    let created_at_str: String = row.get("created_at");
-    let started_at_str: Option<String> = row.get("started_at");
-    let completed_at_str: String = row.get("completed_at");
     let parent_id: Option<i64> = row.get("parent_id");
     let fail_fast_val: i32 = row.get("fail_fast");
 
@@ -145,8 +98,6 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
     });
 
     let ttl_from_str: String = row.get("ttl_from");
-    let expires_at_str: Option<String> = row.get("expires_at");
-    let run_after_str: Option<String> = row.get("run_after");
 
     TaskHistoryRecord {
         id: row.get("id"),
@@ -165,17 +116,17 @@ pub(crate) fn row_to_history_record(row: &sqlx::sqlite::SqliteRow) -> TaskHistor
         actual_io,
         retry_count: row.get("retry_count"),
         last_error: row.get("last_error"),
-        created_at: parse_datetime(&created_at_str),
-        started_at: started_at_str.map(|s| parse_datetime(&s)),
-        completed_at: parse_datetime(&completed_at_str),
+        created_at: from_epoch_ms(row.get("created_at")),
+        started_at: row.get::<Option<i64>, _>("started_at").map(from_epoch_ms),
+        completed_at: from_epoch_ms(row.get("completed_at")),
         duration_ms: row.get("duration_ms"),
         parent_id,
         fail_fast: fail_fast_val != 0,
         group_key: row.get("group_key"),
         ttl_seconds: row.get("ttl_seconds"),
         ttl_from: ttl_from_str.parse().unwrap_or(TtlFrom::Submission),
-        expires_at: expires_at_str.map(|s| parse_datetime(&s)),
-        run_after: run_after_str.map(|s| parse_datetime(&s)),
+        expires_at: row.get::<Option<i64>, _>("expires_at").map(from_epoch_ms),
+        run_after: row.get::<Option<i64>, _>("run_after").map(from_epoch_ms),
         // Tags are populated separately from the task_history_tags table.
         tags: std::collections::HashMap::new(),
         max_retries: row.get("max_retries"),
@@ -188,33 +139,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_whole_seconds() {
-        let dt = parse_datetime("2024-01-15 09:30:45");
-        assert_eq!(dt.to_string(), "2024-01-15 09:30:45 UTC");
+    fn epoch_ms_round_trip() {
+        let now = Utc::now();
+        let ms = epoch_ms(now);
+        let back = from_epoch_ms(ms);
+        // Round-trip preserves millisecond precision.
+        assert_eq!(now.timestamp_millis(), back.timestamp_millis());
     }
 
     #[test]
-    fn parse_fractional_millis() {
-        let dt = parse_datetime("2024-01-15 09:30:45.123");
-        assert_eq!(dt.to_string(), "2024-01-15 09:30:45.123 UTC");
-        assert_eq!(dt.timestamp_subsec_millis(), 123);
-    }
-
-    #[test]
-    fn parse_fractional_micros() {
-        let dt = parse_datetime("2024-01-15 09:30:45.123456");
-        assert_eq!(dt.to_string(), "2024-01-15 09:30:45.123456 UTC");
-    }
-
-    #[test]
-    fn parse_short_string_returns_default() {
-        let dt = parse_datetime("bad");
+    fn epoch_ms_zero() {
+        let dt = from_epoch_ms(0);
         assert_eq!(dt, DateTime::<Utc>::default());
     }
 
     #[test]
-    fn parse_empty_returns_default() {
-        let dt = parse_datetime("");
-        assert_eq!(dt, DateTime::<Utc>::default());
+    fn epoch_ms_negative() {
+        // Negative epoch (before 1970) should still round-trip.
+        let ms = -86_400_000i64; // 1969-12-31
+        let dt = from_epoch_ms(ms);
+        assert_eq!(dt.timestamp_millis(), ms);
+    }
+
+    #[test]
+    fn epoch_ms_known_value() {
+        // 2024-01-15 09:30:45.123 UTC
+        let dt = chrono::NaiveDate::from_ymd_opt(2024, 1, 15)
+            .unwrap()
+            .and_hms_milli_opt(9, 30, 45, 123)
+            .unwrap()
+            .and_utc();
+        let ms = epoch_ms(dt);
+        let back = from_epoch_ms(ms);
+        assert_eq!(back.to_string(), "2024-01-15 09:30:45.123 UTC");
     }
 }

@@ -92,10 +92,10 @@ pub(crate) async fn supersede_existing(
     // Compute TTL columns for the new submission.
     let ttl_seconds = sub.ttl.map(|d| d.as_secs() as i64);
     let ttl_from_str = sub.ttl_from.as_str();
-    let expires_at: Option<String> = match (sub.ttl, sub.ttl_from) {
+    let expires_at: Option<i64> = match (sub.ttl, sub.ttl_from) {
         (Some(ttl), TtlFrom::Submission) => {
             let exp = chrono::Utc::now() + ttl;
-            Some(exp.format("%Y-%m-%d %H:%M:%S").to_string())
+            Some(exp.timestamp_millis())
         }
         _ => None,
     };
@@ -126,7 +126,7 @@ pub(crate) async fn supersede_existing(
             .bind(&sub.group_key)
             .bind(ttl_seconds)
             .bind(ttl_from_str)
-            .bind(&expires_at)
+            .bind(expires_at)
             .bind(sub.max_retries)
             .bind(replaced_id)
             .execute(&mut **conn)
@@ -149,12 +149,13 @@ pub(crate) async fn supersede_existing(
                 .execute(&mut **conn)
                 .await?;
 
+            let now_ms = chrono::Utc::now().timestamp_millis();
             let result = sqlx::query(
                 "INSERT INTO tasks (task_type, key, label, priority, payload,
                     expected_read_bytes, expected_write_bytes, expected_net_rx_bytes,
                     expected_net_tx_bytes, parent_id, fail_fast, group_key,
-                    ttl_seconds, ttl_from, expires_at, max_retries)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ttl_seconds, ttl_from, expires_at, max_retries, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&sub.task_type)
             .bind(key)
@@ -170,8 +171,9 @@ pub(crate) async fn supersede_existing(
             .bind(&sub.group_key)
             .bind(ttl_seconds)
             .bind(ttl_from_str)
-            .bind(&expires_at)
+            .bind(expires_at)
             .bind(sub.max_retries)
+            .bind(now_ms)
             .execute(&mut **conn)
             .await?;
 
