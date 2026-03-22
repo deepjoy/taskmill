@@ -306,6 +306,7 @@ where
     async fn finalize<'a>(
         &'a self,
         _payload: T,
+        _memo: (),
         _ctx: DomainTaskContext<'a, T::Domain>,
     ) -> Result<(), TaskError> {
         self.finalized.store(true, Ordering::SeqCst);
