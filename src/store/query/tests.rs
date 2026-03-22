@@ -289,3 +289,282 @@ async fn tag_values_distinct() {
     let empty = store.tag_values("nonexistent").await.unwrap();
     assert!(empty.is_empty());
 }
+
+// ── Tag key prefix query tests ──────────────────────────────────
+
+#[tokio::test]
+async fn tag_keys_by_prefix_discovers_keys() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tkp-1")
+                .tag("billing.customer_id", "cust_1")
+                .tag("billing.plan", "enterprise"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tkp-2")
+                .tag("media.pipeline", "transcode"),
+        )
+        .await
+        .unwrap();
+
+    let keys = store.tag_keys_by_prefix("billing.").await.unwrap();
+    assert_eq!(keys, vec!["billing.customer_id", "billing.plan"]);
+
+    let keys = store.tag_keys_by_prefix("media.").await.unwrap();
+    assert_eq!(keys, vec!["media.pipeline"]);
+
+    // Non-matching prefix returns empty.
+    let keys = store.tag_keys_by_prefix("nonexistent.").await.unwrap();
+    assert!(keys.is_empty());
+}
+
+#[tokio::test]
+async fn tasks_by_tag_key_prefix_finds_tasks() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tp-1")
+                .tag("billing.plan", "free"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tp-2")
+                .tag("billing.customer_id", "cust_1")
+                .tag("media.codec", "h265"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("tp-3")
+                .tag("media.codec", "h264"),
+        )
+        .await
+        .unwrap();
+
+    let tasks = store.tasks_by_tag_key_prefix("billing.", None).await.unwrap();
+    assert_eq!(tasks.len(), 2); // tp-1 and tp-2
+
+    let tasks = store.tasks_by_tag_key_prefix("media.", None).await.unwrap();
+    assert_eq!(tasks.len(), 2); // tp-2 and tp-3
+}
+
+#[tokio::test]
+async fn tasks_by_tag_key_prefix_with_status_filter() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("ts-1")
+                .tag("billing.plan", "free"),
+        )
+        .await
+        .unwrap();
+
+    let tasks = store
+        .tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Pending))
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    let tasks = store
+        .tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Running))
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 0);
+}
+
+#[tokio::test]
+async fn count_by_tag_key_prefix_counts_distinct_tasks() {
+    let store = test_store().await;
+
+    // Task with two billing.* tags should be counted once.
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("cp-1")
+                .tag("billing.plan", "free")
+                .tag("billing.customer_id", "cust_1"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("cp-2")
+                .tag("billing.plan", "pro"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("cp-3")
+                .tag("media.codec", "h265"),
+        )
+        .await
+        .unwrap();
+
+    let count = store.count_by_tag_key_prefix("billing.", None).await.unwrap();
+    assert_eq!(count, 2); // cp-1 counted once despite two matching keys
+
+    let count = store.count_by_tag_key_prefix("media.", None).await.unwrap();
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn tag_keys_by_prefix_empty_prefix_returns_all() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("ep-1")
+                .tag("billing.plan", "free")
+                .tag("media.codec", "h265"),
+        )
+        .await
+        .unwrap();
+
+    let keys = store.tag_keys_by_prefix("").await.unwrap();
+    assert_eq!(keys.len(), 2);
+}
+
+#[tokio::test]
+async fn tag_keys_by_prefix_escapes_like_wildcards() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("esc-1")
+                .tag("a%b.key", "val")
+                .tag("a_b.key", "val")
+                .tag("axb.key", "val"),
+        )
+        .await
+        .unwrap();
+
+    // "a%b." should only match the literal "a%b.key", not "axb.key"
+    let keys = store.tag_keys_by_prefix("a%b.").await.unwrap();
+    assert_eq!(keys, vec!["a%b.key"]);
+
+    // "a_b." should only match the literal "a_b.key", not "axb.key"
+    let keys = store.tag_keys_by_prefix("a_b.").await.unwrap();
+    assert_eq!(keys, vec!["a_b.key"]);
+}
+
+// ── Domain-scoped (_with_prefix) tests ──────────────────────────
+
+#[tokio::test]
+async fn tag_keys_by_prefix_with_prefix_scopes_to_task_type() {
+    let store = test_store().await;
+
+    // Two different task_type prefixes, same tag key prefix.
+    store
+        .submit(
+            &TaskSubmission::new("billing::invoice")
+                .key("wp-1")
+                .tag("region.zone", "us-east"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("media::transcode")
+                .key("wp-2")
+                .tag("region.cluster", "gpu-1"),
+        )
+        .await
+        .unwrap();
+
+    // Scoped to "billing::" — only sees billing task's tags.
+    let keys = store
+        .tag_keys_by_prefix_with_prefix("billing::", "region.")
+        .await
+        .unwrap();
+    assert_eq!(keys, vec!["region.zone"]);
+
+    // Scoped to "media::" — only sees media task's tags.
+    let keys = store
+        .tag_keys_by_prefix_with_prefix("media::", "region.")
+        .await
+        .unwrap();
+    assert_eq!(keys, vec!["region.cluster"]);
+}
+
+#[tokio::test]
+async fn tasks_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("billing::charge")
+                .key("wpt-1")
+                .tag("billing.plan", "pro"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("media::encode")
+                .key("wpt-2")
+                .tag("billing.plan", "free"),
+        )
+        .await
+        .unwrap();
+
+    // Both tasks have billing.* tags, but scoped query returns only the billing module's task.
+    let tasks = store
+        .tasks_by_tag_key_prefix_with_prefix("billing::", "billing.", None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_type, "billing::charge");
+}
+
+#[tokio::test]
+async fn count_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
+    let store = test_store().await;
+
+    store
+        .submit(
+            &TaskSubmission::new("billing::charge")
+                .key("wpc-1")
+                .tag("billing.plan", "pro"),
+        )
+        .await
+        .unwrap();
+    store
+        .submit(
+            &TaskSubmission::new("media::encode")
+                .key("wpc-2")
+                .tag("billing.plan", "free"),
+        )
+        .await
+        .unwrap();
+
+    let count = store
+        .count_by_tag_key_prefix_with_prefix("billing::", "billing.", None)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // Global count sees both.
+    let count = store.count_by_tag_key_prefix("billing.", None).await.unwrap();
+    assert_eq!(count, 2);
+}
