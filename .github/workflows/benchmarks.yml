@@ -90,12 +90,9 @@ jobs:
             echo "::warning::No benchmark baseline found. Merge to main to generate one."
             exit 0
           fi
-          # Import the cached baseline under the name "main" so critcmp
-          # can distinguish the two groups and produce a side-by-side comparison.
-          critcmp --import baseline.json --name main
           critcmp --export current > pr.json
           echo 'result<<EOF' >> $GITHUB_OUTPUT
-          critcmp main current >> $GITHUB_OUTPUT
+          critcmp baseline.json pr.json >> $GITHUB_OUTPUT
           echo 'EOF' >> $GITHUB_OUTPUT
 
       - name: Find existing comment
