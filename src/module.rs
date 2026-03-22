@@ -724,6 +724,58 @@ impl ModuleHandle {
             .await
     }
 
+    /// Discover tag keys matching a prefix, scoped to this module's tasks.
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .tag_keys_by_prefix_with_prefix(&self.prefix, prefix)
+            .await
+    }
+
+    /// Find module tasks with any tag key matching the given prefix.
+    pub async fn tasks_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .tasks_by_tag_key_prefix_with_prefix(&self.prefix, prefix, status)
+            .await
+    }
+
+    /// Count module tasks with any tag key matching the given prefix.
+    pub async fn count_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        self.scheduler
+            .inner
+            .store
+            .count_by_tag_key_prefix_with_prefix(&self.prefix, prefix, status)
+            .await
+    }
+
+    /// Cancel module tasks with any tag key matching the given prefix.
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .scheduler
+            .inner
+            .store
+            .tasks_by_tag_key_prefix_with_prefix(&self.prefix, prefix, None)
+            .await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.scheduler.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
     /// Estimated progress for all running tasks in this module.
     pub async fn estimated_progress(&self) -> Vec<EstimatedProgress> {
         let snapshots = self

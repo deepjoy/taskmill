@@ -92,6 +92,35 @@ impl Scheduler {
         self.inner.store.tag_values(key).await
     }
 
+    /// Discover all tag keys matching a prefix across active tasks.
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        self.inner.store.tag_keys_by_prefix(prefix).await
+    }
+
+    /// Find active tasks with any tag key matching the given prefix.
+    pub async fn tasks_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<crate::task::TaskRecord>, StoreError> {
+        self.inner
+            .store
+            .tasks_by_tag_key_prefix(prefix, status)
+            .await
+    }
+
+    /// Count active tasks with any tag key matching the given prefix.
+    pub async fn count_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        self.inner
+            .store
+            .count_by_tag_key_prefix(prefix, status)
+            .await
+    }
+
     /// Dead-lettered tasks (retries exhausted), newest first.
     ///
     /// These are tasks that failed with a retryable error but exhausted their

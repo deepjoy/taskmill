@@ -1,8 +1,23 @@
-//! Tag-based queries: filtering and aggregation by task tags.
+//! Tag-based queries: filtering, aggregation, and prefix discovery by task tags.
 
 use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::TaskRecord;
+
+/// Escape SQL LIKE wildcards in `prefix` and append `%` for a safe prefix pattern.
+///
+/// The returned value is intended for use with `LIKE ? ESCAPE '\'`.
+fn escape_like_prefix(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len() + 1);
+    for ch in prefix.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('%');
+    escaped
+}
 
 impl TaskStore {
     /// Find active tasks matching all specified tag filters (AND semantics).
@@ -204,5 +219,154 @@ impl TaskStore {
         }
         let rows = q.fetch_all(&self.pool).await?;
         Ok(rows)
+    }
+
+    // ── Tag key prefix queries ──────────────────────────────────────
+
+    /// Discover distinct tag keys matching a prefix across active tasks.
+    ///
+    /// Returns keys sorted alphabetically. The prefix is matched literally —
+    /// LIKE wildcards (`%`, `_`) in the prefix are escaped.
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        let pattern = escape_like_prefix(prefix);
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT key FROM task_tags WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
+        )
+        .bind(&pattern)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(k,)| k).collect())
+    }
+
+    /// Discover distinct tag keys matching a key prefix, scoped to a task_type prefix.
+    pub async fn tag_keys_by_prefix_with_prefix(
+        &self,
+        task_type_prefix: &str,
+        key_prefix: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let key_pattern = escape_like_prefix(key_prefix);
+        let type_pattern = format!("{task_type_prefix}%");
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT tt.key FROM task_tags tt \
+             JOIN tasks t ON t.id = tt.task_id \
+             WHERE tt.key LIKE ? ESCAPE '\\' AND t.task_type LIKE ? \
+             ORDER BY tt.key",
+        )
+        .bind(&key_pattern)
+        .bind(&type_pattern)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(k,)| k).collect())
+    }
+
+    /// Find active tasks that have any tag key matching the prefix.
+    ///
+    /// Optionally filter by status. Returns tasks ordered by priority.
+    /// LIKE wildcards in the prefix are escaped — only true prefix matching.
+    pub async fn tasks_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        let pattern = escape_like_prefix(prefix);
+        let mut sql = String::from(
+            "SELECT t.* FROM tasks t \
+             WHERE EXISTS (SELECT 1 FROM task_tags tt \
+             WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\')",
+        );
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
+        }
+        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
+
+        let rows = sqlx::query(&sql)
+            .bind(&pattern)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    /// Find active tasks that have any tag key matching the prefix, scoped to a task_type prefix.
+    pub async fn tasks_by_tag_key_prefix_with_prefix(
+        &self,
+        task_type_prefix: &str,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        let pattern = escape_like_prefix(prefix);
+        let type_pattern = format!("{task_type_prefix}%");
+        let mut sql = String::from(
+            "SELECT t.* FROM tasks t \
+             WHERE EXISTS (SELECT 1 FROM task_tags tt \
+             WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\') \
+             AND t.task_type LIKE ?",
+        );
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
+        }
+        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
+
+        let rows = sqlx::query(&sql)
+            .bind(&pattern)
+            .bind(&type_pattern)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    /// Count active tasks that have any tag key matching the prefix.
+    ///
+    /// LIKE wildcards in the prefix are escaped — only true prefix matching.
+    pub async fn count_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        let pattern = escape_like_prefix(prefix);
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM tasks t \
+             WHERE EXISTS (SELECT 1 FROM task_tags tt \
+             WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\')",
+        );
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
+        }
+
+        let (count,) = sqlx::query_as::<_, (i64,)>(&sql)
+            .bind(&pattern)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
+
+    /// Count active tasks that have any tag key matching the prefix, scoped to a task_type prefix.
+    pub async fn count_by_tag_key_prefix_with_prefix(
+        &self,
+        task_type_prefix: &str,
+        prefix: &str,
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        let pattern = escape_like_prefix(prefix);
+        let type_pattern = format!("{task_type_prefix}%");
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM tasks t \
+             WHERE EXISTS (SELECT 1 FROM task_tags tt \
+             WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\') \
+             AND t.task_type LIKE ?",
+        );
+        if let Some(ref s) = status {
+            sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
+        }
+
+        let (count,) = sqlx::query_as::<_, (i64,)>(&sql)
+            .bind(&pattern)
+            .bind(&type_pattern)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
     }
 }

@@ -649,6 +649,34 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.tasks_by_tags(filters, status).await
     }
 
+    /// Discover tag keys matching a prefix within this domain.
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        self.inner.tag_keys_by_prefix(prefix).await
+    }
+
+    /// Find domain tasks with any tag key matching the given prefix.
+    pub async fn tasks_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        self.inner.tasks_by_tag_key_prefix(prefix, status).await
+    }
+
+    /// Count domain tasks with any tag key matching the given prefix.
+    pub async fn count_by_tag_key_prefix(
+        &self,
+        prefix: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<i64, StoreError> {
+        self.inner.count_by_tag_key_prefix(prefix, status).await
+    }
+
+    /// Cancel all domain tasks with any tag key matching the given prefix.
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
+        self.inner.cancel_by_tag_key_prefix(prefix).await
+    }
+
     /// Set the maximum number of concurrent tasks for this domain.
     pub fn set_max_concurrency(&self, n: usize) {
         self.inner.set_max_concurrency(n);

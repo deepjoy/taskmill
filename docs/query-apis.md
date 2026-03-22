@@ -43,6 +43,9 @@ These methods are available on `DomainHandle<D>` and are automatically scoped to
 | `handle.tasks_by_tags(filters, status)` | `Vec<TaskRecord>` | Active tasks in this domain matching the given tag filters and optional status. |
 | `handle.count_by_tag(key, status)` | `Vec<(String, i64)>` | Tag value counts for a given key within this domain. |
 | `handle.tag_values(key)` | `Vec<(String, i64)>` | Distinct values for a tag key within this domain. |
+| `handle.tag_keys_by_prefix(prefix)` | `Vec<String>` | Discover distinct tag keys matching a prefix (e.g. `"billing."`) within this domain. |
+| `handle.tasks_by_tag_key_prefix(prefix, status)` | `Vec<TaskRecord>` | Find tasks with any tag key matching the prefix, with optional status filter. |
+| `handle.count_by_tag_key_prefix(prefix, status)` | `i64` | Count tasks with any tag key matching the prefix, with optional status filter. |
 
 ## Cross-domain operations (Scheduler)
 
@@ -69,6 +72,7 @@ See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-das
 |--------|---------|-------------|
 | `handle.cancel_all()` | `Vec<i64>` | Cancel all tasks belonging to this domain. |
 | `handle.cancel_where(predicate)` | `Vec<i64>` | Cancel domain tasks matching a predicate. |
+| `handle.cancel_by_tag_key_prefix(prefix)` | `Vec<i64>` | Cancel all tasks with any tag key matching the prefix. |
 
 `cancel_all()` and `cancel_where()` affect tasks in any active status:
 

@@ -337,6 +337,25 @@ impl Scheduler {
         Ok(cancelled)
     }
 
+    /// Cancel all active tasks that have any tag key matching the given prefix.
+    ///
+    /// Finds tasks via [`crate::TaskStore::tasks_by_tag_key_prefix`] and cancels each.
+    /// Returns the ids of tasks that were successfully cancelled.
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .inner
+            .store
+            .tasks_by_tag_key_prefix(prefix, None)
+            .await?;
+        let mut cancelled = Vec::new();
+        for task in &tasks {
+            if self.cancel(task.id).await? {
+                cancelled.push(task.id);
+            }
+        }
+        Ok(cancelled)
+    }
+
     /// Cancel all tasks matching a predicate.
     pub async fn cancel_where(
         &self,
