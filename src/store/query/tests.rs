@@ -355,7 +355,10 @@ async fn tasks_by_tag_key_prefix_finds_tasks() {
         .await
         .unwrap();
 
-    let tasks = store.tasks_by_tag_key_prefix("billing.", None).await.unwrap();
+    let tasks = store
+        .tasks_by_tag_key_prefix("billing.", None)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 2); // tp-1 and tp-2
 
     let tasks = store.tasks_by_tag_key_prefix("media.", None).await.unwrap();
@@ -419,7 +422,10 @@ async fn count_by_tag_key_prefix_counts_distinct_tasks() {
         .await
         .unwrap();
 
-    let count = store.count_by_tag_key_prefix("billing.", None).await.unwrap();
+    let count = store
+        .count_by_tag_key_prefix("billing.", None)
+        .await
+        .unwrap();
     assert_eq!(count, 2); // cp-1 counted once despite two matching keys
 
     let count = store.count_by_tag_key_prefix("media.", None).await.unwrap();
@@ -565,6 +571,9 @@ async fn count_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
     assert_eq!(count, 1);
 
     // Global count sees both.
-    let count = store.count_by_tag_key_prefix("billing.", None).await.unwrap();
+    let count = store
+        .count_by_tag_key_prefix("billing.", None)
+        .await
+        .unwrap();
     assert_eq!(count, 2);
 }

@@ -227,10 +227,7 @@ impl TaskStore {
     ///
     /// Returns keys sorted alphabetically. The prefix is matched literally —
     /// LIKE wildcards (`%`, `_`) in the prefix are escaped.
-    pub async fn tag_keys_by_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         let pattern = escape_like_prefix(prefix);
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT key FROM task_tags WHERE key LIKE ? ESCAPE '\\' ORDER BY key",

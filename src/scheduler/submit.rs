@@ -341,11 +341,12 @@ impl Scheduler {
     ///
     /// Finds tasks via [`crate::TaskStore::tasks_by_tag_key_prefix`] and cancels each.
     /// Returns the ids of tasks that were successfully cancelled.
-    pub async fn cancel_by_tag_key_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<i64>, StoreError> {
-        let tasks = self.inner.store.tasks_by_tag_key_prefix(prefix, None).await?;
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
+        let tasks = self
+            .inner
+            .store
+            .tasks_by_tag_key_prefix(prefix, None)
+            .await?;
         let mut cancelled = Vec::new();
         for task in &tasks {
             if self.cancel(task.id).await? {

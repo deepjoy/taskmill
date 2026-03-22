@@ -650,10 +650,7 @@ impl<D: DomainKey> DomainHandle<D> {
     }
 
     /// Discover tag keys matching a prefix within this domain.
-    pub async fn tag_keys_by_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         self.inner.tag_keys_by_prefix(prefix).await
     }
 
@@ -676,10 +673,7 @@ impl<D: DomainKey> DomainHandle<D> {
     }
 
     /// Cancel all domain tasks with any tag key matching the given prefix.
-    pub async fn cancel_by_tag_key_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<i64>, StoreError> {
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
         self.inner.cancel_by_tag_key_prefix(prefix).await
     }
 

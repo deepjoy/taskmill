@@ -93,10 +93,7 @@ impl Scheduler {
     }
 
     /// Discover all tag keys matching a prefix across active tasks.
-    pub async fn tag_keys_by_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         self.inner.store.tag_keys_by_prefix(prefix).await
     }
 
@@ -106,7 +103,10 @@ impl Scheduler {
         prefix: &str,
         status: Option<crate::task::TaskStatus>,
     ) -> Result<Vec<crate::task::TaskRecord>, StoreError> {
-        self.inner.store.tasks_by_tag_key_prefix(prefix, status).await
+        self.inner
+            .store
+            .tasks_by_tag_key_prefix(prefix, status)
+            .await
     }
 
     /// Count active tasks with any tag key matching the given prefix.
@@ -115,7 +115,10 @@ impl Scheduler {
         prefix: &str,
         status: Option<crate::task::TaskStatus>,
     ) -> Result<i64, StoreError> {
-        self.inner.store.count_by_tag_key_prefix(prefix, status).await
+        self.inner
+            .store
+            .count_by_tag_key_prefix(prefix, status)
+            .await
     }
 
     /// Dead-lettered tasks (retries exhausted), newest first.

@@ -725,10 +725,7 @@ impl ModuleHandle {
     }
 
     /// Discover tag keys matching a prefix, scoped to this module's tasks.
-    pub async fn tag_keys_by_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    pub async fn tag_keys_by_prefix(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         self.scheduler
             .inner
             .store
@@ -763,10 +760,7 @@ impl ModuleHandle {
     }
 
     /// Cancel module tasks with any tag key matching the given prefix.
-    pub async fn cancel_by_tag_key_prefix(
-        &self,
-        prefix: &str,
-    ) -> Result<Vec<i64>, StoreError> {
+    pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
         let tasks = self
             .scheduler
             .inner
