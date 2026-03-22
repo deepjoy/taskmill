@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774212865959,
+  "lastUpdate": 1774215410174,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -7523,6 +7523,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 470582,
             "range": "± 4603",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "773c31d22618e36fadbff5b46738c75261fcb614",
+          "message": "feat: add Throughput to all criterion benchmarks so critcmp shows ops/sec (#78)\n\n- All criterion benchmarks now declare `Throughput::Elements(N)` so\ncritcmp\n  reports real throughput (tasks/sec, queries/sec) instead of `? ?/sec`.\n- Standalone `bench_function` calls are converted to `BenchmarkGroup`s\nsince\ncriterion only exposes throughput on groups. This changes benchmark\nnames\nfrom flat (e.g. `submit_1000_tasks`) to structured (e.g.\n`submit_tasks/1000`).\n- Parameterized benchmarks (dependency chains, fan-in) set throughput\nper\n  parameter to reflect the actual element count at each size.",
+          "timestamp": "2026-03-22T21:09:54Z",
+          "tree_id": "63a748233f0a5af6203a22e93b1af4edc6fc3254",
+          "url": "https://github.com/deepjoy/taskmill/commit/773c31d22618e36fadbff5b46738c75261fcb614"
+        },
+        "date": 1774215409955,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3091468,
+            "range": "± 153467",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 16835350,
+            "range": "± 783936",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 75874896,
+            "range": "± 2996448",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 10990007,
+            "range": "± 167059",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 26986269,
+            "range": "± 778638",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 53127108,
+            "range": "± 1631008",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 7106566,
+            "range": "± 144482",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 27288843,
+            "range": "± 719541",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 52335883,
+            "range": "± 1330488",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups/500",
+            "value": 245965295,
+            "range": "± 4712311",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group/500",
+            "value": 411168023,
+            "range": "± 5691380",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 402737039,
+            "range": "± 5637780",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 402328093,
+            "range": "± 5418766",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 410553038,
+            "range": "± 8181701",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 412561844,
+            "range": "± 5603290",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 531902,
+            "range": "± 7692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 538399,
+            "range": "± 6685",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 553210,
+            "range": "± 6127",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 151384,
+            "range": "± 1344",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 370347,
+            "range": "± 2789",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1326282,
+            "range": "± 3383",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 885744,
+            "range": "± 35010",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 922793,
+            "range": "± 44650",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 923298,
+            "range": "± 23019",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 48,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 80,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 187,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 268,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure/500",
+            "value": 361858102,
+            "range": "± 6355511",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 145907316,
+            "range": "± 1969170",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 146379010,
+            "range": "± 2410550",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 146620944,
+            "range": "± 2503667",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 146041606,
+            "range": "± 2089836",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_tasks/1000",
+            "value": 182372607,
+            "range": "± 4424981",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit/1000",
+            "value": 239154462,
+            "range": "± 8105235",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete/1000",
+            "value": 487859410,
+            "range": "± 9506638",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 121425,
+            "range": "± 2892",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 122069,
+            "range": "± 2226",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 121038,
+            "range": "± 3022",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 375715315,
+            "range": "± 4376029",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 312011165,
+            "range": "± 4662502",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 268725079,
+            "range": "± 5062616",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 242313107,
+            "range": "± 4803801",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit/1000",
+            "value": 33304864,
+            "range": "± 2562151",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch/500",
+            "value": 269601784,
+            "range": "± 5085499",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 242851853,
+            "range": "± 5371187",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 245820221,
+            "range": "± 5728465",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot/100_tasks",
+            "value": 81801265,
+            "range": "± 2418603",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 89461003,
+            "range": "± 2805621",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 165210870,
+            "range": "± 6057840",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 242168207,
+            "range": "± 11282125",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 395302331,
+            "range": "± 15958851",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1180446,
+            "range": "± 139523",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9460485,
+            "range": "± 1368033",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 49734588,
+            "range": "± 1787678",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 130350,
+            "range": "± 3172",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 220145,
+            "range": "± 4119",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 601904,
+            "range": "± 6504",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 140008,
+            "range": "± 3845",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 198987,
+            "range": "± 3385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 455838,
+            "range": "± 7387",
             "unit": "ns/iter"
           }
         ]
