@@ -861,6 +861,15 @@ impl<D: DomainKey> DomainSubmitBuilder<D> {
         self
     }
 
+    /// Control whether a child failure immediately fails the parent.
+    ///
+    /// Defaults to `true`. Set to `false` to let the parent's `finalize()`
+    /// run even when some children fail.
+    pub fn fail_fast(mut self, fail_fast: bool) -> Self {
+        self.inner = self.inner.fail_fast(fail_fast);
+        self
+    }
+
     /// Set the parent task ID.
     pub fn parent(mut self, id: i64) -> Self {
         self.inner = self.inner.parent(id);

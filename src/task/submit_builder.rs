@@ -112,6 +112,7 @@ pub struct SubmitBuilder {
     override_on_dependency_failure: Option<DependencyFailurePolicy>,
     override_tags: HashMap<String, String>,
     override_parent_id: Option<i64>,
+    override_fail_fast: Option<bool>,
 }
 
 impl SubmitBuilder {
@@ -140,6 +141,7 @@ impl SubmitBuilder {
             override_on_dependency_failure: None,
             override_tags: HashMap::new(),
             override_parent_id: None,
+            override_fail_fast: None,
         }
     }
 
@@ -209,6 +211,15 @@ impl SubmitBuilder {
     /// module-level tags for the same key.
     pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.override_tags.insert(key.into(), value.into());
+        self
+    }
+
+    /// Control whether a child failure immediately fails the parent.
+    ///
+    /// Defaults to `true`. Set to `false` to let the parent's `finalize()`
+    /// run even when some children fail.
+    pub fn fail_fast(mut self, fail_fast: bool) -> Self {
+        self.override_fail_fast = Some(fail_fast);
         self
     }
 
@@ -348,6 +359,9 @@ impl SubmitBuilder {
         }
         if let Some(pid) = self.override_parent_id.take() {
             self.submission.parent_id = Some(pid);
+        }
+        if let Some(ff) = self.override_fail_fast.take() {
+            self.submission.fail_fast = ff;
         }
     }
 
