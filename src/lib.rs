@@ -127,7 +127,9 @@
 //! [`TypedExecutor::finalize`] method is called — useful for assembly work
 //! like `CompleteMultipartUpload`. If any child fails and
 //! [`fail_fast`](TaskSubmission::fail_fast) is `true` (the default), siblings
-//! are cancelled and the parent fails immediately.
+//! are cancelled and the parent fails immediately. Disable this with
+//! [`DomainSubmitBuilder::fail_fast(false)`](DomainSubmitBuilder::fail_fast)
+//! (or [`TaskSubmission::fail_fast`] for untyped submissions).
 //!
 //! ## Task TTL & automatic expiry
 //!

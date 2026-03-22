@@ -294,7 +294,20 @@ ctx.domain::<Storage>()
     .await?;
 ```
 
-By default, if any child fails, its siblings are cancelled and the parent fails immediately (fail-fast). Disable this per-submission with `.fail_fast(false)`.
+By default, if any child fails, its siblings are cancelled and the parent fails immediately (fail-fast). Disable this per-submission with `.fail_fast(false)`:
+
+```rust
+// Typed builder
+media.submit_with(ScanTask { .. })
+    .fail_fast(false)
+    .await?;
+
+// Untyped
+scheduler.submit(
+    TaskSubmission::new("scan")
+        .fail_fast(false)
+).await?;
+```
 
 ## Sharing the scheduler
 
