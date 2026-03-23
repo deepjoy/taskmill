@@ -173,6 +173,9 @@ fn bench_dispatch_retryable_dead_letter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("retryable_dead_letter");
     group.throughput(Throughput::Elements(100));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
 
     let strategies: &[(&str, BackoffStrategy)] = &[
         (

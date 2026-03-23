@@ -102,6 +102,9 @@ fn bench_query_by_tags(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("query_by_tags");
     group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
 
     for queue_depth in [100usize, 1000, 5000] {
         let store = rt.block_on(store_with_tagged_tasks(queue_depth));

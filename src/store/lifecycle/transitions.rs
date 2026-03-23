@@ -724,6 +724,48 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Requeue a task for retry without a transaction.
+    ///
+    /// The single UPDATE is atomically safe and avoids `BEGIN IMMEDIATE` +
+    /// `COMMIT` round-trips, reducing connection hold time from 3 SQL
+    /// executions to 1. This matters under concurrency because
+    /// `open_memory()` uses a single-connection pool — shorter hold time
+    /// lets dispatch (`pop_next_batch`) interleave sooner.
+    pub async fn requeue_for_retry(
+        &self,
+        task_id: i64,
+        error: &str,
+        delay: std::time::Duration,
+    ) -> Result<(), StoreError> {
+        if delay.is_zero() {
+            sqlx::query(
+                "UPDATE tasks SET status = 'pending', started_at = NULL,
+                    retry_count = retry_count + 1, last_error = ?
+                 WHERE id = ?",
+            )
+            .bind(error)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            let run_after_ms = (chrono::Utc::now()
+                + chrono::Duration::milliseconds(delay.as_millis() as i64))
+            .timestamp_millis();
+            sqlx::query(
+                "UPDATE tasks SET status = 'pending', started_at = NULL,
+                    retry_count = retry_count + 1, last_error = ?,
+                    run_after = ?
+                 WHERE id = ?",
+            )
+            .bind(error)
+            .bind(run_after_ms)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Shared failure logic: retry or move to history.
     ///
     /// When retrying, computes the backoff delay from (in priority order):

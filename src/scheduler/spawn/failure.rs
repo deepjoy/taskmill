@@ -68,23 +68,39 @@ pub(crate) async fn handle_failure(
         "task failed"
     );
 
-    let fail_backoff = crate::store::FailBackoff {
-        strategy: backoff_strategy,
-        executor_retry_after_ms: error.retry_after_ms,
-    };
-    if let Err(e) = deps
-        .store
-        .fail_with_record(
-            task,
-            &error.message,
-            error.retryable,
-            effective_max_retries,
-            metrics,
-            &fail_backoff,
-        )
-        .await
-    {
-        tracing::error!(task_id, error = %e, "failed to record task failure");
+    if will_retry {
+        // Fast path: single UPDATE without a transaction wrapper.
+        // Avoids BEGIN IMMEDIATE + COMMIT round-trips, reducing connection
+        // hold time from 3 SQL executions to 1.
+        let delay = retry_delay.unwrap_or(std::time::Duration::ZERO);
+        if let Err(e) = deps
+            .store
+            .requeue_for_retry(task.id, &error.message, delay)
+            .await
+        {
+            tracing::error!(task_id, error = %e, "failed to requeue task for retry");
+        }
+    } else {
+        // Terminal failure (permanent or retries exhausted): needs a
+        // transaction for the multi-statement INSERT history + DELETE.
+        let fail_backoff = crate::store::FailBackoff {
+            strategy: backoff_strategy,
+            executor_retry_after_ms: error.retry_after_ms,
+        };
+        if let Err(e) = deps
+            .store
+            .fail_with_record(
+                task,
+                &error.message,
+                error.retryable,
+                effective_max_retries,
+                metrics,
+                &fail_backoff,
+            )
+            .await
+        {
+            tracing::error!(task_id, error = %e, "failed to record task failure");
+        }
     }
 
     // Remove from active tracking AFTER the store write completes.
