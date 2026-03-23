@@ -255,6 +255,7 @@ fn event_header_includes_tags() {
         on_dependency_failure: super::submission::DependencyFailurePolicy::Cancel,
         max_retries: None,
         memo: None,
+        pause_reasons: super::PauseReasons::NONE,
     };
     record.tags.insert("env".into(), "prod".into());
     record.tags.insert("owner".into(), "alice".into());

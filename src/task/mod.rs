@@ -185,6 +185,40 @@ impl std::str::FromStr for HistoryStatus {
     }
 }
 
+/// Bitmask tracking why a task is paused. Multiple reasons can be active
+/// simultaneously (e.g., both module and group paused).
+///
+/// Stored as INTEGER in SQLite. A value of 0 means the task is not paused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PauseReasons(i64);
+
+impl PauseReasons {
+    pub const NONE: Self = Self(0);
+    pub const PREEMPTION: Self = Self(1);
+    pub const MODULE: Self = Self(2);
+    pub const GLOBAL: Self = Self(4);
+    pub const GROUP: Self = Self(8);
+
+    pub fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+    pub fn with(self, flag: Self) -> Self {
+        Self(self.0 | flag.0)
+    }
+    pub fn without(self, flag: Self) -> Self {
+        Self(self.0 & !flag.0)
+    }
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+    pub fn bits(self) -> i64 {
+        self.0
+    }
+    pub fn from_bits(bits: i64) -> Self {
+        Self(bits)
+    }
+}
+
 /// A task in the active queue (pending, running, or paused).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -246,6 +280,8 @@ pub struct TaskRecord {
     /// Serialized memo from `execute()`, delivered to `finalize()`.
     /// `None` when no memo was produced (e.g. `Memo = ()`).
     pub memo: Option<Vec<u8>>,
+    /// Bitmask of active pause reasons. 0 when the task is not paused.
+    pub pause_reasons: PauseReasons,
 }
 
 impl TaskRecord {
