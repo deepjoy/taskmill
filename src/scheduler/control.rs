@@ -42,10 +42,16 @@ impl Scheduler {
     /// Resume the scheduler after a [`pause_all`](Self::pause_all).
     ///
     /// Clears the pause flag so the run loop will resume dispatching on
-    /// its next poll tick. Tasks that were paused in the store will be
-    /// picked up automatically.
+    /// its next poll tick. Also clears the GLOBAL bit from all paused tasks
+    /// in the store — tasks with no remaining pause reasons transition back
+    /// to pending.
     pub async fn resume_all(&self) {
         self.inner.paused.store(false, AtomicOrdering::Release);
+        let _ = self
+            .inner
+            .store
+            .clear_pause_bit(crate::task::PauseReasons::GLOBAL)
+            .await;
         self.inner.work_notify.notify_one();
         emit_event(&self.inner.event_tx, SchedulerEvent::Resumed);
         tracing::info!("scheduler resumed");

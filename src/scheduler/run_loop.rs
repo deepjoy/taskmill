@@ -442,10 +442,11 @@ impl Scheduler {
         // Run expiry sweep before dispatching.
         self.maybe_expire_tasks().await;
 
-        // Resume paused tasks only if no active preemptors exist.
-        // Skip the query entirely when no tasks have been paused.
+        // Resume preemption-paused tasks only if no active preemptors exist.
+        // Scoped to the PREEMPTION bit — tasks paused by module/global/group
+        // are not auto-resumed here.
         if self.inner.has_paused_tasks.load(AtomicOrdering::Relaxed) {
-            if let Ok(paused) = self.inner.store.paused_tasks().await {
+            if let Ok(paused) = self.inner.store.preemption_paused_tasks().await {
                 if paused.is_empty() {
                     self.inner
                         .has_paused_tasks
@@ -457,7 +458,7 @@ impl Scheduler {
                         .active
                         .has_preemptors_for(task.priority, self.inner.preempt_priority)
                     {
-                        let _ = self.inner.store.resume(task.id).await;
+                        let _ = self.inner.store.resume_preempted(task.id).await;
                     }
                 }
             }

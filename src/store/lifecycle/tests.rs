@@ -1,5 +1,5 @@
 use crate::priority::Priority;
-use crate::task::{HistoryStatus, IoBudget, TaskStatus, TaskSubmission};
+use crate::task::{HistoryStatus, IoBudget, PauseReasons, TaskStatus, TaskSubmission};
 
 use super::super::TaskStore;
 use super::FailBackoff;
@@ -138,15 +138,123 @@ async fn pause_and_resume() {
         .unwrap();
     let task = store.pop_next().await.unwrap().unwrap();
 
-    store.pause(task.id).await.unwrap();
+    store.pause(task.id, PauseReasons::PREEMPTION).await.unwrap();
     let paused = store.paused_tasks().await.unwrap();
     assert_eq!(paused.len(), 1);
     assert_eq!(paused[0].status, TaskStatus::Paused);
+    assert_eq!(paused[0].pause_reasons, PauseReasons::PREEMPTION);
 
     store.resume(task.id).await.unwrap();
     let pending = store.pending_tasks(10).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, TaskStatus::Pending);
+    assert_eq!(pending[0].pause_reasons, PauseReasons::NONE);
+}
+
+#[tokio::test]
+async fn pause_reasons_accumulate_across_sources() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("mod1.work").key("multi-pause");
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+
+    // Preemption pause.
+    store.pause(task.id, PauseReasons::PREEMPTION).await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.pause_reasons, PauseReasons::PREEMPTION);
+
+    // Module pause ORs in the MODULE bit.
+    store.pause_pending_by_type_prefix("mod1.").await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert!(t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(t.pause_reasons.contains(PauseReasons::MODULE));
+
+    // Clearing preemption leaves MODULE bit.
+    store.resume_preempted(task.id).await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert!(!t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(t.pause_reasons.contains(PauseReasons::MODULE));
+
+    // Clearing module fully resumes.
+    store.resume_paused_by_type_prefix("mod1.").await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+    assert_eq!(t.pause_reasons, PauseReasons::NONE);
+}
+
+#[tokio::test]
+async fn preemption_paused_tasks_filters_by_bit() {
+    let store = test_store().await;
+
+    // Task A: preemption-paused.
+    let sub_a = TaskSubmission::new("test").key("a");
+    store.submit(&sub_a).await.unwrap();
+    let a = store.pop_next().await.unwrap().unwrap();
+    store.pause(a.id, PauseReasons::PREEMPTION).await.unwrap();
+
+    // Task B: module-paused only.
+    let sub_b = TaskSubmission::new("test").key("b");
+    store.submit(&sub_b).await.unwrap();
+    store.pause_pending_by_type_prefix("test").await.unwrap();
+
+    let preempted = store.preemption_paused_tasks().await.unwrap();
+    // A has PREEMPTION bit (and MODULE bit added by prefix pause).
+    // B has only MODULE bit.
+    assert_eq!(preempted.len(), 1);
+    assert_eq!(preempted[0].id, a.id);
+}
+
+#[tokio::test]
+async fn clear_pause_bit_resumes_sole_reason_tasks() {
+    let store = test_store().await;
+
+    // Task with only GLOBAL reason.
+    let sub_a = TaskSubmission::new("test").key("global-only");
+    store.submit(&sub_a).await.unwrap();
+    let a = store.pop_next().await.unwrap().unwrap();
+    store.pause(a.id, PauseReasons::GLOBAL).await.unwrap();
+
+    // Task with GLOBAL + PREEMPTION reasons.
+    let sub_b = TaskSubmission::new("test").key("multi");
+    store.submit(&sub_b).await.unwrap();
+    let b = store.pop_next().await.unwrap().unwrap();
+    store.pause(b.id, PauseReasons::PREEMPTION).await.unwrap();
+    store.pause(b.id, PauseReasons::GLOBAL).await.unwrap();
+
+    let fully_resumed = store.clear_pause_bit(PauseReasons::GLOBAL).await.unwrap();
+    assert_eq!(fully_resumed, 1); // Only task A fully resumed.
+
+    let ta = store.task_by_id(a.id).await.unwrap().unwrap();
+    assert_eq!(ta.status, TaskStatus::Pending);
+    assert_eq!(ta.pause_reasons, PauseReasons::NONE);
+
+    let tb = store.task_by_id(b.id).await.unwrap().unwrap();
+    assert_eq!(tb.status, TaskStatus::Paused);
+    assert!(tb.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(!tb.pause_reasons.contains(PauseReasons::GLOBAL));
+}
+
+#[tokio::test]
+async fn module_pause_resume_with_bitmask() {
+    let store = test_store().await;
+
+    let sub = TaskSubmission::new("mod1.upload").key("m1");
+    store.submit(&sub).await.unwrap();
+
+    // Module pause sets MODULE bit.
+    let paused_count = store.pause_pending_by_type_prefix("mod1.").await.unwrap();
+    assert_eq!(paused_count, 1);
+    let t = store.task_by_key(&sub.effective_key()).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert_eq!(t.pause_reasons, PauseReasons::MODULE);
+
+    // Module resume clears MODULE bit → fully resumes.
+    let resumed_count = store.resume_paused_by_type_prefix("mod1.").await.unwrap();
+    assert_eq!(resumed_count, 1);
+    let t = store.task_by_key(&sub.effective_key()).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+    assert_eq!(t.pause_reasons, PauseReasons::NONE);
 }
 
 #[tokio::test]

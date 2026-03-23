@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::priority::Priority;
 use crate::registry::IoTracker;
 use crate::store::TaskStore;
-use crate::task::TaskRecord;
+use crate::task::{PauseReasons, TaskRecord};
 
 use super::{emit_event, SchedulerEvent};
 
@@ -166,7 +166,7 @@ impl ActiveTaskMap {
                 "preempting task for higher-priority work"
             );
         }
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::PREEMPTION).await;
         drained.into_iter().map(|(id, _)| id).collect()
     }
 
@@ -221,7 +221,7 @@ impl ActiveTaskMap {
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> usize {
         let drained = self.drain_where(|at| at.record.task_type.starts_with(prefix));
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::MODULE).await;
         drained.len()
     }
 
@@ -236,7 +236,7 @@ impl ActiveTaskMap {
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> usize {
         let drained = self.drain_where(|_| true);
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::GLOBAL).await;
         drained.len()
     }
 
@@ -259,15 +259,17 @@ impl ActiveTaskMap {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/// Cancel tokens, pause in store, and emit `Preempted` events for drained tasks.
+/// Cancel tokens, pause in store with the given reason, and emit `Preempted`
+/// events for drained tasks.
 async fn cancel_pause_emit(
     drained: &[(i64, ActiveTask)],
     store: &TaskStore,
     event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    reason: PauseReasons,
 ) {
     for (id, at) in drained {
         at.token.cancel();
-        let _ = store.pause(*id).await;
+        let _ = store.pause(*id, reason).await;
         emit_event(
             event_tx,
             SchedulerEvent::Preempted(at.record.event_header()),

@@ -6,29 +6,105 @@
 
 use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
-use crate::task::{IoBudget, TaskRecord};
+use crate::task::{IoBudget, PauseReasons, TaskRecord};
 
 use super::{compute_duration_ms, insert_history, HistoryStatus};
 
 // ── Pause / Resume ──────────────────────────────────────────────────
 
 impl TaskStore {
-    /// Pause a running task (for preemption). Sets status to paused.
-    pub async fn pause(&self, id: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE tasks SET status = 'paused', started_at = NULL WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+    /// Pause a running task. ORs the reason bit into `pause_reasons`.
+    pub async fn pause(&self, id: i64, reason: PauseReasons) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE tasks SET status = 'paused', started_at = NULL,
+                              pause_reasons = pause_reasons | ?
+             WHERE id = ?",
+        )
+        .bind(reason.bits())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    /// Resume a paused task back to pending.
+    /// Resume a paused task back to pending. Clears all pause reasons.
     pub async fn resume(&self, id: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE tasks SET status = 'pending' WHERE id = ? AND status = 'paused'")
+        sqlx::query(
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+             WHERE id = ? AND status = 'paused'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Return paused tasks that have the PREEMPTION bit set (for auto-resume).
+    pub async fn preemption_paused_tasks(&self) -> Result<Vec<TaskRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM tasks
+             WHERE status = 'paused' AND (pause_reasons & 1) != 0
+             ORDER BY priority ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        self.populate_tags(&mut records).await?;
+        Ok(records)
+    }
+
+    /// Clear the PREEMPTION bit from a paused task. If no other pause reasons
+    /// remain, the task transitions back to pending.
+    pub async fn resume_preempted(&self, id: i64) -> Result<(), StoreError> {
+        // Fully resume if PREEMPTION is the only reason.
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+             WHERE id = ? AND status = 'paused' AND pause_reasons = 1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Clear PREEMPTION bit but stay paused (other reasons remain).
+            sqlx::query(
+                "UPDATE tasks SET pause_reasons = pause_reasons & ~1
+                 WHERE id = ? AND status = 'paused' AND (pause_reasons & 1) != 0",
+            )
             .bind(id)
             .execute(&self.pool)
             .await?;
+        }
         Ok(())
+    }
+
+    /// Clear a specific pause-reason bit from all paused tasks. Tasks whose
+    /// `pause_reasons` becomes 0 transition back to pending.
+    /// Returns the count of tasks that fully resumed.
+    pub async fn clear_pause_bit(&self, reason: PauseReasons) -> Result<u64, StoreError> {
+        let bit = reason.bits();
+
+        // Fully resume tasks where this is the sole reason.
+        let fully_resumed = sqlx::query(
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+             WHERE status = 'paused' AND pause_reasons = ?",
+        )
+        .bind(bit)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        // Clear the bit from multi-reason tasks (stays paused).
+        sqlx::query(
+            "UPDATE tasks SET pause_reasons = pause_reasons & ~?
+             WHERE status = 'paused' AND (pause_reasons & ?) != 0",
+        )
+        .bind(bit)
+        .bind(bit)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(fully_resumed)
     }
 
     // ── Cancellation (user-initiated) ──────────────────────────────
@@ -127,14 +203,17 @@ impl TaskStore {
 
     // ── Bulk pause / resume by type prefix ─────────────────────────
 
-    /// Pause all pending tasks whose `task_type` starts with `prefix`.
+    /// Pause all pending tasks whose `task_type` starts with `prefix` (module pause).
     ///
-    /// Updates their status from `pending` to `paused` in a single SQL statement.
-    /// Returns the number of tasks paused.
+    /// ORs the MODULE bit. Tasks already paused for other reasons get the
+    /// additional MODULE bit.
+    /// Returns the number of tasks whose status changed to paused.
     pub async fn pause_pending_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
         let pattern = format!("{prefix}%");
         let result = sqlx::query(
-            "UPDATE tasks SET status = 'paused' WHERE task_type LIKE ? AND status = 'pending'",
+            "UPDATE tasks SET status = 'paused',
+                              pause_reasons = pause_reasons | 2
+             WHERE task_type LIKE ? AND status IN ('pending', 'paused')",
         )
         .bind(&pattern)
         .execute(&self.pool)
@@ -142,19 +221,32 @@ impl TaskStore {
         Ok(result.rows_affected())
     }
 
-    /// Resume all paused tasks whose `task_type` starts with `prefix`.
-    ///
-    /// Updates their status from `paused` to `pending` in a single SQL statement.
-    /// Returns the number of tasks resumed.
+    /// Resume module-paused tasks by type prefix. Clears the MODULE bit.
+    /// Tasks fully resume (become pending) only if no other pause reasons remain.
+    /// Returns the count of tasks that fully resumed.
     pub async fn resume_paused_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
         let pattern = format!("{prefix}%");
-        let result = sqlx::query(
-            "UPDATE tasks SET status = 'pending' WHERE task_type LIKE ? AND status = 'paused'",
+
+        // Fully resume tasks where MODULE is the only reason.
+        let fully_resumed = sqlx::query(
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+             WHERE task_type LIKE ? AND status = 'paused' AND pause_reasons = 2",
+        )
+        .bind(&pattern)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        // Clear MODULE bit from tasks with other active reasons (stays paused).
+        sqlx::query(
+            "UPDATE tasks SET pause_reasons = pause_reasons & ~2
+             WHERE task_type LIKE ? AND status = 'paused' AND (pause_reasons & 2) != 0",
         )
         .bind(&pattern)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected())
+
+        Ok(fully_resumed)
     }
 
     // ── Expiry (time-driven) ───────────────────────────────────────
