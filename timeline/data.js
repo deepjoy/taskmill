@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774215410174,
+  "lastUpdate": 1774282784610,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -7913,6 +7913,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 455838,
             "range": "± 7387",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bac4602c1ad92b2d641ab9663c6d6e2889845903",
+          "message": "perf: skip transaction for retry requeue and tune slow benchmarks (#79)\n\n## Summary\n\n- Add `requeue_for_retry` to `TaskStore` that executes a bare `UPDATE`\non the pool instead of `BEGIN IMMEDIATE` → `UPDATE` → `COMMIT`, cutting\nconnection hold time by 2/3 for the retry path. With `open_memory()`'s\nsingle-connection pool, this lets `pop_next_batch` dispatch interleave\nsooner with concurrent failure writes.\n- Split `handle_failure` into a fast path (`requeue_for_retry` for\nwill-retry) and the existing transactional `fail_with_record` for\nterminal failures that require multi-statement atomicity (INSERT history\n+ DELETE task).\n- Tune criterion config on `query_by_tags` and `retryable_dead_letter`\nbenchmark groups (`sample_size(10)`, `warm_up_time(1s)`,\n`measurement_time(3s)`) to reduce wall-clock time ~50%.\n\n## Benchmark results\n\n`retryable_dead_letter` throughput improved **~2.5x** across all four\nbackoff strategies:\n\n| Strategy | Before | After | Change |\n|---|---|---|---|\n| constant | ~900 elem/s | 2,305 elem/s | **+154%** |\n| linear | ~900 elem/s | 2,325 elem/s | **+167%** |\n| exponential | ~900 elem/s | 2,316 elem/s | **+162%** |\n| exponential_jitter | ~900 elem/s | 2,320 elem/s | **+154%** |",
+          "timestamp": "2026-03-23T15:52:59Z",
+          "tree_id": "a951df11d50151fea2eee6540d6687a4c60814ac",
+          "url": "https://github.com/deepjoy/taskmill/commit/bac4602c1ad92b2d641ab9663c6d6e2889845903"
+        },
+        "date": 1774282783927,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 3059325,
+            "range": "± 153670",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 17397159,
+            "range": "± 912622",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 79177810,
+            "range": "± 5471697",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 11413622,
+            "range": "± 118663",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 28101417,
+            "range": "± 441652",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 56543963,
+            "range": "± 825576",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 7273119,
+            "range": "± 68582",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 28531837,
+            "range": "± 1015181",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 55634045,
+            "range": "± 1004436",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups/500",
+            "value": 257057523,
+            "range": "± 5587493",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group/500",
+            "value": 451420950,
+            "range": "± 6511443",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 442344548,
+            "range": "± 9287250",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 445299924,
+            "range": "± 6234566",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 445738599,
+            "range": "± 6139200",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 443225079,
+            "range": "± 6061199",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 541568,
+            "range": "± 11454",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 551630,
+            "range": "± 8163",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 558849,
+            "range": "± 8977",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 154832,
+            "range": "± 1936",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 369386,
+            "range": "± 1276",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 1331181,
+            "range": "± 6857",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 883698,
+            "range": "± 22615",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 927588,
+            "range": "± 49473",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 913121,
+            "range": "± 28288",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 46,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 81,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 181,
+            "range": "± 3",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 266,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure/500",
+            "value": 390659048,
+            "range": "± 5025881",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 138294342,
+            "range": "± 685213",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 137318443,
+            "range": "± 1342137",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 137387492,
+            "range": "± 1329813",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 138344909,
+            "range": "± 2099760",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_tasks/1000",
+            "value": 186832972,
+            "range": "± 7850090",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit/1000",
+            "value": 247023115,
+            "range": "± 12711623",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete/1000",
+            "value": 509984698,
+            "range": "± 11817469",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 125442,
+            "range": "± 4471",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 124996,
+            "range": "± 5194",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 126370,
+            "range": "± 4201",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 391817095,
+            "range": "± 7228829",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 328538479,
+            "range": "± 5366435",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 286858385,
+            "range": "± 6455474",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 256622181,
+            "range": "± 4449187",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit/1000",
+            "value": 36144734,
+            "range": "± 2847967",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch/500",
+            "value": 285732751,
+            "range": "± 5471788",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 255221723,
+            "range": "± 6361128",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 258325314,
+            "range": "± 5508583",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot/100_tasks",
+            "value": 86756658,
+            "range": "± 2440873",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 92230633,
+            "range": "± 4226730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 172337499,
+            "range": "± 9918721",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 256262884,
+            "range": "± 15157487",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 411061149,
+            "range": "± 22491704",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/100",
+            "value": 1235513,
+            "range": "± 132826",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/1000",
+            "value": 9595887,
+            "range": "± 422342",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_by_tags/5000",
+            "value": 52470499,
+            "range": "± 3246582",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 132133,
+            "range": "± 4518",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 221485,
+            "range": "± 7485",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 614871,
+            "range": "± 6610",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 138322,
+            "range": "± 5515",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 199577,
+            "range": "± 6467",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 477574,
+            "range": "± 6808",
             "unit": "ns/iter"
           }
         ]
