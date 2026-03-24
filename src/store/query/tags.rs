@@ -1,8 +1,6 @@
 //! Tag-based queries: filtering, aggregation, and prefix discovery by task tags.
 
-use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
-use crate::task::TaskRecord;
 
 /// Escape SQL LIKE wildcards in `prefix` and append `%` for a safe prefix pattern.
 ///
@@ -20,38 +18,45 @@ fn escape_like_prefix(prefix: &str) -> String {
 }
 
 impl TaskStore {
-    /// Find active tasks matching all specified tag filters (AND semantics).
-    ///
-    /// Each `(key, value)` pair adds an INNER JOIN, so only tasks matching
-    /// **all** filters are returned. Optionally filter by status.
-    pub async fn tasks_by_tags(
-        &self,
+    /// Build the INNER JOIN fragment for tag filters.
+    fn build_tag_join_sql(
+        select: &str,
         filters: &[(&str, &str)],
-        status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
-        if filters.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut sql = String::from("SELECT t.* FROM tasks t");
+        status: Option<&crate::task::TaskStatus>,
+    ) -> String {
+        let mut sql = format!("SELECT {select} FROM tasks t");
         for (i, _) in filters.iter().enumerate() {
             sql.push_str(&format!(
                 " INNER JOIN task_tags tt{i} ON t.id = tt{i}.task_id AND tt{i}.key = ? AND tt{i}.value = ?"
             ));
         }
-        if let Some(ref s) = status {
+        if let Some(s) = status {
             sql.push_str(&format!(" WHERE t.status = '{}'", s.as_str()));
         }
-        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
+        sql
+    }
 
-        let mut q = sqlx::query(&sql);
+    /// Return the IDs of active tasks matching all specified tag filters (AND semantics).
+    ///
+    /// Each `(key, value)` pair adds an INNER JOIN, so only tasks matching
+    /// **all** filters are returned. Optionally filter by status.
+    pub async fn task_ids_by_tags(
+        &self,
+        filters: &[(&str, &str)],
+        status: Option<crate::task::TaskStatus>,
+    ) -> Result<Vec<i64>, StoreError> {
+        if filters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sql = Self::build_tag_join_sql("t.id", filters, status.as_ref());
+
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
         for (key, value) in filters {
             q = q.bind(key).bind(value);
         }
         let rows = q.fetch_all(&self.pool).await?;
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     /// Count active tasks matching all specified tag filters (AND semantics).
@@ -95,17 +100,17 @@ impl TaskStore {
         Ok(rows)
     }
 
-    /// Find active tasks matching a `task_type` prefix **and** all tag filters.
+    /// Return IDs of active tasks matching a `task_type` prefix **and** all tag filters.
     ///
-    /// If `filters` is empty, returns all tasks matching the prefix.
-    pub async fn tasks_by_tags_with_prefix(
+    /// If `filters` is empty, returns all task IDs matching the prefix.
+    pub async fn task_ids_by_tags_with_prefix(
         &self,
         prefix: &str,
         filters: &[(&str, &str)],
         status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         let pattern = format!("{prefix}%");
-        let mut sql = String::from("SELECT t.* FROM tasks t");
+        let mut sql = String::from("SELECT t.id FROM tasks t");
         for (i, _) in filters.iter().enumerate() {
             sql.push_str(&format!(
                 " INNER JOIN task_tags tt{i} ON t.id = tt{i}.task_id AND tt{i}.key = ? AND tt{i}.value = ?"
@@ -115,17 +120,14 @@ impl TaskStore {
         if let Some(ref s) = status {
             sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
         }
-        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
 
-        let mut q = sqlx::query(&sql);
+        let mut q = sqlx::query_as::<_, (i64,)>(&sql);
         for (key, value) in filters {
             q = q.bind(key).bind(value);
         }
         q = q.bind(&pattern);
         let rows = q.fetch_all(&self.pool).await?;
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     /// Count active tasks grouped by a tag key's values, filtered by `task_type` prefix.
@@ -259,46 +261,44 @@ impl TaskStore {
         Ok(rows.into_iter().map(|(k,)| k).collect())
     }
 
-    /// Find active tasks that have any tag key matching the prefix.
+    /// Return IDs of active tasks that have any tag key matching the prefix.
     ///
-    /// Optionally filter by status. Returns tasks ordered by priority.
+    /// Optionally filter by status.
     /// LIKE wildcards in the prefix are escaped — only true prefix matching.
-    pub async fn tasks_by_tag_key_prefix(
+    pub async fn task_ids_by_tag_key_prefix(
         &self,
         prefix: &str,
         status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         let pattern = escape_like_prefix(prefix);
         let mut sql = String::from(
-            "SELECT t.* FROM tasks t \
+            "SELECT t.id FROM tasks t \
              WHERE EXISTS (SELECT 1 FROM task_tags tt \
              WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\')",
         );
         if let Some(ref s) = status {
             sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
         }
-        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query_as::<_, (i64,)>(&sql)
             .bind(&pattern)
             .fetch_all(&self.pool)
             .await?;
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
-    /// Find active tasks that have any tag key matching the prefix, scoped to a task_type prefix.
-    pub async fn tasks_by_tag_key_prefix_with_prefix(
+    /// Return IDs of active tasks that have any tag key matching the prefix,
+    /// scoped to a task_type prefix.
+    pub async fn task_ids_by_tag_key_prefix_with_prefix(
         &self,
         task_type_prefix: &str,
         prefix: &str,
         status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         let pattern = escape_like_prefix(prefix);
         let type_pattern = format!("{task_type_prefix}%");
         let mut sql = String::from(
-            "SELECT t.* FROM tasks t \
+            "SELECT t.id FROM tasks t \
              WHERE EXISTS (SELECT 1 FROM task_tags tt \
              WHERE tt.task_id = t.id AND tt.key LIKE ? ESCAPE '\\') \
              AND t.task_type LIKE ?",
@@ -306,16 +306,13 @@ impl TaskStore {
         if let Some(ref s) = status {
             sql.push_str(&format!(" AND t.status = '{}'", s.as_str()));
         }
-        sql.push_str(" ORDER BY t.priority ASC, t.id ASC");
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query_as::<_, (i64,)>(&sql)
             .bind(&pattern)
             .bind(&type_pattern)
             .fetch_all(&self.pool)
             .await?;
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     /// Count active tasks that have any tag key matching the prefix.

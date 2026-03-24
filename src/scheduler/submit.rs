@@ -320,18 +320,19 @@ impl Scheduler {
 
     /// Cancel all active tasks matching a tag key-value pair.
     ///
-    /// Finds tasks via [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags) and cancels each one.
+    /// Uses [`TaskStore::task_ids_by_tags`](crate::TaskStore::task_ids_by_tags) (ID-only query)
+    /// to avoid full record deserialization and tag population overhead.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag(&self, key: &str, value: &str) -> Result<Vec<i64>, StoreError> {
-        let tasks = self
+        let ids = self
             .inner
             .store
-            .tasks_by_tags(&[(key, value)], None)
+            .task_ids_by_tags(&[(key, value)], None)
             .await?;
         let mut cancelled = Vec::new();
-        for task in &tasks {
-            if self.cancel(task.id).await? {
-                cancelled.push(task.id);
+        for id in ids {
+            if self.cancel(id).await? {
+                cancelled.push(id);
             }
         }
         Ok(cancelled)
@@ -339,18 +340,18 @@ impl Scheduler {
 
     /// Cancel all active tasks that have any tag key matching the given prefix.
     ///
-    /// Finds tasks via [`crate::TaskStore::tasks_by_tag_key_prefix`] and cancels each.
+    /// Uses [`crate::TaskStore::task_ids_by_tag_key_prefix`] for ID-only lookup.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
-        let tasks = self
+        let ids = self
             .inner
             .store
-            .tasks_by_tag_key_prefix(prefix, None)
+            .task_ids_by_tag_key_prefix(prefix, None)
             .await?;
         let mut cancelled = Vec::new();
-        for task in &tasks {
-            if self.cancel(task.id).await? {
-                cancelled.push(task.id);
+        for id in ids {
+            if self.cancel(id).await? {
+                cancelled.push(id);
             }
         }
         Ok(cancelled)

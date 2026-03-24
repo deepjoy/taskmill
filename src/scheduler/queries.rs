@@ -63,15 +63,15 @@ impl Scheduler {
             .collect()
     }
 
-    /// Find active tasks matching all specified tag filters (AND semantics).
+    /// Return the IDs of active tasks matching all specified tag filters (AND semantics).
     ///
-    /// Delegates to [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags).
-    pub async fn tasks_by_tags(
+    /// Delegates to [`TaskStore::task_ids_by_tags`](crate::TaskStore::task_ids_by_tags).
+    pub async fn task_ids_by_tags(
         &self,
         filters: &[(&str, &str)],
         status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<crate::task::TaskRecord>, StoreError> {
-        self.inner.store.tasks_by_tags(filters, status).await
+    ) -> Result<Vec<i64>, StoreError> {
+        self.inner.store.task_ids_by_tags(filters, status).await
     }
 
     /// Count active tasks grouped by a tag key's values.
@@ -97,15 +97,15 @@ impl Scheduler {
         self.inner.store.tag_keys_by_prefix(prefix).await
     }
 
-    /// Find active tasks with any tag key matching the given prefix.
-    pub async fn tasks_by_tag_key_prefix(
+    /// Return IDs of active tasks with any tag key matching the given prefix.
+    pub async fn task_ids_by_tag_key_prefix(
         &self,
         prefix: &str,
         status: Option<crate::task::TaskStatus>,
-    ) -> Result<Vec<crate::task::TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         self.inner
             .store
-            .tasks_by_tag_key_prefix(prefix, status)
+            .task_ids_by_tag_key_prefix(prefix, status)
             .await
     }
 

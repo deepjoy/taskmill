@@ -172,10 +172,10 @@
 //! Tags are copied to history on all terminal transitions and are included in
 //! [`TaskEventHeader`] for event subscribers.
 //!
-//! Query by exact tags via [`DomainHandle::tasks_by_tags`] (AND semantics),
+//! Query by exact tags via [`DomainHandle::task_ids_by_tags`] (AND semantics),
 //! or discover and query by tag key prefix via
 //! [`DomainHandle::tag_keys_by_prefix`],
-//! [`DomainHandle::tasks_by_tag_key_prefix`],
+//! [`DomainHandle::task_ids_by_tag_key_prefix`],
 //! [`DomainHandle::count_by_tag_key_prefix`], and
 //! [`DomainHandle::cancel_by_tag_key_prefix`]. Prefix queries are useful when
 //! multiple libraries share a scheduler and namespace their tags
