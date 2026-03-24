@@ -132,11 +132,15 @@ The `history_by_type(task_type)` parameter requires the qualified name including
 | `next_run_after()` | `Option<DateTime<Utc>>` | Earliest `run_after` timestamp among pending delayed tasks. Useful for knowing when the next scheduled task will fire. |
 | `recurring_schedules()` | `Vec<RecurringScheduleInfo>` | All active recurring schedules with their interval, remaining occurrences, and paused state. |
 
-The `SchedulerSnapshot` also includes recurring schedule information:
+The `SchedulerSnapshot` also includes recurring schedule information, priority aging config, and group allocation data:
 
 ```rust
 let snap = scheduler.snapshot().await?;
 // snap.recurring_schedules — Vec<RecurringScheduleInfo> for all active schedules
+// snap.aging_config        — Option<AgingConfig> (when priority aging is enabled)
+// snap.group_allocations   — Vec<GroupAllocationInfo> (per-group slot allocations when fair scheduling is configured)
+// snap.paused_groups       — Vec<PausedGroupInfo> (currently paused groups)
+// snap.rate_limits         — Vec<RateLimitInfo> (configured rate limits with current utilization)
 ```
 
 ### Managing recurring schedules

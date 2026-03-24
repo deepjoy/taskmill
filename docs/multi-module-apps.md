@@ -196,9 +196,35 @@ A task is dispatched when **all** of these pass:
 
 A domain with only `BACKGROUND`-priority tasks can be indefinitely deferred when other domains continuously submit `NORMAL` work. This is by design — priority ordering is global across all domains.
 
-If you need guaranteed throughput for a domain:
-- **Raise the priority** of its most important tasks to `NORMAL` or `HIGH`.
-- **Use task groups** with a dedicated concurrency reservation. A group limit acts as a soft floor: tasks in the group bypass the global priority queue as long as the group has available slots.
+Taskmill provides several tools to address this:
+
+- **[Priority aging](priorities-and-preemption.md#priority-aging)** — automatically promotes tasks that have been waiting too long, ensuring even `IDLE` tasks eventually get dispatched.
+- **[Weighted fair scheduling](priorities-and-preemption.md#weighted-fair-scheduling)** — allocates dispatch slots proportionally to group weights, guaranteeing each group a fair share of capacity regardless of priority levels.
+- **Raise the priority** of the domain's most important tasks to `NORMAL` or `HIGH`.
+- **Use task groups** with a dedicated concurrency reservation or minimum slot guarantee.
+
+### Using group weights for guaranteed throughput
+
+The most effective solution is weighted fair scheduling with minimum slot guarantees:
+
+```rust
+pub struct Sync;
+impl DomainKey for Sync { const NAME: &'static str = "sync"; }
+
+let scheduler = Scheduler::builder()
+    .domain(
+        Domain::<Sync>::new()
+            .task::<SyncTask>(SyncExecutor)
+            .default_group("sync-reserved")
+            .default_priority(Priority::BACKGROUND)
+    )
+    .group_weight("sync-reserved", 1)           // participate in fair allocation
+    .group_minimum_slots("sync-reserved", 2)    // guaranteed at least 2 slots
+    .priority_aging(AgingConfig::default())      // prevent indefinite starvation
+    .max_concurrency(16)
+    .build()
+    .await?;
+```
 
 ### Using group concurrency as a soft floor
 

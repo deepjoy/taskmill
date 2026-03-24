@@ -114,10 +114,13 @@ tokio::spawn(async move {
 | `TaskUnblocked { task_id }` | A blocked task's dependencies are all satisfied — it transitions to `pending` |
 | `DeadLettered { header, error, retry_count }` | Task exhausted all retries — can be re-submitted via `retry_dead_letter()` |
 | `DependencyFailed { task_id, failed_dependency }` | A blocked task was cancelled because a dependency failed permanently |
+| `GroupPaused { group, pending_count, running_count }` | A task group was paused |
+| `GroupResumed { group, resumed_count }` | A task group was resumed |
+| `GroupWeightChanged { group, previous_weight, new_weight }` | A group's scheduling weight was changed at runtime via `set_group_weight()` |
 | `Paused` | Scheduler globally paused via `pause_all()` |
 | `Resumed` | Scheduler resumed via `resume_all()` |
 
-Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key`, and `label`. Use `event.header()` to access it generically.
+Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key`, `label`, `tags`, `base_priority`, and `effective_priority`. Use `event.header()` to access it generically. When [priority aging](priorities-and-preemption.md#priority-aging) is enabled, `effective_priority < base_priority` indicates the task has been promoted by aging.
 
 ### Which events to listen for
 
@@ -131,6 +134,7 @@ Task-specific events share a `TaskEventHeader` with `task_id`, `task_type`, `key
 | Stale task cleanup UI | `TaskExpired` |
 | Recurring schedule monitoring | `RecurringSkipped`, `RecurringCompleted` |
 | Dependency chain tracking | `TaskUnblocked`, `DependencyFailed` |
+| Group weight monitoring | `GroupWeightChanged`, `GroupPaused`, `GroupResumed` |
 
 ## Querying progress
 
@@ -152,14 +156,18 @@ For UI dashboards, `scheduler.snapshot()` gathers all scheduler state in a singl
 
 ```rust
 let snap = scheduler.snapshot().await?;
-// snap.running          — Vec<TaskRecord> of currently executing tasks
-// snap.pending_count    — number of tasks waiting to dispatch
-// snap.paused_count     — number of preempted tasks
-// snap.progress         — Vec<EstimatedProgress> for every running task
-// snap.pressure         — aggregate backpressure (0.0–1.0)
+// snap.running            — Vec<TaskRecord> of currently executing tasks
+// snap.pending_count      — number of tasks waiting to dispatch
+// snap.paused_count       — number of preempted tasks
+// snap.progress           — Vec<EstimatedProgress> for every running task
+// snap.pressure           — aggregate backpressure (0.0–1.0)
 // snap.pressure_breakdown — per-source diagnostics: Vec<(String, f32)>
-// snap.max_concurrency  — current concurrency limit
-// snap.is_paused        — whether the scheduler is globally paused
+// snap.max_concurrency    — current concurrency limit
+// snap.is_paused          — whether the scheduler is globally paused
+// snap.aging_config       — Option<AgingConfig> (if priority aging is enabled)
+// snap.group_allocations  — Vec<GroupAllocationInfo> (per-group slot allocations)
+// snap.paused_groups      — Vec<PausedGroupInfo> (groups currently paused)
+// snap.rate_limits        — Vec<RateLimitInfo> (configured rate limits)
 ```
 
 ## Tauri event bridging

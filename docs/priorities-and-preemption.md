@@ -34,7 +34,9 @@ Most applications only need `HIGH`, `NORMAL`, and `BACKGROUND`. Reserve `REALTIM
 
 ## Queue ordering
 
-Tasks are dispatched in strict priority order. Within the same priority tier, tasks are dispatched in insertion order (FIFO) — the task submitted first runs first.
+Tasks are dispatched in priority order. Within the same priority tier, tasks are dispatched in insertion order (FIFO) — the task submitted first runs first.
+
+When [priority aging](#priority-aging) is enabled, the scheduler uses *effective priority* (base priority adjusted for wait time) instead of stored priority. When [group weights](#weighted-fair-scheduling) are configured, the scheduler uses a multi-pass dispatch loop that allocates slots proportionally to group weights before falling back to global priority order.
 
 ## Preemption
 
@@ -237,3 +239,138 @@ return Err(TaskError::permanent("invalid payload, giving up"));
 - **Priority preserved** — retried tasks keep their original priority; they aren't demoted.
 - **Dedup key preserved** — the key stays occupied during retries, preventing duplicate submissions while the task is still being worked on.
 - **Crash doesn't count** — if the process crashes while a task is running, the crash recovery doesn't increment `retry_count`.
+
+## Priority aging
+
+When high-priority tasks arrive continuously, low-priority work can be starved indefinitely. Priority aging prevents this by gradually promoting tasks that have been waiting too long.
+
+### How it works
+
+At dispatch time, the scheduler computes an *effective priority* for each pending task:
+
+```text
+age = now - created_at - pause_duration
+promotions = max(0, (age - grace_period) / aging_interval)
+effective = max(base_priority - promotions, max_effective_priority)
+```
+
+Lower numeric value = higher priority. Aging *decreases* the numeric value (promotes the task). The stored priority is never mutated — effective priority is a pure dispatch-time computation.
+
+### Configuring aging
+
+```rust
+use taskmill::{AgingConfig, Priority, Scheduler};
+use std::time::Duration;
+
+let scheduler = Scheduler::builder()
+    .priority_aging(AgingConfig {
+        grace_period: Duration::from_secs(300),    // 5 min before aging starts
+        aging_interval: Duration::from_secs(60),   // promote 1 level per minute
+        max_effective_priority: Priority::HIGH,     // can't age above HIGH
+        urgent_threshold: None,                     // see fair scheduling
+    })
+    // ...
+    .build()
+    .await?;
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `grace_period` | 5 minutes | How long a task must wait before aging begins. |
+| `aging_interval` | 60 seconds | Time between each one-step priority promotion. |
+| `max_effective_priority` | `HIGH` (64) | Priority ceiling — tasks cannot age above this. Use `REALTIME` to allow aging to the absolute highest level. |
+| `urgent_threshold` | `None` | When effective priority reaches this level, the task may bypass group weight allocation (see [weighted fair scheduling](#weighted-fair-scheduling)). Must be `>=` `max_effective_priority` numerically. |
+
+### Aging interactions
+
+- **Paused tasks** — the aging clock is frozen while a task is paused. Accumulated pause time is excluded from the age calculation.
+- **Retry** — when a task is requeued for retry, the aging clock continues from the original `created_at`. The task has been waiting even longer.
+- **Recurring tasks** — each new recurring instance gets a fresh `created_at`, so the aging clock starts at zero.
+- **Child tasks** — children inherit the *higher* of the parent's current effective priority and the child's own configured priority. This promotes children of aged parents without demoting children whose task type is inherently higher-priority.
+- **Supersede / resubmit** — the new task gets a fresh `created_at`, so the aging clock resets.
+- **Crash recovery** — if the scheduler crashes while tasks are paused, the accumulated pause time is correctly accounted for on recovery (aging clock runs slightly fast for the crash window, which is acceptable for anti-starvation).
+
+### Observability
+
+Effective priority is visible in events and snapshots:
+
+- `TaskEventHeader` includes both `base_priority` and `effective_priority`. Compare them to detect aging: `effective_priority < base_priority` means the task has been promoted.
+- `SchedulerSnapshot` includes `aging_config` when aging is enabled.
+
+### Opt-in, zero cost when off
+
+Without `priority_aging()`, dispatch queries use the original `ORDER BY priority ASC, id ASC` — fully index-ordered with zero overhead.
+
+## Weighted fair scheduling
+
+Group concurrency limits are *caps* (max N slots for group X), not *floors*. Without weighted allocation, a group with a large pending queue can fill all available global slots (up to its cap), starving other groups with legitimate work.
+
+Weighted fair scheduling allocates dispatch slots proportionally to group weights, ensuring each group gets a fair share of capacity.
+
+### How it works
+
+When group weights are configured, the scheduler uses a three-pass dispatch loop:
+
+1. **Fair pass** — each group (including ungrouped tasks as a virtual group) receives slots proportional to its weight. Minimum slot guarantees (`min_slots`) are honored first.
+2. **Greedy pass** — any slots left unfilled by the fair pass (under-demand groups, rate-limited tasks) are filled by global priority order. This makes the scheduler work-conserving.
+3. **Urgent pass** — tasks aged past `urgent_threshold` (if configured) bypass group weights but still respect `max_concurrency`. This is a safety valve for severely starved tasks.
+
+### Configuring group weights
+
+```rust
+use taskmill::Scheduler;
+
+let scheduler = Scheduler::builder()
+    .group_weight("api-calls", 3)      // 3x the weight of default
+    .group_weight("background", 1)     // 1x (default weight)
+    .default_group_weight(1)           // weight for groups without an override
+    .group_minimum_slots("critical", 2) // always at least 2 slots for "critical"
+    .group_concurrency("api-calls", 8) // cap at 8 concurrent (still enforced)
+    .max_concurrency(16)
+    // ...
+    .build()
+    .await?;
+```
+
+Weights are relative — `(A:3, B:1)` gives A 75% and B 25% of capacity. Ungrouped tasks participate as a virtual group with the default weight, ensuring they compete fairly rather than only receiving leftovers.
+
+### Runtime adjustment
+
+```rust
+// Update weight at runtime
+scheduler.set_group_weight("api-calls", 5);
+
+// Remove override, falling back to default weight
+scheduler.remove_group_weight("api-calls");
+
+// Reset all weights
+scheduler.reset_group_weights();
+
+// Set minimum guaranteed slots
+scheduler.set_group_minimum_slots("critical", 3);
+```
+
+### Interactions with other features
+
+- **Group concurrency caps** — caps are applied during allocation and also enforced by the dispatch gate as a safety net. The allocation respects caps; excess is redistributed to other groups.
+- **Group pause** — paused groups are excluded from the allocation. Their capacity is released to other groups. On resume, they re-enter the allocation on the next dispatch cycle.
+- **Rate limits** — rate limit checks still run during fair dispatch. A rate-limited task leaves its group's slot unfilled, which the greedy pass fills from other groups.
+- **Preemption** — preemption operates independently of the allocation. A preempting task may temporarily exceed its group's allocation; the allocation rebalances on the next cycle.
+- **Priority aging** — aging and fair scheduling compose. An aged task in a low-weight group dispatches in priority order within its group's allocation. Tasks aged past `urgent_threshold` bypass group weights entirely.
+
+### Observability
+
+`SchedulerSnapshot` includes `group_allocations` — a `Vec<GroupAllocationInfo>` with per-group detail:
+
+```rust
+let snap = scheduler.snapshot().await?;
+for alloc in &snap.group_allocations {
+    println!(
+        "{}: weight={}, slots={}, running={}, pending={}, min={:?}, cap={:?}",
+        alloc.group, alloc.weight, alloc.allocated_slots,
+        alloc.running, alloc.pending, alloc.min_slots, alloc.cap,
+    );
+}
+```
+
+A `GroupWeightChanged` event is emitted when `set_group_weight()` is called.

@@ -44,6 +44,7 @@ Controls scheduling behavior. Set via builder methods or pass directly to `Sched
 | `shutdown_mode` | `ShutdownMode` | `Hard` | `Hard` cancels immediately. `Graceful(Duration)` waits for running tasks. | Always use `Graceful` for desktop apps to avoid data loss. |
 | `default_ttl` | `Option<Duration>` | `None` | Global TTL applied to tasks without a per-task or per-type TTL. | Set to catch stale tasks (e.g., `Duration::from_secs(3600)` for 1 hour). |
 | `expiry_sweep_interval` | `Option<Duration>` | `Some(30s)` | How often the scheduler sweeps for expired tasks. `None` disables periodic sweeps (dispatch-time checks still apply). | Lower for latency-sensitive expiry; `None` if you only need dispatch-time checks. |
+| `aging_config` | `Option<AgingConfig>` | `None` | Priority aging configuration. When enabled, pending tasks are gradually promoted in effective priority over time. | See [Priorities & Preemption — Priority aging](priorities-and-preemption.md#priority-aging). |
 
 ### Builder methods
 
@@ -395,6 +396,61 @@ for rl in &snap.rate_limits {
 }
 ```
 
+## Priority aging
+
+Priority aging prevents starvation of low-priority work by gradually promoting tasks that have been waiting too long. See [Priorities & Preemption — Priority aging](priorities-and-preemption.md#priority-aging) for the full explanation.
+
+```rust
+use taskmill::{AgingConfig, Priority, Scheduler};
+use std::time::Duration;
+
+Scheduler::builder()
+    .priority_aging(AgingConfig {
+        grace_period: Duration::from_secs(300),     // 5 min before aging starts
+        aging_interval: Duration::from_secs(60),    // promote 1 level per minute
+        max_effective_priority: Priority::HIGH,      // can't age above HIGH
+        urgent_threshold: None,                      // disable urgent override
+    })
+    // ...
+    .build()
+    .await?;
+```
+
+The `AgingConfig::default()` uses the values shown above. Effective priority is computed at dispatch time — the stored priority column is never mutated.
+
+## Weighted fair scheduling
+
+When multiple task groups compete for dispatch slots, weighted fair scheduling allocates capacity proportionally. See [Priorities & Preemption — Weighted fair scheduling](priorities-and-preemption.md#weighted-fair-scheduling) for the full explanation.
+
+```rust
+Scheduler::builder()
+    .group_weight("uploads", 3)
+    .group_weight("indexing", 1)
+    .group_minimum_slots("alerts", 2)
+    .default_group_weight(1)
+    // ...
+    .build()
+    .await?;
+```
+
+Adjust at runtime:
+
+```rust
+scheduler.set_group_weight("uploads", 5);
+scheduler.remove_group_weight("uploads");
+scheduler.reset_group_weights();
+scheduler.set_group_minimum_slots("alerts", 4);
+```
+
+Current allocations are visible in the scheduler snapshot:
+
+```rust
+let snap = scheduler.snapshot().await?;
+for alloc in &snap.group_allocations {
+    println!("{}: {} slots (weight {})", alloc.group, alloc.allocated_slots, alloc.weight);
+}
+```
+
 ## Tuning for specific workloads
 
 ### Desktop app with file processing
@@ -484,6 +540,10 @@ Scheduler::builder()
 | `group_concurrency(group, n)` | Per-group concurrency limit override. |
 | `rate_limit(task_type, limit)` | Set a token-bucket rate limit for a task type. |
 | `group_rate_limit(group, limit)` | Set a token-bucket rate limit for a task group. |
+| `priority_aging(config)` | Enable [priority aging](priorities-and-preemption.md#priority-aging) with the given `AgingConfig`. |
+| `group_weight(group, weight)` | Set a relative scheduling weight for a task group. See [Weighted fair scheduling](priorities-and-preemption.md#weighted-fair-scheduling). |
+| `default_group_weight(weight)` | Default weight for groups without a specific override. Default: 1. |
+| `group_minimum_slots(group, slots)` | Minimum guaranteed dispatch slots for a group, regardless of weight. |
 | `app_state(state)` | Register global state visible to all domains. |
 | `app_state_arc(arc)` | Register global state from a pre-existing `Arc`. |
 | `build()` | Build and return the `Scheduler`. |

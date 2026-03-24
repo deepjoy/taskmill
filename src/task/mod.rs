@@ -335,7 +335,7 @@ impl TaskRecord {
         self.event_header_with_aging(None)
     }
 
-    /// Build a [`TaskEventHeader`] with aging-aware effective priority.
+    /// Build a [`TaskEventHeader`](crate::scheduler::event::TaskEventHeader) with aging-aware effective priority.
     pub fn event_header_with_aging(
         &self,
         aging_config: Option<&crate::scheduler::aging::AgingConfig>,
