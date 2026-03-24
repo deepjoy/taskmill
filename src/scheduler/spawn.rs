@@ -71,6 +71,22 @@ pub(crate) async fn spawn_task(
         }
     }
 
+    // Increment dispatch counter.
+    ctx.counters
+        .dispatched
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    {
+        let module = task.module_name().unwrap_or_default();
+        ctx.emitter
+            .record_dispatched(&task.task_type, module, task.group_key.as_deref());
+        // Queue wait: wallclock time from submission to now.
+        let wait = (chrono::Utc::now() - task.created_at)
+            .to_std()
+            .unwrap_or_default();
+        ctx.emitter.record_queue_wait(wait, &task.task_type, module);
+    }
+
     // Emit dispatched event with aging-aware effective priority.
     emit_event(
         &ctx.event_tx,
@@ -86,6 +102,9 @@ pub(crate) async fn spawn_task(
         max_retries: ctx.max_retries,
         completion_tx: ctx.completion_tx.clone(),
         completion_rx: ctx.completion_rx.clone(),
+        counters: ctx.counters.clone(),
+        #[cfg(feature = "metrics")]
+        emitter: ctx.emitter.clone(),
     };
     let failure_deps = failure::FailureDeps {
         store: ctx.store.clone(),
@@ -96,6 +115,9 @@ pub(crate) async fn spawn_task(
         registry: ctx.registry.clone(),
         failure_tx: ctx.failure_tx.clone(),
         failure_rx: ctx.failure_rx.clone(),
+        counters: ctx.counters.clone(),
+        #[cfg(feature = "metrics")]
+        emitter: ctx.emitter.clone(),
     };
 
     // Keep SpawnContext alive for inline retry context rebuilds.
@@ -105,6 +127,8 @@ pub(crate) async fn spawn_task(
     let active_for_handle = spawn_ctx.active.clone();
     let token_for_spawn = prepared.token.clone();
     let module_running = spawn_ctx.module_running.clone();
+
+    let started_at = std::time::Instant::now();
 
     let handle = tokio::spawn(async move {
         let task_id = task.id;
@@ -143,11 +167,13 @@ pub(crate) async fn spawn_task(
 
             match result {
                 Ok(memo) => {
+                    let duration = started_at.elapsed();
                     completion::handle_success(
                         &task,
                         phase,
                         &metrics,
                         memo,
+                        duration,
                         &completion_deps,
                         &mut decrement_module_once,
                     )
@@ -190,6 +216,20 @@ pub(crate) async fn spawn_task(
                                     .await;
                                 task.retry_count += 1;
 
+                                // Increment failure/retry counters for inline retries.
+                                failure_deps
+                                    .counters
+                                    .failed
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                failure_deps
+                                    .counters
+                                    .failed_retryable
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                failure_deps
+                                    .counters
+                                    .retried
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                                 // Emit retry event.
                                 emit_event(
                                     &failure_deps.event_tx,
@@ -209,10 +249,12 @@ pub(crate) async fn spawn_task(
                     }
 
                     // Not inline-retryable — use normal failure path.
+                    let duration = started_at.elapsed();
                     failure::handle_failure(
                         &task,
                         te,
                         &metrics,
+                        duration,
                         &failure_deps,
                         &mut decrement_module_once,
                     )

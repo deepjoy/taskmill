@@ -2,6 +2,7 @@
 
 use crate::store::StoreError;
 
+use super::counters::MetricsSnapshot;
 use super::event::PausedGroupInfo;
 use super::fair::GroupAllocationInfo;
 use super::progress::TaskProgress;
@@ -134,6 +135,54 @@ impl Scheduler {
         offset: i64,
     ) -> Result<Vec<crate::task::TaskHistoryRecord>, StoreError> {
         self.inner.store.dead_letter_tasks(limit, offset).await
+    }
+
+    /// Returns a point-in-time snapshot of internal counters and gauges.
+    ///
+    /// Available without the `metrics` feature. Counter values are cumulative
+    /// since scheduler creation; gauge values reflect the current instant.
+    pub async fn metrics_snapshot(&self) -> MetricsSnapshot {
+        let cs = self.inner.counters.snapshot();
+        let pending = self.inner.store.pending_count().await.unwrap_or(0);
+        let running = self.inner.active.count();
+        let blocked = self.inner.store.blocked_count().await.unwrap_or(0);
+        let paused = self.inner.store.paused_count().await.unwrap_or(0);
+        let waiting = self.inner.store.waiting_count().await.unwrap_or(0);
+        let pressure = self.inner.gate.pressure().await;
+        let max_concurrency = self
+            .inner
+            .max_concurrency
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let groups_paused = self.inner.paused_groups.read().unwrap().len();
+
+        MetricsSnapshot {
+            submitted: cs.submitted,
+            dispatched: cs.dispatched,
+            completed: cs.completed,
+            failed: cs.failed,
+            failed_retryable: cs.failed_retryable,
+            retried: cs.retried,
+            dead_lettered: cs.dead_lettered,
+            superseded: cs.superseded,
+            cancelled: cs.cancelled,
+            expired: cs.expired,
+            preempted: cs.preempted,
+            batches_submitted: cs.batches_submitted,
+            gate_denials: cs.gate_denials,
+            rate_limit_throttles: cs.rate_limit_throttles,
+            group_pauses: cs.group_pauses,
+            group_resumes: cs.group_resumes,
+            dependency_failures: cs.dependency_failures,
+            recurring_skipped: cs.recurring_skipped,
+            pending,
+            running,
+            blocked,
+            paused,
+            waiting,
+            pressure,
+            max_concurrency,
+            groups_paused,
+        }
     }
 
     /// Capture a single status snapshot for dashboard UIs.

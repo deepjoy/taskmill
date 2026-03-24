@@ -26,6 +26,8 @@ mod fair_scheduling;
 mod group_pause;
 #[path = "integration/memo.rs"]
 mod memo;
+#[path = "integration/metrics.rs"]
+mod metrics;
 #[path = "integration/module_features.rs"]
 mod module_features;
 #[path = "integration/modules.rs"]

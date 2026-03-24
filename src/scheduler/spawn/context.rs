@@ -47,6 +47,11 @@ pub(crate) struct SpawnContext {
     >,
     /// Priority aging configuration. `None` = aging disabled.
     pub aging_config: Option<Arc<crate::scheduler::aging::AgingConfig>>,
+    /// Internal atomic counters for throughput metrics.
+    pub counters: Arc<crate::scheduler::counters::SchedulerCounters>,
+    /// `metrics` crate emitter (feature-gated).
+    #[cfg(feature = "metrics")]
+    pub emitter: Arc<crate::scheduler::metrics_bridge::MetricsEmitter>,
 }
 
 /// Output of task context construction — everything needed to insert into the

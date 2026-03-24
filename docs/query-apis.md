@@ -58,7 +58,7 @@ These methods operate across all domains and are available directly on `Schedule
 | `scheduler.task(id)` | `Option<TaskRecord>` | Look up any active task by ID, regardless of which domain owns it. |
 | `scheduler.snapshot()` | `SchedulerSnapshot` | Global aggregates: total running, pending, pressure, progress, and recurring schedules. |
 
-See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-dashboard) for dashboard patterns using these APIs.
+See [Multi-Module Applications](multi-module-apps.md#building-a-cross-module-dashboard) for dashboard patterns using these APIs, and [Metrics & Observability](metrics.md) for production-grade metrics export to Prometheus, StatsD, or Datadog.
 
 ## Cancellation
 

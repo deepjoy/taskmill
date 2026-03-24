@@ -42,6 +42,50 @@ impl Scheduler {
         self.resolve_ttl(&mut sub);
         let outcome = self.inner.store.submit(&sub).await?;
 
+        // Increment submit counters.
+        match &outcome {
+            SubmitOutcome::Inserted { .. } => {
+                self.inner
+                    .counters
+                    .submitted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                {
+                    let module = sub.task_type.split_once("::").map(|(n, _)| n).unwrap_or("");
+                    self.inner.emitter.record_submitted(
+                        &sub.task_type,
+                        module,
+                        sub.group_key.as_deref(),
+                    );
+                }
+            }
+            SubmitOutcome::Superseded { .. } => {
+                self.inner
+                    .counters
+                    .submitted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner
+                    .counters
+                    .superseded
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "metrics")]
+                {
+                    let module = sub.task_type.split_once("::").map(|(n, _)| n).unwrap_or("");
+                    self.inner.emitter.record_submitted(
+                        &sub.task_type,
+                        module,
+                        sub.group_key.as_deref(),
+                    );
+                    self.inner.emitter.record_superseded(
+                        &sub.task_type,
+                        module,
+                        sub.group_key.as_deref(),
+                    );
+                }
+            }
+            _ => {}
+        }
+
         // Handle superseded tasks.
         if let SubmitOutcome::Superseded {
             new_task_id,
@@ -114,6 +158,38 @@ impl Scheduler {
             self.resolve_ttl(sub);
         }
         let results = self.inner.store.submit_batch(&resolved).await?;
+
+        // Increment batch and per-task counters.
+        self.inner
+            .counters
+            .batches_submitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        {
+            self.inner.emitter.record_batch_submitted();
+            self.inner.emitter.record_batch_size(resolved.len());
+        }
+        for outcome in &results {
+            match outcome {
+                SubmitOutcome::Inserted { .. } => {
+                    self.inner
+                        .counters
+                        .submitted
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                SubmitOutcome::Superseded { .. } => {
+                    self.inner
+                        .counters
+                        .submitted
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.inner
+                        .counters
+                        .superseded
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {}
+            }
+        }
 
         // Handle superseded tasks.
         for (sub, outcome) in resolved.iter().zip(results.iter()) {
