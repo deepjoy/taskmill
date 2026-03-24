@@ -20,7 +20,7 @@ use crate::registry::ErasedExecutor;
 use crate::task::TaskRecord;
 
 use super::dispatch::ActiveTask;
-use super::SchedulerEvent;
+use super::{emit_event, SchedulerEvent};
 
 pub(in crate::scheduler) use completion::process_completion_batch;
 pub(crate) use context::SpawnContext;
@@ -72,9 +72,7 @@ pub(crate) async fn spawn_task(
     }
 
     // Emit dispatched event.
-    let _ = ctx
-        .event_tx
-        .send(SchedulerEvent::Dispatched(task.event_header()));
+    emit_event(&ctx.event_tx, SchedulerEvent::Dispatched(task.event_header()));
 
     // Build deps for handlers (cloned from SpawnContext since they move into the spawned future).
     let completion_deps = completion::CompletionDeps {
@@ -190,7 +188,7 @@ pub(crate) async fn spawn_task(
                                 task.retry_count += 1;
 
                                 // Emit retry event.
-                                let _ = failure_deps.event_tx.send(SchedulerEvent::Failed {
+                                emit_event(&failure_deps.event_tx, SchedulerEvent::Failed {
                                     header: task.event_header(),
                                     error: te.message,
                                     will_retry: true,

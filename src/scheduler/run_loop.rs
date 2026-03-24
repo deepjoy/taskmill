@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::store::StoreError;
 use crate::task::IoBudget;
 
-use super::SchedulerEvent;
+use super::{emit_event, SchedulerEvent};
 
 use super::gate::GateContext;
 use super::spawn::{self, SpawnContext};
@@ -80,7 +80,7 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
+                    emit_event(&self.inner.event_tx, SchedulerEvent::TaskExpired {
                         header: task.event_header(),
                         age,
                     });
@@ -339,7 +339,7 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
+                    emit_event(&self.inner.event_tx, SchedulerEvent::TaskExpired {
                         header: task.event_header(),
                         age,
                     });

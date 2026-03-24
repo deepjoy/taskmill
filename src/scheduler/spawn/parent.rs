@@ -6,7 +6,7 @@ use crate::store::TaskStore;
 use crate::task::{IoBudget, ParentResolution};
 
 use super::super::dispatch::ActiveTaskMap;
-use super::super::SchedulerEvent;
+use super::super::{emit_event, SchedulerEvent};
 
 /// Check if a waiting parent is ready for finalization or has failed,
 /// and dispatch the finalize phase if ready.
@@ -41,7 +41,7 @@ pub(crate) async fn handle_parent_resolution(
                 {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
                 }
-                let _ = event_tx.send(SchedulerEvent::Failed {
+                emit_event(event_tx, SchedulerEvent::Failed {
                     header: parent.event_header(),
                     error: reason,
                     will_retry: false,

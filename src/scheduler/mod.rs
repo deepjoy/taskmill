@@ -81,6 +81,20 @@ pub use event::{
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
 
+/// Emit a scheduler event only when at least one subscriber is listening.
+///
+/// Avoids the broadcast channel's internal locking and allocation overhead
+/// when no subscribers exist (common in benchmarks and headless operation).
+#[inline]
+pub(crate) fn emit_event(
+    tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    event: SchedulerEvent,
+) {
+    if tx.receiver_count() > 0 {
+        let _ = tx.send(event);
+    }
+}
+
 // ── Scheduler ───────────────────────────────────────────────────────
 
 /// Shared inner state behind `Arc` so `Scheduler` can be `Clone`.

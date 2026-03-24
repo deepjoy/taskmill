@@ -6,7 +6,7 @@ use crate::store::TaskStore;
 use crate::task::{IoBudget, TaskError, TaskRecord};
 
 use super::super::dispatch::ActiveTaskMap;
-use super::super::{FailureMsg, SchedulerEvent};
+use super::super::{emit_event, FailureMsg, SchedulerEvent};
 use super::parent::handle_parent_resolution;
 
 /// Shared dependencies for the failure handler.
@@ -156,13 +156,13 @@ pub(crate) async fn handle_failure(
 
     let dead_lettered = error.retryable && !will_retry;
     if dead_lettered {
-        let _ = deps.event_tx.send(SchedulerEvent::DeadLettered {
+        emit_event(&deps.event_tx, SchedulerEvent::DeadLettered {
             header: task.event_header(),
             error: error.message.clone(),
             retry_count: task.retry_count + 1,
         });
     } else {
-        let _ = deps.event_tx.send(SchedulerEvent::Failed {
+        emit_event(&deps.event_tx, SchedulerEvent::Failed {
             header: task.event_header(),
             error: error.message.clone(),
             will_retry,
@@ -204,15 +204,13 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
     match deps.store.fail_dependents(task_id).await {
         Ok((failed_ids, unblocked_ids)) => {
             for fid in &failed_ids {
-                let _ = deps.event_tx.send(SchedulerEvent::DependencyFailed {
+                emit_event(&deps.event_tx, SchedulerEvent::DependencyFailed {
                     task_id: *fid,
                     failed_dependency: task_id,
                 });
             }
             for uid in &unblocked_ids {
-                let _ = deps
-                    .event_tx
-                    .send(SchedulerEvent::TaskUnblocked { task_id: *uid });
+                emit_event(&deps.event_tx, SchedulerEvent::TaskUnblocked { task_id: *uid });
             }
             if !unblocked_ids.is_empty() {
                 deps.work_notify.notify_one();
@@ -233,9 +231,7 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
                         if let Some(at) = deps.active.remove(*rid) {
                             at.token.cancel();
                             let _ = deps.store.delete(*rid).await;
-                            let _ = deps
-                                .event_tx
-                                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+                            emit_event(&deps.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
                         }
                     }
                 }
@@ -259,7 +255,7 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
                         "failed to record parent failure"
                     );
                 }
-                let _ = deps.event_tx.send(SchedulerEvent::Failed {
+                emit_event(&deps.event_tx, SchedulerEvent::Failed {
                     header: parent.event_header(),
                     error: msg,
                     will_retry: false,

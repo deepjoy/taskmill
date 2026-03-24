@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 
-use super::{Scheduler, SchedulerEvent};
+use super::{emit_event, Scheduler, SchedulerEvent};
 
 impl Scheduler {
     /// Update max concurrency at runtime (e.g., from adaptive controller or
@@ -35,7 +35,7 @@ impl Scheduler {
             .active
             .pause_all(&self.inner.store, &self.inner.event_tx)
             .await;
-        let _ = self.inner.event_tx.send(SchedulerEvent::Paused);
+        emit_event(&self.inner.event_tx, SchedulerEvent::Paused);
         tracing::info!(paused_tasks = count, "scheduler paused");
     }
 
@@ -47,7 +47,7 @@ impl Scheduler {
     pub async fn resume_all(&self) {
         self.inner.paused.store(false, AtomicOrdering::Release);
         self.inner.work_notify.notify_one();
-        let _ = self.inner.event_tx.send(SchedulerEvent::Resumed);
+        emit_event(&self.inner.event_tx, SchedulerEvent::Resumed);
         tracing::info!("scheduler resumed");
     }
 
