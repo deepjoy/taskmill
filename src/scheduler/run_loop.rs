@@ -32,6 +32,8 @@ impl Scheduler {
             module_registry: Arc::clone(&self.inner.module_registry),
             completion_tx: self.inner.completion_tx.clone(),
             completion_rx: self.inner.completion_rx.clone(),
+            failure_tx: self.inner.failure_tx.clone(),
+            failure_rx: self.inner.failure_rx.clone(),
         }
     }
 
@@ -369,16 +371,34 @@ impl Scheduler {
         .await;
     }
 
+    /// Drain the failure channel and process all queued terminal failures
+    /// in a single batched transaction.
+    async fn drain_failures(&self) {
+        let mut batch = Vec::new();
+        {
+            let mut rx = self.inner.failure_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = batch.len(), "draining failure batch");
+        spawn::process_failure_batch(&batch, &self.inner.store, &self.inner.event_tx).await;
+    }
+
     /// Resume paused tasks, dispatch finalizers, and dispatch pending work.
     async fn poll_and_dispatch(&self) {
         if self.is_paused() {
             return;
         }
 
-        // Drain queued completions before dispatching new work.
-        // This ensures completed tasks are processed first, freeing
-        // dependency edges and unblocking downstream tasks.
+        // Drain queued completions and failures before dispatching new work.
         self.drain_completions().await;
+        self.drain_failures().await;
 
         // Run expiry sweep before dispatching.
         self.maybe_expire_tasks().await;
@@ -459,8 +479,9 @@ impl Scheduler {
             }
         }
 
-        // Drain any remaining completions before closing the store.
+        // Drain any remaining completions and failures before closing the store.
         self.drain_completions().await;
+        self.drain_failures().await;
 
         // Flush WAL and close the database.
         self.inner.store.close().await;

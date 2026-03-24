@@ -724,6 +724,79 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Batch-process terminal failures in a single transaction.
+    ///
+    /// Each item is a `(task, error, retryable)` triple that has already been
+    /// determined to be terminal (retries exhausted or non-retryable). The
+    /// method inserts history rows and deletes active tasks in one
+    /// `BEGIN IMMEDIATE` / `COMMIT` cycle, amortizing SQLite's WAL sync.
+    pub async fn fail_batch(
+        &self,
+        items: &[(&crate::task::TaskRecord, &str, bool, &IoBudget)],
+    ) -> Result<(), StoreError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        if items.len() == 1 {
+            let (task, error, retryable, metrics) = items[0];
+            return self
+                .fail_with_record(task, error, retryable, 0, metrics, &FailBackoff::default())
+                .await;
+        }
+
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
+
+        tracing::debug!(count = items.len(), "store.fail_batch: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+
+        // Step 1: Insert history rows (per-task — each has unique binds).
+        for &(task, error, retryable, metrics) in items {
+            let status = if retryable {
+                HistoryStatus::DeadLetter
+            } else {
+                HistoryStatus::Failed
+            };
+            let duration_ms = compute_duration_ms(task);
+            insert_history(
+                &mut conn,
+                task,
+                status,
+                metrics,
+                duration_ms,
+                Some(error),
+                skip_tags,
+            )
+            .await?;
+        }
+
+        // Step 2: Batch-delete active task rows.
+        let ids: Vec<i64> = items.iter().map(|(t, _, _, _)| t.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM tasks WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        q.execute(&mut *conn).await?;
+
+        // Step 3: Batch-delete orphaned tags.
+        if !skip_tags {
+            let tag_sql = format!("DELETE FROM task_tags WHERE task_id IN ({placeholders})");
+            let mut tq = sqlx::query(&tag_sql);
+            for id in &ids {
+                tq = tq.bind(id);
+            }
+            tq.execute(&mut *conn).await?;
+        }
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(count = items.len(), "store.fail_batch: COMMIT ok");
+
+        self.maybe_prune().await;
+        Ok(())
+    }
+
     /// Requeue a task for retry without a transaction.
     ///
     /// The single UPDATE is atomically safe and avoids `BEGIN IMMEDIATE` +

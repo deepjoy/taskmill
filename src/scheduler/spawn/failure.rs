@@ -6,7 +6,7 @@ use crate::store::TaskStore;
 use crate::task::{IoBudget, TaskError, TaskRecord};
 
 use super::super::dispatch::ActiveTaskMap;
-use super::super::SchedulerEvent;
+use super::super::{FailureMsg, SchedulerEvent};
 use super::parent::handle_parent_resolution;
 
 /// Shared dependencies for the failure handler.
@@ -17,6 +17,9 @@ pub(crate) struct FailureDeps {
     pub work_notify: Arc<tokio::sync::Notify>,
     pub max_retries: i32,
     pub registry: Arc<crate::registry::TaskTypeRegistry>,
+    pub failure_tx: tokio::sync::mpsc::UnboundedSender<FailureMsg>,
+    pub failure_rx:
+        std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FailureMsg>>>,
 }
 
 /// Handle a failed task execution.
@@ -80,9 +83,9 @@ pub(crate) async fn handle_failure(
         {
             tracing::error!(task_id, error = %e, "failed to requeue task for retry");
         }
-    } else {
-        // Terminal failure (permanent or retries exhausted): needs a
-        // transaction for the multi-statement INSERT history + DELETE.
+    } else if task.parent_id.is_some() {
+        // Terminal failure with parent — must process inline for fail-fast
+        // cascade and parent resolution ordering.
         let fail_backoff = crate::store::FailBackoff {
             strategy: backoff_strategy,
             executor_retry_after_ms: error.retry_after_ms,
@@ -100,6 +103,50 @@ pub(crate) async fn handle_failure(
             .await
         {
             tracing::error!(task_id, error = %e, "failed to record task failure");
+        }
+    } else {
+        // Terminal failure without parent — batch via channel.
+        let msg = FailureMsg {
+            task: task.clone(),
+            error: error.message.clone(),
+            retryable: error.retryable,
+            metrics: *metrics,
+        };
+
+        if deps.failure_tx.send(msg).is_err() {
+            // Channel closed — fall back to inline.
+            tracing::error!(task_id, "failure channel closed — processing inline");
+            let fail_backoff = crate::store::FailBackoff {
+                strategy: backoff_strategy,
+                executor_retry_after_ms: error.retry_after_ms,
+            };
+            if let Err(e) = deps
+                .store
+                .fail_with_record(
+                    task,
+                    &error.message,
+                    error.retryable,
+                    effective_max_retries,
+                    metrics,
+                    &fail_backoff,
+                )
+                .await
+            {
+                tracing::error!(task_id, error = %e, "inline failure recording failed");
+            }
+        } else {
+            // Leader election: try to grab the rx lock and drain the batch.
+            if let Ok(mut rx) = deps.failure_rx.try_lock() {
+                let mut batch = Vec::new();
+                while let Ok(m) = rx.try_recv() {
+                    batch.push(m);
+                }
+                drop(rx);
+
+                if !batch.is_empty() {
+                    process_failure_batch(&batch, &deps.store, &deps.event_tx).await;
+                }
+            }
         }
     }
 
@@ -127,6 +174,26 @@ pub(crate) async fn handle_failure(
     // If permanent failure, propagate to dependency chain.
     if !will_retry {
         propagate_failure(task, &error, deps).await;
+    }
+}
+
+/// Process a batch of terminal failures: write to store and emit events.
+///
+/// Called from both the spawned task (leader election) and the run loop
+/// (`drain_failures`).
+pub(in crate::scheduler) async fn process_failure_batch(
+    batch: &[FailureMsg],
+    store: &TaskStore,
+    _event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+) {
+    let items: Vec<(&TaskRecord, &str, bool, &IoBudget)> = batch
+        .iter()
+        .map(|m| (&m.task, m.error.as_str(), m.retryable, &m.metrics))
+        .collect();
+
+    if let Err(e) = store.fail_batch(&items).await {
+        tracing::error!(error = %e, "batch failure recording failed");
+        // Events are emitted by handle_failure directly, so nothing else needed.
     }
 }
 

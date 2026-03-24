@@ -62,6 +62,19 @@ pub(crate) struct CompletionMsg {
     pub task: TaskRecord,
     pub metrics: IoBudget,
 }
+
+// ── Failure coalescing ───────────────────────────────────────────
+
+/// Message sent from spawned tasks for terminal failures (dead-letter / permanent).
+///
+/// Batched by `drain_failures` to reduce per-failure transaction overhead,
+/// mirroring the completion coalescing pattern.
+pub(crate) struct FailureMsg {
+    pub task: TaskRecord,
+    pub error: String,
+    pub retryable: bool,
+    pub metrics: IoBudget,
+}
 pub use event::{
     SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
 };
@@ -144,6 +157,10 @@ pub(crate) struct SchedulerInner {
     /// (leader election pattern) in addition to the run loop.
     pub(crate) completion_rx:
         std::sync::Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<CompletionMsg>>>,
+    /// Send side of the failure coalescing channel.
+    pub(crate) failure_tx: tokio::sync::mpsc::UnboundedSender<FailureMsg>,
+    /// Receive side (leader election + run loop drain).
+    pub(crate) failure_rx: std::sync::Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FailureMsg>>>,
 }
 
 /// IO-aware priority scheduler.
@@ -240,6 +257,7 @@ impl Scheduler {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         let (progress_tx, _) = tokio::sync::broadcast::channel(64);
         let (completion_tx, completion_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             inner: Arc::new(SchedulerInner {
                 store,
@@ -271,12 +289,16 @@ impl Scheduler {
                 module_paused,
                 module_caps: RwLock::new(module_caps),
                 module_running,
-                // Conservative: true on startup so the first cycle checks.
-                has_paused_tasks: AtomicBool::new(true),
+                // Start false — set to true only when preemption pauses a task.
+                // For persistent stores the builder checks for pre-existing
+                // paused tasks after construction (see SchedulerBuilder::build).
+                has_paused_tasks: AtomicBool::new(false),
                 // Default to false; builder sets true when safe.
                 fast_dispatch: AtomicBool::new(false),
                 completion_tx,
                 completion_rx: std::sync::Arc::new(Mutex::new(completion_rx)),
+                failure_tx,
+                failure_rx: std::sync::Arc::new(Mutex::new(failure_rx)),
             }),
         }
     }
