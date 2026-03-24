@@ -2,6 +2,7 @@
 
 use crate::store::StoreError;
 
+use super::event::PausedGroupInfo;
 use super::progress::TaskProgress;
 use super::{EstimatedProgress, Scheduler, SchedulerSnapshot};
 
@@ -152,6 +153,21 @@ impl Scheduler {
         let recurring_schedules = self.inner.store.recurring_schedules().await?;
         let blocked_count = self.inner.store.blocked_count().await?;
 
+        // Paused groups with per-group task counts.
+        let paused_groups_rows = self.inner.store.paused_group_info().await?;
+        let paused_groups = paused_groups_rows
+            .into_iter()
+            .map(
+                |(group, paused_at_ms, resume_at_ms, paused_task_count)| PausedGroupInfo {
+                    group,
+                    paused_at: chrono::DateTime::from_timestamp_millis(paused_at_ms)
+                        .unwrap_or_default(),
+                    paused_task_count,
+                    resume_at: resume_at_ms.and_then(chrono::DateTime::from_timestamp_millis),
+                },
+            )
+            .collect();
+
         Ok(SchedulerSnapshot {
             running,
             pending_count,
@@ -165,6 +181,7 @@ impl Scheduler {
             is_paused: self.is_paused(),
             recurring_schedules,
             blocked_count,
+            paused_groups,
         })
     }
 }

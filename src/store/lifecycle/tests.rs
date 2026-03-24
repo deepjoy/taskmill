@@ -1,5 +1,9 @@
+use std::time::Duration;
+
+use chrono::Utc;
+
 use crate::priority::Priority;
-use crate::task::{HistoryStatus, IoBudget, TaskStatus, TaskSubmission};
+use crate::task::{HistoryStatus, IoBudget, PauseReasons, TaskStatus, TaskSubmission};
 
 use super::super::TaskStore;
 use super::FailBackoff;
@@ -138,15 +142,137 @@ async fn pause_and_resume() {
         .unwrap();
     let task = store.pop_next().await.unwrap().unwrap();
 
-    store.pause(task.id).await.unwrap();
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
     let paused = store.paused_tasks().await.unwrap();
     assert_eq!(paused.len(), 1);
     assert_eq!(paused[0].status, TaskStatus::Paused);
+    assert_eq!(paused[0].pause_reasons, PauseReasons::PREEMPTION);
 
     store.resume(task.id).await.unwrap();
     let pending = store.pending_tasks(10).await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].status, TaskStatus::Pending);
+    assert_eq!(pending[0].pause_reasons, PauseReasons::NONE);
+}
+
+#[tokio::test]
+async fn pause_reasons_accumulate_across_sources() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("mod1.work").key("multi-pause");
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+
+    // Preemption pause.
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.pause_reasons, PauseReasons::PREEMPTION);
+
+    // Module pause ORs in the MODULE bit.
+    store.pause_pending_by_type_prefix("mod1.").await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert!(t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(t.pause_reasons.contains(PauseReasons::MODULE));
+
+    // Clearing preemption leaves MODULE bit.
+    store.resume_preempted(task.id).await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert!(!t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(t.pause_reasons.contains(PauseReasons::MODULE));
+
+    // Clearing module fully resumes.
+    store.resume_paused_by_type_prefix("mod1.").await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+    assert_eq!(t.pause_reasons, PauseReasons::NONE);
+}
+
+#[tokio::test]
+async fn preemption_paused_tasks_filters_by_bit() {
+    let store = test_store().await;
+
+    // Task A: preemption-paused.
+    let sub_a = TaskSubmission::new("test").key("a");
+    store.submit(&sub_a).await.unwrap();
+    let a = store.pop_next().await.unwrap().unwrap();
+    store.pause(a.id, PauseReasons::PREEMPTION).await.unwrap();
+
+    // Task B: module-paused only.
+    let sub_b = TaskSubmission::new("test").key("b");
+    store.submit(&sub_b).await.unwrap();
+    store.pause_pending_by_type_prefix("test").await.unwrap();
+
+    let preempted = store.preemption_paused_tasks().await.unwrap();
+    // A has PREEMPTION bit (and MODULE bit added by prefix pause).
+    // B has only MODULE bit.
+    assert_eq!(preempted.len(), 1);
+    assert_eq!(preempted[0].id, a.id);
+}
+
+#[tokio::test]
+async fn clear_pause_bit_resumes_sole_reason_tasks() {
+    let store = test_store().await;
+
+    // Task with only GLOBAL reason.
+    let sub_a = TaskSubmission::new("test").key("global-only");
+    store.submit(&sub_a).await.unwrap();
+    let a = store.pop_next().await.unwrap().unwrap();
+    store.pause(a.id, PauseReasons::GLOBAL).await.unwrap();
+
+    // Task with GLOBAL + PREEMPTION reasons.
+    let sub_b = TaskSubmission::new("test").key("multi");
+    store.submit(&sub_b).await.unwrap();
+    let b = store.pop_next().await.unwrap().unwrap();
+    store.pause(b.id, PauseReasons::PREEMPTION).await.unwrap();
+    store.pause(b.id, PauseReasons::GLOBAL).await.unwrap();
+
+    let fully_resumed = store.clear_pause_bit(PauseReasons::GLOBAL).await.unwrap();
+    assert_eq!(fully_resumed, 1); // Only task A fully resumed.
+
+    let ta = store.task_by_id(a.id).await.unwrap().unwrap();
+    assert_eq!(ta.status, TaskStatus::Pending);
+    assert_eq!(ta.pause_reasons, PauseReasons::NONE);
+
+    let tb = store.task_by_id(b.id).await.unwrap().unwrap();
+    assert_eq!(tb.status, TaskStatus::Paused);
+    assert!(tb.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(!tb.pause_reasons.contains(PauseReasons::GLOBAL));
+}
+
+#[tokio::test]
+async fn module_pause_resume_with_bitmask() {
+    let store = test_store().await;
+
+    let sub = TaskSubmission::new("mod1.upload").key("m1");
+    store.submit(&sub).await.unwrap();
+
+    // Module pause sets MODULE bit.
+    let paused_count = store.pause_pending_by_type_prefix("mod1.").await.unwrap();
+    assert_eq!(paused_count, 1);
+    let t = store
+        .task_by_key(&sub.effective_key())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert_eq!(t.pause_reasons, PauseReasons::MODULE);
+
+    // Module resume clears MODULE bit → fully resumes.
+    let resumed_count = store.resume_paused_by_type_prefix("mod1.").await.unwrap();
+    assert_eq!(resumed_count, 1);
+    let t = store
+        .task_by_key(&sub.effective_key())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+    assert_eq!(t.pause_reasons, PauseReasons::NONE);
 }
 
 #[tokio::test]
@@ -859,4 +985,198 @@ async fn dead_letter_tasks_query_returns_only_dead_lettered() {
     let failed = store.failed_tasks(10).await.unwrap();
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].status, HistoryStatus::Failed);
+}
+
+// ── Group pause state management (Step 3a) ──────────────────────
+
+#[tokio::test]
+async fn pause_group_state_is_idempotent() {
+    let store = test_store().await;
+    assert!(store.pause_group_state("g1", None).await.unwrap());
+    assert!(!store.pause_group_state("g1", None).await.unwrap()); // no-op
+}
+
+#[tokio::test]
+async fn resume_group_state_is_idempotent() {
+    let store = test_store().await;
+    store.pause_group_state("g1", None).await.unwrap();
+    assert!(store.resume_group_state("g1").await.unwrap());
+    assert!(!store.resume_group_state("g1").await.unwrap()); // no-op
+}
+
+#[tokio::test]
+async fn paused_groups_lists_all() {
+    let store = test_store().await;
+    store.pause_group_state("g2", None).await.unwrap();
+    store.pause_group_state("g1", None).await.unwrap();
+
+    let groups = store.paused_groups().await.unwrap();
+    assert_eq!(groups.len(), 2);
+    // Ordered by paused_at.
+    assert_eq!(groups[0].0, "g2");
+    assert_eq!(groups[1].0, "g1");
+}
+
+#[tokio::test]
+async fn is_group_paused_reflects_state() {
+    let store = test_store().await;
+    assert!(!store.is_group_paused("g1").await.unwrap());
+    store.pause_group_state("g1", None).await.unwrap();
+    assert!(store.is_group_paused("g1").await.unwrap());
+    store.resume_group_state("g1").await.unwrap();
+    assert!(!store.is_group_paused("g1").await.unwrap());
+}
+
+#[tokio::test]
+async fn groups_due_for_resume_finds_elapsed() {
+    let store = test_store().await;
+    let past = Utc::now() - chrono::Duration::seconds(10);
+    store
+        .pause_group_state("g1", Some(past.timestamp_millis()))
+        .await
+        .unwrap();
+    // Group with future resume_at should not appear.
+    let future = Utc::now() + chrono::Duration::seconds(3600);
+    store
+        .pause_group_state("g2", Some(future.timestamp_millis()))
+        .await
+        .unwrap();
+    // Group with no resume_at should not appear.
+    store.pause_group_state("g3", None).await.unwrap();
+
+    let due = store.groups_due_for_resume().await.unwrap();
+    assert_eq!(due, vec!["g1"]);
+}
+
+// ── Bulk pause / resume by group (Step 3b) ──────────────────────
+
+#[tokio::test]
+async fn pause_tasks_in_group_sets_status_and_bits() {
+    let store = test_store().await;
+    let sub1 = TaskSubmission::new("test").key("t1").group("g1");
+    let sub2 = TaskSubmission::new("test").key("t2").group("g2");
+    let key1 = sub1.effective_key();
+    let key2 = sub2.effective_key();
+    store.submit(&sub1).await.unwrap();
+    store.submit(&sub2).await.unwrap();
+
+    let count = store.pause_tasks_in_group("g1").await.unwrap();
+    assert_eq!(count, 1);
+
+    let t1 = store.task_by_key(&key1).await.unwrap().unwrap();
+    assert_eq!(t1.status, TaskStatus::Paused);
+    assert!(t1.pause_reasons.contains(PauseReasons::GROUP));
+
+    let t2 = store.task_by_key(&key2).await.unwrap().unwrap();
+    assert_eq!(t2.status, TaskStatus::Pending);
+    assert!(t2.pause_reasons.is_empty());
+}
+
+#[tokio::test]
+async fn pause_tasks_in_group_adds_bit_to_already_paused() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("test").key("t1").group("g1");
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+
+    // Preemption pause first.
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.pause_reasons, PauseReasons::PREEMPTION);
+
+    // Group pause should OR in the GROUP bit.
+    store.pause_tasks_in_group("g1").await.unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert!(t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(t.pause_reasons.contains(PauseReasons::GROUP));
+}
+
+#[tokio::test]
+async fn resume_paused_by_group_fully_resumes_sole_reason() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("test").key("t1").group("g1");
+    store.submit(&sub).await.unwrap();
+
+    store.pause_tasks_in_group("g1").await.unwrap();
+    let fully_resumed = store.resume_paused_by_group("g1").await.unwrap();
+    assert_eq!(fully_resumed, 1);
+
+    let t = store.task_by_id(1).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Pending);
+    assert_eq!(t.pause_reasons, PauseReasons::NONE);
+}
+
+#[tokio::test]
+async fn resume_paused_by_group_clears_bit_but_stays_paused_with_other_reasons() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("test").key("t1").group("g1");
+    store.submit(&sub).await.unwrap();
+    let task = store.pop_next().await.unwrap().unwrap();
+
+    // Preemption pause + group pause.
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    store.pause_tasks_in_group("g1").await.unwrap();
+
+    let fully_resumed = store.resume_paused_by_group("g1").await.unwrap();
+    assert_eq!(fully_resumed, 0); // Still held by PREEMPTION.
+
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Paused);
+    assert!(t.pause_reasons.contains(PauseReasons::PREEMPTION));
+    assert!(!t.pause_reasons.contains(PauseReasons::GROUP));
+}
+
+// ── TTL behavior with group pause (Step 3c) ─────────────────────
+
+#[tokio::test]
+async fn expire_tasks_expires_group_paused() {
+    let store = test_store().await;
+    store
+        .submit(
+            &TaskSubmission::new("test")
+                .key("t1")
+                .group("g1")
+                .ttl(Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+
+    store.pause_group_state("g1", None).await.unwrap();
+    store.pause_tasks_in_group("g1").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Sweep SHOULD expire the group-paused task — TTL is a hard deadline.
+    let expired = store.expire_tasks().await.unwrap();
+    assert_eq!(expired.len(), 1);
+}
+
+// ── Query helpers (Step 3d) ─────────────────────────────────────
+
+#[tokio::test]
+async fn pending_and_paused_count_for_group() {
+    let store = test_store().await;
+    let sub1 = TaskSubmission::new("test").key("t1").group("g1");
+    let sub2 = TaskSubmission::new("test").key("t2").group("g1");
+    let sub3 = TaskSubmission::new("test").key("t3").group("g2");
+    store.submit(&sub1).await.unwrap();
+    store.submit(&sub2).await.unwrap();
+    store.submit(&sub3).await.unwrap();
+
+    assert_eq!(store.pending_count_for_group("g1").await.unwrap(), 2);
+    assert_eq!(store.paused_count_for_group("g1").await.unwrap(), 0);
+
+    store.pause_tasks_in_group("g1").await.unwrap();
+
+    assert_eq!(store.pending_count_for_group("g1").await.unwrap(), 0);
+    assert_eq!(store.paused_count_for_group("g1").await.unwrap(), 2);
+    // g2 unaffected.
+    assert_eq!(store.pending_count_for_group("g2").await.unwrap(), 1);
+    assert_eq!(store.paused_count_for_group("g2").await.unwrap(), 0);
 }

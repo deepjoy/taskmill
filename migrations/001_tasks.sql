@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     recurring_max_executions  INTEGER,
     recurring_execution_count INTEGER NOT NULL DEFAULT 0,
     recurring_paused          INTEGER NOT NULL DEFAULT 0,
+    pause_reasons             INTEGER NOT NULL DEFAULT 0,
     UNIQUE(key)
 );
 

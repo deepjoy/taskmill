@@ -450,6 +450,19 @@ impl TaskStore {
             }
             let unblocked: Vec<(i64,)> = uq.fetch_all(&mut *conn).await?;
             all_unblocked = unblocked.into_iter().map(|(id,)| id).collect();
+
+            // Downgrade any newly-unblocked tasks whose group is paused.
+            for task_id in &all_unblocked {
+                sqlx::query(
+                    "UPDATE tasks SET status = 'paused',
+                                      pause_reasons = pause_reasons | 8
+                     WHERE id = ? AND status = 'pending'
+                       AND group_key IN (SELECT group_key FROM paused_groups)",
+                )
+                .bind(task_id)
+                .execute(&mut *conn)
+                .await?;
+            }
         }
 
         sqlx::query("COMMIT").execute(&mut *conn).await?;
@@ -622,6 +635,27 @@ impl TaskStore {
                             .bind(value)
                             .execute(&mut **conn)
                             .await?;
+                        }
+
+                        // If the group is paused, set the new instance to paused
+                        // with the GROUP reason bit.
+                        if task.group_key.is_some() {
+                            let is_paused: Option<(i64,)> =
+                                sqlx::query_as("SELECT 1 FROM paused_groups WHERE group_key = ?")
+                                    .bind(&task.group_key)
+                                    .fetch_optional(&mut **conn)
+                                    .await?;
+
+                            if is_paused.is_some() {
+                                sqlx::query(
+                                    "UPDATE tasks SET status = 'paused',
+                                                      pause_reasons = pause_reasons | 8
+                                     WHERE id = ?",
+                                )
+                                .bind(next_id)
+                                .execute(&mut **conn)
+                                .await?;
+                            }
                         }
 
                         recurring_info = Some((next_run, execution_count));

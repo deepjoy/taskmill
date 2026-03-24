@@ -1498,7 +1498,7 @@ async fn chain_of_supersedes() {
         .key("chain")
         .payload_raw(b"A".to_vec());
     let out_a = sched.submit(&sub_a).await.unwrap();
-    assert!(matches!(out_a, SubmitOutcome::Inserted(_)));
+    assert!(matches!(out_a, SubmitOutcome::Inserted { .. }));
 
     // B supersedes A.
     let sub_b = TaskSubmission::new("test::test")

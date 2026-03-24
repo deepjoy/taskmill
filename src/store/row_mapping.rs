@@ -5,8 +5,8 @@ use sqlx::Row;
 
 use crate::priority::Priority;
 use crate::task::{
-    DependencyFailurePolicy, HistoryStatus, IoBudget, TaskHistoryRecord, TaskRecord, TaskStatus,
-    TtlFrom,
+    DependencyFailurePolicy, HistoryStatus, IoBudget, PauseReasons, TaskHistoryRecord, TaskRecord,
+    TaskStatus, TtlFrom,
 };
 
 /// Convert a `DateTime<Utc>` to epoch milliseconds for SQLite INTEGER storage.
@@ -76,6 +76,7 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         tags: std::collections::HashMap::new(),
         max_retries: row.get("max_retries"),
         memo: row.get("memo"),
+        pause_reasons: PauseReasons::from_bits(row.try_get::<i64, _>("pause_reasons").unwrap_or(0)),
     }
 }
 

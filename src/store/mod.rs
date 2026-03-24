@@ -281,6 +281,35 @@ impl TaskStore {
         sqlx::raw_sql(include_str!("../../migrations/004_task_tags.sql"))
             .execute(&self.pool)
             .await?;
+
+        // 010: paused_groups table + pause_reasons column on tasks.
+        // The CREATE TABLE is idempotent, but ALTER TABLE ADD COLUMN will
+        // fail if the column already exists (fresh databases include it in
+        // 001_tasks.sql). Run each statement individually and tolerate the
+        // "duplicate column" error from the ALTER.
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS paused_groups (
+                group_key   TEXT    NOT NULL PRIMARY KEY,
+                paused_at   INTEGER NOT NULL,
+                resume_at   INTEGER
+            );",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // ALTER TABLE ADD COLUMN is not idempotent — tolerate failure.
+        let _ =
+            sqlx::raw_sql("ALTER TABLE tasks ADD COLUMN pause_reasons INTEGER NOT NULL DEFAULT 0;")
+                .execute(&self.pool)
+                .await;
+
+        // Backfill: existing paused tasks get PREEMPTION bit.
+        sqlx::raw_sql(
+            "UPDATE tasks SET pause_reasons = 1 WHERE status = 'paused' AND pause_reasons = 0;",
+        )
+        .execute(&self.pool)
+        .await?;
+
         Ok(())
     }
 

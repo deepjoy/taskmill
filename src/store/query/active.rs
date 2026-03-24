@@ -232,6 +232,44 @@ impl TaskStore {
         Ok(count.0)
     }
 
+    /// Count of pending tasks in a group (for event emission).
+    pub async fn pending_count_for_group(&self, group_key: &str) -> Result<i64, StoreError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE group_key = ? AND status = 'pending'")
+                .bind(group_key)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
+    /// Count of paused tasks in a group.
+    pub async fn paused_count_for_group(&self, group_key: &str) -> Result<i64, StoreError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE group_key = ? AND status = 'paused'")
+                .bind(group_key)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
+    /// Paused group info with per-group task counts, for snapshot display.
+    ///
+    /// Uses a single aggregate query to avoid N+1 per paused group.
+    pub async fn paused_group_info(
+        &self,
+    ) -> Result<Vec<(String, i64, Option<i64>, i64)>, StoreError> {
+        let rows: Vec<(String, i64, Option<i64>, i64)> = sqlx::query_as(
+            "SELECT pg.group_key, pg.paused_at, pg.resume_at, COUNT(t.id) AS paused_task_count
+             FROM paused_groups pg
+             LEFT JOIN tasks t ON t.group_key = pg.group_key AND t.status = 'paused' AND (t.pause_reasons & 8) != 0
+             GROUP BY pg.group_key
+             ORDER BY pg.paused_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Return the dependency edges for a given task (what it depends on).
     pub async fn task_dependencies(&self, task_id: i64) -> Result<Vec<i64>, StoreError> {
         let rows: Vec<(i64,)> =

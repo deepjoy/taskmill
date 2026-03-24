@@ -102,7 +102,13 @@ pub enum DuplicateStrategy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
     /// Task was inserted as new.
-    Inserted(i64),
+    Inserted {
+        /// The task ID assigned to the new task.
+        id: i64,
+        /// True if the task was submitted to a paused group and will not be
+        /// dispatched until the group is resumed.
+        group_paused: bool,
+    },
     /// Duplicate key existed; its priority was upgraded (pending/paused tasks only).
     Upgraded(i64),
     /// Duplicate key existed and is running/paused; marked for re-queue after completion.
@@ -124,7 +130,7 @@ impl SubmitOutcome {
     /// Returns the task ID if the task was inserted, upgraded, requeued, or superseded.
     pub fn id(&self) -> Option<i64> {
         match self {
-            Self::Inserted(id) | Self::Upgraded(id) | Self::Requeued(id) => Some(*id),
+            Self::Inserted { id, .. } | Self::Upgraded(id) | Self::Requeued(id) => Some(*id),
             Self::Superseded { new_task_id, .. } => Some(*new_task_id),
             Self::Duplicate | Self::Rejected => None,
         }
@@ -132,7 +138,7 @@ impl SubmitOutcome {
 
     /// Returns `true` if a new task was inserted (including via supersede).
     pub fn is_inserted(&self) -> bool {
-        matches!(self, Self::Inserted(_) | Self::Superseded { .. })
+        matches!(self, Self::Inserted { .. } | Self::Superseded { .. })
     }
 }
 
@@ -152,7 +158,7 @@ impl BatchOutcome {
         self.outcomes
             .iter()
             .filter_map(|o| match o {
-                SubmitOutcome::Inserted(id) => Some(*id),
+                SubmitOutcome::Inserted { id, .. } => Some(*id),
                 _ => None,
             })
             .collect()

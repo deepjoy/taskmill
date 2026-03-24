@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::priority::Priority;
 use crate::registry::IoTracker;
 use crate::store::TaskStore;
-use crate::task::TaskRecord;
+use crate::task::{PauseReasons, TaskRecord};
 
 use super::{emit_event, SchedulerEvent};
 
@@ -166,7 +166,7 @@ impl ActiveTaskMap {
                 "preempting task for higher-priority work"
             );
         }
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::PREEMPTION).await;
         drained.into_iter().map(|(id, _)| id).collect()
     }
 
@@ -221,7 +221,7 @@ impl ActiveTaskMap {
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> usize {
         let drained = self.drain_where(|at| at.record.task_type.starts_with(prefix));
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::MODULE).await;
         drained.len()
     }
 
@@ -236,7 +236,20 @@ impl ActiveTaskMap {
         event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
     ) -> usize {
         let drained = self.drain_where(|_| true);
-        cancel_pause_emit(&drained, store, event_tx).await;
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::GLOBAL).await;
+        drained.len()
+    }
+
+    /// Pause active tasks whose `group_key` matches: cancel their tokens and
+    /// move them to paused state in the store. Returns count paused.
+    pub async fn pause_group(
+        &self,
+        group_key: &str,
+        store: &TaskStore,
+        event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    ) -> usize {
+        let drained = self.drain_where(|at| at.record.group_key.as_deref() == Some(group_key));
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::GROUP).await;
         drained.len()
     }
 
@@ -259,18 +272,26 @@ impl ActiveTaskMap {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/// Cancel tokens, pause in store, and emit `Preempted` events for drained tasks.
-async fn cancel_pause_emit(
+/// Cancel tokens, pause in store with the given reason, and emit `Preempted`
+/// events for drained tasks.
+///
+/// GROUP reason suppresses per-task events — the caller emits a single
+/// aggregate `GroupPaused` event instead.
+pub(crate) async fn cancel_pause_emit(
     drained: &[(i64, ActiveTask)],
     store: &TaskStore,
     event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    reason: PauseReasons,
 ) {
     for (id, at) in drained {
         at.token.cancel();
-        let _ = store.pause(*id).await;
-        emit_event(
-            event_tx,
-            SchedulerEvent::Preempted(at.record.event_header()),
-        );
+        let _ = store.pause(*id, reason).await;
+        // GROUP has its own coordinator-level event (GroupPaused).
+        if !reason.contains(PauseReasons::GROUP) {
+            emit_event(
+                event_tx,
+                SchedulerEvent::Preempted(at.record.event_header()),
+            );
+        }
     }
 }

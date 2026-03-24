@@ -436,6 +436,23 @@ impl SchedulerBuilder {
             module_state,
         );
 
+        // Load persisted group pause state (survives restarts).
+        let paused_groups_rows = scheduler.inner.store.paused_groups().await?;
+        let paused_groups_set: std::collections::HashSet<String> =
+            paused_groups_rows.iter().map(|(k, _)| k.clone()).collect();
+        let has_paused_groups = !paused_groups_set.is_empty();
+        *scheduler.inner.paused_groups.write().unwrap() = paused_groups_set;
+
+        // Store builder-computed flags for maybe_restore_fast_dispatch().
+        scheduler
+            .inner
+            .has_pressure_sources
+            .store(has_pressure, std::sync::atomic::Ordering::Relaxed);
+        scheduler.inner.has_resource_monitoring.store(
+            self.enable_resource_monitoring,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // Compute fast-dispatch eligibility before consuming builder fields.
         let has_groups =
             self.default_group_concurrency > 0 || !self.group_concurrency_overrides.is_empty();
@@ -482,9 +499,10 @@ impl SchedulerBuilder {
         }
 
         // Enable fast dispatch (single pop_next instead of peek + gate + claim)
-        // when no groups, no resource monitoring, no pressure sources, and no
-        // module caps are configured.
-        if !has_groups && !has_monitoring && !has_pressure && !has_module_caps {
+        // when no groups, no resource monitoring, no pressure sources, no
+        // module caps, and no paused groups are present.
+        if !has_groups && !has_monitoring && !has_pressure && !has_module_caps && !has_paused_groups
+        {
             scheduler
                 .inner
                 .fast_dispatch

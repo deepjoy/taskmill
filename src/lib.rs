@@ -749,7 +749,7 @@
 //! let sync: DomainHandle<Sync> = scheduler.domain::<Sync>();
 //! let outcome = sync.submit(SyncFile { path: "path/to/file.txt".into() }).await?;
 //! // outcome is Superseded { new_task_id, replaced_task_id } if a duplicate existed,
-//! // or Inserted(id) if this was the first submission.
+//! // or Inserted { id, group_paused } if this was the first submission.
 //! ```
 //!
 //! # How the dispatch loop works
@@ -806,13 +806,14 @@ pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    EstimatedProgress, GroupLimits, ProgressReporter, Scheduler, SchedulerBuilder, SchedulerConfig,
-    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader, TaskProgress,
+    EstimatedProgress, GroupLimits, PausedGroupInfo, ProgressReporter, Scheduler, SchedulerBuilder,
+    SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
+    TaskProgress,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
     generate_dedup_key, BackoffStrategy, BatchOutcome, BatchSubmission, DependencyFailurePolicy,
-    DuplicateStrategy, HistoryStatus, IoBudget, ParentResolution, RecurringSchedule,
+    DuplicateStrategy, HistoryStatus, IoBudget, ParentResolution, PauseReasons, RecurringSchedule,
     RecurringScheduleInfo, RetryPolicy, SubmitOutcome, TaskError, TaskHistoryRecord, TaskLookup,
     TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypeStats, TypedTask, MAX_TAGS_PER_TASK,
     MAX_TAG_KEY_LEN, MAX_TAG_VALUE_LEN,

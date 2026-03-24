@@ -33,7 +33,7 @@ mod submit;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, RwLock};
 
@@ -76,7 +76,8 @@ pub(crate) struct FailureMsg {
     pub metrics: IoBudget,
 }
 pub use event::{
-    SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
+    PausedGroupInfo, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
+    TaskEventHeader,
 };
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
@@ -165,6 +166,18 @@ pub(crate) struct SchedulerInner {
     /// Computed at build time: `true` when no groups, no resource monitoring,
     /// and no module concurrency caps are configured.
     pub(crate) fast_dispatch: AtomicBool,
+    /// Set of currently paused group keys. Mirrors the `paused_groups` SQLite
+    /// table for fast in-memory lookups during gate checks and submit.
+    /// Uses `std::sync::RwLock` since reads vastly outnumber writes.
+    pub(crate) paused_groups: std::sync::RwLock<HashSet<String>>,
+    /// Builder-computed: were pressure sources configured? Stored here because
+    /// the `CompositePressure` is boxed inside `DefaultDispatchGate` and cannot
+    /// be introspected through `Box<dyn DispatchGate>`.
+    pub(crate) has_pressure_sources: AtomicBool,
+    /// Builder-computed: was resource monitoring enabled?
+    pub(crate) has_resource_monitoring: AtomicBool,
+    /// Last time the auto-resume check ran for time-boxed group pauses.
+    pub(crate) last_group_resume_check: std::sync::Mutex<tokio::time::Instant>,
     /// Send side of the completion coalescing channel.
     pub(crate) completion_tx: tokio::sync::mpsc::UnboundedSender<CompletionMsg>,
     /// Receive side, `Arc`-wrapped so spawned tasks can try to drain the batch
@@ -309,6 +322,12 @@ impl Scheduler {
                 has_paused_tasks: AtomicBool::new(false),
                 // Default to false; builder sets true when safe.
                 fast_dispatch: AtomicBool::new(false),
+                // Empty by default; builder loads from DB.
+                paused_groups: std::sync::RwLock::new(HashSet::new()),
+                // Conservative defaults; builder overrides.
+                has_pressure_sources: AtomicBool::new(false),
+                has_resource_monitoring: AtomicBool::new(false),
+                last_group_resume_check: std::sync::Mutex::new(tokio::time::Instant::now()),
                 completion_tx,
                 completion_rx: std::sync::Arc::new(Mutex::new(completion_rx)),
                 failure_tx,
