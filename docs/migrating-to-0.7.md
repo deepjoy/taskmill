@@ -138,49 +138,7 @@ match outcome {
 
 ---
 
-### 4. `DispatchGate::admit()` returns `Admission` enum
-
-Custom dispatch gates must return `Admission` instead of `bool`.
-
-**Before:**
-
-```rust
-impl DispatchGate for MyGate {
-    fn admit<'a>(
-        &'a self,
-        task: &'a TaskRecord,
-        ctx: &'a GateContext<'a>,
-    ) -> BoxFuture<'a, Result<bool, StoreError>> {
-        Box::pin(async move { Ok(true) })
-    }
-}
-```
-
-**After:**
-
-```rust
-use taskmill::Admission;
-
-impl DispatchGate for MyGate {
-    fn admit<'a>(
-        &'a self,
-        task: &'a TaskRecord,
-        ctx: &'a GateContext<'a>,
-    ) -> BoxFuture<'a, Result<Admission, StoreError>> {
-        Box::pin(async move { Ok(Admission::Admit) })
-    }
-}
-```
-
-| Old return | New return |
-|---|---|
-| `Ok(true)` | `Ok(Admission::Admit)` |
-| `Ok(false)` | `Ok(Admission::Deny)` |
-| — | `Ok(Admission::RateLimited(instant))` |
-
----
-
-### 5. Tag query methods renamed and return `Vec<i64>`
+### 4. Tag query methods renamed and return `Vec<i64>`
 
 Four tag-based query methods were renamed and now return task IDs instead of
 full `TaskRecord`s:
@@ -196,7 +154,7 @@ Fetch full records with `task_by_id()` if needed.
 
 ---
 
-### 6. New feature: group pause / resume
+### 5. New feature: group pause / resume
 
 Pause and resume all tasks in a group at runtime. Tasks submitted to a paused
 group are inserted as `Paused` and dispatched when the group is resumed.
@@ -219,7 +177,7 @@ New events: `SchedulerEvent::GroupPaused { .. }` and `GroupResumed { .. }`.
 
 ---
 
-### 7. New feature: token-bucket rate limiting
+### 6. New feature: token-bucket rate limiting
 
 Apply per-task-type or per-group rate limits. Rate-limited tasks are deferred
 (via `run_after`) until the next token is available, avoiding head-of-line
@@ -246,7 +204,7 @@ Available on `Scheduler`, `DomainHandle`, and `ModuleHandle`.
 
 ---
 
-### 8. New feature: priority aging
+### 7. New feature: priority aging
 
 Prevent task starvation by automatically promoting the effective priority of
 long-waiting tasks. The stored priority is never mutated — effective priority is
@@ -270,7 +228,7 @@ Pause duration is excluded from the aging clock.
 
 ---
 
-### 9. New feature: weighted fair scheduling
+### 8. New feature: weighted fair scheduling
 
 Allocate dispatch capacity proportionally across groups. The scheduler is
 work-conserving — unused slots are redistributed by global priority order.
@@ -295,7 +253,7 @@ bypass group allocation as a safety valve.
 
 ---
 
-### 10. New feature: `fail_fast()` on submit builders
+### 9. New feature: `fail_fast()` on submit builders
 
 Control whether a parent task fails immediately when any child fails (default),
 or waits for all children to complete first.
@@ -315,7 +273,7 @@ media.submit_with(AssembleTask { .. })
 
 ---
 
-### 11. New feature: tag key prefix queries
+### 10. New feature: tag key prefix queries
 
 Discover tag keys and find tasks by tag key namespace, with proper SQL wildcard
 escaping.
@@ -338,12 +296,11 @@ let cancelled = billing_handle.cancel_by_tag_key_prefix("billing.").await?;
 
 ---
 
-### 12. Import changes
+### 11. Import changes
 
 ```rust
 // New types you may need:
 use taskmill::{
-    Admission,        // DispatchGate return type
     AgingConfig,      // priority aging configuration
     PauseReasons,     // bitmask for pause sources
     RateLimit,        // token-bucket rate limit config
