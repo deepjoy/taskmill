@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::scheduler::aging::AgingParams;
 use crate::store::StoreError;
 use crate::task::IoBudget;
 
@@ -35,6 +36,7 @@ impl Scheduler {
             completion_rx: self.inner.completion_rx.clone(),
             failure_tx: self.inner.failure_tx.clone(),
             failure_rx: self.inner.failure_rx.clone(),
+            aging_config: self.inner.aging_config.clone(),
         }
     }
 
@@ -50,11 +52,18 @@ impl Scheduler {
             return Ok(false);
         }
 
+        // Compute aging params once per dispatch attempt.
+        let aging = self
+            .inner
+            .aging_config
+            .as_ref()
+            .map(|c| AgingParams::from_config(c));
+
         // Fast path: no gate checks needed, use pop_next() (single SQL)
         // instead of peek_next() + gate.admit() + claim_task() (2 SQL).
         // pop_next() skips expired tasks via its WHERE clause.
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
-            let Some(mut task) = self.inner.store.pop_next().await? else {
+            let Some(mut task) = self.inner.store.pop_next(aging.as_ref()).await? else {
                 return Ok(false);
             };
             self.inner
@@ -65,7 +74,7 @@ impl Scheduler {
         }
 
         // Slow path: peek → gate check → claim.
-        let Some(mut candidate) = self.inner.store.peek_next().await? else {
+        let Some(mut candidate) = self.inner.store.peek_next(aging.as_ref()).await? else {
             return Ok(false);
         };
         self.inner
@@ -264,6 +273,11 @@ impl Scheduler {
     /// checks), falling back to one-at-a-time dispatch on the slow path.
     async fn dispatch_pending(&self) -> Result<(), StoreError> {
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
+            let aging = self
+                .inner
+                .aging_config
+                .as_ref()
+                .map(|c| AgingParams::from_config(c));
             loop {
                 let active_count = self.inner.active.count();
                 let max = self.inner.max_concurrency.load(AtomicOrdering::Relaxed);
@@ -271,7 +285,11 @@ impl Scheduler {
                     break;
                 }
                 let available = max - active_count;
-                let mut tasks = self.inner.store.pop_next_batch(available).await?;
+                let mut tasks = self
+                    .inner
+                    .store
+                    .pop_next_batch(available, aging.as_ref())
+                    .await?;
                 if tasks.is_empty() {
                     break;
                 }

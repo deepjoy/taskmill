@@ -28,7 +28,7 @@ async fn store_with_history(n: usize) -> TaskStore {
             .submit(&TaskSubmission::new(task_type).key(format!("h-{i}")))
             .await
             .unwrap();
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
         store.complete(task.id, &budget).await.unwrap();
     }
     store

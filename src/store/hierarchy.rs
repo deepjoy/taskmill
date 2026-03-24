@@ -244,7 +244,7 @@ mod tests {
 
         let sub = make_submission("waiter", Priority::NORMAL);
         store.submit(&sub).await.unwrap();
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
 
         store.set_waiting(task.id, None).await.unwrap();
 
@@ -262,13 +262,13 @@ mod tests {
 
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        store.pop_next().await.unwrap();
+        store.pop_next(None).await.unwrap();
         store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
-        let child = store.pop_next().await.unwrap().unwrap();
+        let child = store.pop_next(None).await.unwrap().unwrap();
         store
             .complete(child.id, &IoBudget::default())
             .await
@@ -284,7 +284,7 @@ mod tests {
 
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        store.pop_next().await.unwrap();
+        store.pop_next(None).await.unwrap();
         store.set_waiting(parent_id, None).await.unwrap();
 
         for i in 0..2 {
@@ -292,7 +292,7 @@ mod tests {
             sub.parent_id = Some(parent_id);
             store.submit(&sub).await.unwrap();
         }
-        let child = store.pop_next().await.unwrap().unwrap();
+        let child = store.pop_next(None).await.unwrap().unwrap();
         store
             .complete(child.id, &IoBudget::default())
             .await
@@ -308,13 +308,13 @@ mod tests {
 
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        store.pop_next().await.unwrap();
+        store.pop_next(None).await.unwrap();
         store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
-        let child = store.pop_next().await.unwrap().unwrap();
+        let child = store.pop_next(None).await.unwrap().unwrap();
         store
             .fail(
                 child.id,
@@ -341,7 +341,7 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
 
-        let _parent = store.pop_next().await.unwrap().unwrap();
+        let _parent = store.pop_next(None).await.unwrap().unwrap();
 
         for i in 0..3 {
             let mut sub = make_submission(&format!("child-{i}"), Priority::NORMAL);
@@ -349,7 +349,7 @@ mod tests {
             store.submit(&sub).await.unwrap();
         }
 
-        let running_child = store.pop_next().await.unwrap().unwrap();
+        let running_child = store.pop_next(None).await.unwrap().unwrap();
 
         let running_ids = store.cancel_children(parent_id).await.unwrap();
         assert_eq!(running_ids.len(), 1);
@@ -365,12 +365,12 @@ mod tests {
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
 
-        let _parent = store.pop_next().await.unwrap().unwrap();
+        let _parent = store.pop_next(None).await.unwrap().unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
-        let child = store.pop_next().await.unwrap().unwrap();
+        let child = store.pop_next(None).await.unwrap().unwrap();
 
         store
             .complete(child.id, &IoBudget::default())
@@ -390,7 +390,7 @@ mod tests {
         sub.fail_fast = false;
         store.submit(&sub).await.unwrap();
 
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
         assert!(!task.fail_fast);
 
         store.complete(task.id, &IoBudget::default()).await.unwrap();
@@ -405,7 +405,7 @@ mod tests {
 
         let sub = make_submission("fin", Priority::NORMAL);
         store.submit(&sub).await.unwrap();
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
         store.set_waiting(task.id, None).await.unwrap();
 
         store.set_running_for_finalize(task.id).await.unwrap();
@@ -428,7 +428,7 @@ mod tests {
             .tag("env", "prod")
             .tag("region", "us-east");
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        let mut parent = store.pop_next().await.unwrap().unwrap();
+        let mut parent = store.pop_next(None).await.unwrap().unwrap();
         store
             .populate_tags(std::slice::from_mut(&mut parent))
             .await
@@ -466,7 +466,7 @@ mod tests {
             .tag("env", "prod")
             .tag("region", "us-east");
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        let mut parent = store.pop_next().await.unwrap().unwrap();
+        let mut parent = store.pop_next(None).await.unwrap().unwrap();
         store
             .populate_tags(std::slice::from_mut(&mut parent))
             .await
@@ -501,13 +501,13 @@ mod tests {
 
         let parent_sub = make_submission("parent", Priority::NORMAL);
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        store.pop_next().await.unwrap();
+        store.pop_next(None).await.unwrap();
         store.set_waiting(parent_id, None).await.unwrap();
 
         let mut child_sub = make_submission("child", Priority::NORMAL);
         child_sub.parent_id = Some(parent_id);
         store.submit(&child_sub).await.unwrap();
-        let child = store.pop_next().await.unwrap().unwrap();
+        let child = store.pop_next(None).await.unwrap().unwrap();
         assert_eq!(child.status, TaskStatus::Running);
 
         store.recover_running().await.unwrap();

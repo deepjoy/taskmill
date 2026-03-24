@@ -53,10 +53,10 @@ async fn dep_basic_blocked_then_unblocked() {
 
     let b = store.task_by_id(id_b).await.unwrap().unwrap();
     assert_eq!(b.status, taskmill::TaskStatus::Blocked);
-    assert!(store.peek_next().await.unwrap().is_some()); // A is pending
+    assert!(store.peek_next(None).await.unwrap().is_some()); // A is pending
 
     // Complete A.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(a.id, id_a);
     store
         .complete(a.id, &taskmill::IoBudget::default())
@@ -96,7 +96,7 @@ async fn dep_fail_cancels_dependent() {
         .unwrap();
 
     // Fail A permanently.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             a.id,
@@ -156,7 +156,7 @@ async fn dep_fan_in() {
     assert_eq!(c.status, taskmill::TaskStatus::Blocked);
 
     // Complete A.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(a.id, &taskmill::IoBudget::default())
         .await
@@ -168,7 +168,7 @@ async fn dep_fan_in() {
     assert_eq!(c.status, taskmill::TaskStatus::Blocked);
 
     // Complete B.
-    let b = store.pop_next().await.unwrap().unwrap();
+    let b = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(b.id, &taskmill::IoBudget::default())
         .await
@@ -214,7 +214,7 @@ async fn dep_fan_out() {
         .unwrap();
 
     // Complete A.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(a.id, &taskmill::IoBudget::default())
         .await
@@ -308,7 +308,7 @@ async fn dep_already_completed() {
         .unwrap();
 
     // Complete A.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(a.id, &taskmill::IoBudget::default())
         .await
@@ -343,7 +343,7 @@ async fn dep_already_failed() {
         .id()
         .unwrap();
 
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             a.id,
@@ -449,7 +449,7 @@ async fn dep_ignore_policy_unblocks() {
     assert_eq!(b.status, taskmill::TaskStatus::Blocked);
 
     // Fail A permanently.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             a.id,
@@ -575,7 +575,7 @@ async fn dep_diamond_chain() {
     );
 
     // Complete A → B and C unblock, D still blocked.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(a.id, &taskmill::IoBudget::default())
         .await
@@ -589,7 +589,7 @@ async fn dep_diamond_chain() {
     );
 
     // Complete B → D still blocked (needs C).
-    let b = store.pop_next().await.unwrap().unwrap();
+    let b = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(b.id, &taskmill::IoBudget::default())
         .await
@@ -598,7 +598,7 @@ async fn dep_diamond_chain() {
     assert!(unblocked.is_empty());
 
     // Complete C → D unblocks.
-    let c = store.pop_next().await.unwrap().unwrap();
+    let c = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(c.id, &taskmill::IoBudget::default())
         .await
@@ -743,7 +743,7 @@ async fn dep_blocked_tasks_survive_across_store_reopen() {
     assert_eq!(deps, vec![id_a]);
 
     // Complete A and resolve — B should unblock.
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(a.id, &taskmill::IoBudget::default())
         .await

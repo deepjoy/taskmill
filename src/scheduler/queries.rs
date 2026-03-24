@@ -187,6 +187,7 @@ impl Scheduler {
             blocked_count,
             paused_groups,
             rate_limits,
+            aging_config: self.inner.aging_config.as_ref().map(|arc| (**arc).clone()),
         })
     }
 }

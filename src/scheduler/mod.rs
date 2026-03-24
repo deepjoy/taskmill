@@ -21,6 +21,7 @@
 //! See the [crate-level docs](crate) for a full walkthrough of the task
 //! lifecycle, common patterns, and how the dispatch loop works.
 
+pub mod aging;
 mod builder;
 mod control;
 pub(crate) mod dispatch;
@@ -77,6 +78,7 @@ pub(crate) struct FailureMsg {
     pub retryable: bool,
     pub metrics: IoBudget,
 }
+pub use aging::AgingConfig;
 pub use event::{
     PausedGroupInfo, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
     TaskEventHeader,
@@ -195,6 +197,8 @@ pub(crate) struct SchedulerInner {
     pub(crate) failure_tx: tokio::sync::mpsc::UnboundedSender<FailureMsg>,
     /// Receive side (leader election + run loop drain).
     pub(crate) failure_rx: std::sync::Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FailureMsg>>>,
+    /// Priority aging configuration. `None` = aging disabled.
+    pub(crate) aging_config: Option<Arc<aging::AgingConfig>>,
 }
 
 /// IO-aware priority scheduler.
@@ -342,6 +346,7 @@ impl Scheduler {
                 completion_rx: std::sync::Arc::new(Mutex::new(completion_rx)),
                 failure_tx,
                 failure_rx: std::sync::Arc::new(Mutex::new(failure_rx)),
+                aging_config: config.aging_config.map(Arc::new),
             }),
         }
     }

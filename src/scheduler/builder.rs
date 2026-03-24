@@ -14,6 +14,7 @@ use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
 
+use super::aging::AgingConfig;
 use super::rate_limit::RateLimit;
 
 use super::event::{SchedulerConfig, ShutdownMode};
@@ -128,6 +129,20 @@ impl SchedulerBuilder {
     /// Set the priority threshold for preemption. Default: REALTIME.
     pub fn preempt_priority(mut self, priority: Priority) -> Self {
         self.config.preempt_priority = priority;
+        self
+    }
+
+    /// Enable priority aging with the given configuration.
+    ///
+    /// When enabled, tasks that wait longer than `grace_period` in the
+    /// pending queue are gradually promoted in effective priority, up to
+    /// `max_effective_priority`. This prevents starvation of low-priority
+    /// work when high-priority tasks arrive continuously.
+    ///
+    /// Effective priority is computed at dispatch time — the stored priority
+    /// is never mutated. Aging is visible in snapshots and events.
+    pub fn priority_aging(mut self, config: AgingConfig) -> Self {
+        self.config.aging_config = Some(config);
         self
     }
 
@@ -449,6 +464,13 @@ impl SchedulerBuilder {
         let app_state = Arc::new(crate::registry::StateMap::from_entries(
             self.app_state_entries,
         ));
+
+        // Validate aging config if present.
+        if let Some(ref aging) = self.config.aging_config {
+            aging
+                .validate()
+                .map_err(|e| StoreError::Database(e.into()))?;
+        }
 
         let scheduler = Scheduler::with_gate(
             store,

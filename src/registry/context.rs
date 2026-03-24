@@ -42,6 +42,9 @@ pub struct TaskContext {
     /// Name of the module that owns this task (e.g. `"media"`). Empty string for
     /// tasks running outside the module system (via `Scheduler::new`).
     pub(crate) owning_module: String,
+    /// Aging config from the scheduler, used for child priority inheritance.
+    /// `None` = aging disabled.
+    pub(crate) aging_config: Option<std::sync::Arc<crate::scheduler::aging::AgingConfig>>,
 }
 
 impl TaskContext {

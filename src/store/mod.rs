@@ -162,7 +162,7 @@ impl Default for StoreConfig {
 /// assert!(outcome.is_inserted());
 ///
 /// // Pop the highest-priority task and mark it running.
-/// let task = store.pop_next().await?.unwrap();
+/// let task = store.pop_next(None).await?.unwrap();
 /// assert_eq!(task.status, TaskStatus::Running);
 ///
 /// // Complete it — moves to history.
@@ -302,6 +302,26 @@ impl TaskStore {
         let count = result.rows_affected();
         if count > 0 {
             tracing::info!(count, "recovered interrupted tasks back to pending");
+        }
+
+        // Accumulate stale pause duration for tasks that were paused when
+        // the scheduler crashed. Over-promotes slightly (aging clock ran
+        // during the crash window), which is acceptable for anti-starvation.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let pause_recovered = sqlx::query(
+            "UPDATE tasks SET
+                pause_duration_ms = pause_duration_ms + (? - paused_at_ms),
+                paused_at_ms = NULL
+             WHERE status = 'paused' AND paused_at_ms IS NOT NULL",
+        )
+        .bind(now_ms)
+        .execute(&self.pool)
+        .await?;
+        if pause_recovered.rows_affected() > 0 {
+            tracing::info!(
+                count = pause_recovered.rows_affected(),
+                "accumulated stale pause duration on recovery"
+            );
         }
 
         // Clean up stale dependency edges pointing to tasks that no longer

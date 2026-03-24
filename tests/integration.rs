@@ -12,6 +12,8 @@
 //! - `cross_module`: steps 8–11 (TaskContext module access, cross-module child
 //!   spawning, Scheduler::modules(), event module identity)
 
+#[path = "integration/aging.rs"]
+mod aging;
 #[path = "integration/common.rs"]
 mod common;
 #[path = "integration/cross_module.rs"]

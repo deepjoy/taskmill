@@ -256,6 +256,8 @@ fn event_header_includes_tags() {
         max_retries: None,
         memo: None,
         pause_reasons: super::PauseReasons::NONE,
+        pause_duration_ms: 0,
+        paused_at_ms: None,
     };
     record.tags.insert("env".into(), "prod".into());
     record.tags.insert("owner".into(), "alice".into());

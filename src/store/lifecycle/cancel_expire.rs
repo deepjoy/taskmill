@@ -14,13 +14,17 @@ use super::{compute_duration_ms, insert_history, HistoryStatus};
 
 impl TaskStore {
     /// Pause a running task. ORs the reason bit into `pause_reasons`.
+    /// Sets `paused_at_ms` if not already set (task not already paused with another reason).
     pub async fn pause(&self, id: i64, reason: PauseReasons) -> Result<(), StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         sqlx::query(
             "UPDATE tasks SET status = 'paused', started_at = NULL,
-                              pause_reasons = pause_reasons | ?
+                              pause_reasons = pause_reasons | ?,
+                              paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
              WHERE id = ?",
         )
         .bind(reason.bits())
+        .bind(now_ms)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -28,11 +32,16 @@ impl TaskStore {
     }
 
     /// Resume a paused task back to pending. Clears all pause reasons.
+    /// Accumulates `pause_duration_ms` from `paused_at_ms`.
     pub async fn resume(&self, id: i64) -> Result<(), StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         sqlx::query(
-            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0,
+                              pause_duration_ms = pause_duration_ms + COALESCE(? - paused_at_ms, 0),
+                              paused_at_ms = NULL
              WHERE id = ? AND status = 'paused'",
         )
+        .bind(now_ms)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -55,18 +64,24 @@ impl TaskStore {
 
     /// Clear the PREEMPTION bit from a paused task. If no other pause reasons
     /// remain, the task transitions back to pending.
+    /// Accumulates `pause_duration_ms` on full resume.
     pub async fn resume_preempted(&self, id: i64) -> Result<(), StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         // Fully resume if PREEMPTION is the only reason.
         let result = sqlx::query(
-            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0,
+                              pause_duration_ms = pause_duration_ms + COALESCE(? - paused_at_ms, 0),
+                              paused_at_ms = NULL
              WHERE id = ? AND status = 'paused' AND pause_reasons = 1",
         )
+        .bind(now_ms)
         .bind(id)
         .execute(&self.pool)
         .await?;
 
         if result.rows_affected() == 0 {
             // Clear PREEMPTION bit but stay paused (other reasons remain).
+            // Don't accumulate — task is still paused.
             sqlx::query(
                 "UPDATE tasks SET pause_reasons = pause_reasons & ~1
                  WHERE id = ? AND status = 'paused' AND (pause_reasons & 1) != 0",
@@ -80,21 +95,27 @@ impl TaskStore {
 
     /// Clear a specific pause-reason bit from all paused tasks. Tasks whose
     /// `pause_reasons` becomes 0 transition back to pending.
+    /// Accumulates `pause_duration_ms` on full resume.
     /// Returns the count of tasks that fully resumed.
     pub async fn clear_pause_bit(&self, reason: PauseReasons) -> Result<u64, StoreError> {
         let bit = reason.bits();
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
         // Fully resume tasks where this is the sole reason.
         let fully_resumed = sqlx::query(
-            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0,
+                              pause_duration_ms = pause_duration_ms + COALESCE(? - paused_at_ms, 0),
+                              paused_at_ms = NULL
              WHERE status = 'paused' AND pause_reasons = ?",
         )
+        .bind(now_ms)
         .bind(bit)
         .execute(&self.pool)
         .await?
         .rows_affected();
 
         // Clear the bit from multi-reason tasks (stays paused).
+        // Don't accumulate — task is still paused.
         sqlx::query(
             "UPDATE tasks SET pause_reasons = pause_reasons & ~?
              WHERE status = 'paused' AND (pause_reasons & ?) != 0",
@@ -173,13 +194,14 @@ impl TaskStore {
 
     /// Pause tasks in a group. ORs the GROUP bit into all pending and
     /// already-paused tasks in the group:
-    /// - Pending tasks → paused with GROUP bit.
+    /// - Pending tasks → paused with GROUP bit, sets `paused_at_ms`.
     /// - Already-paused tasks → GROUP bit added (prevents premature resume
-    ///   by other mechanisms clearing their own bit).
+    ///   by other mechanisms clearing their own bit). `paused_at_ms` kept as-is.
     ///
     /// Returns the count of newly paused tasks (status changed from pending).
     pub async fn pause_tasks_in_group(&self, group_key: &str) -> Result<u64, StoreError> {
         // Add GROUP bit to already-paused tasks (no status change, just adds the bit).
+        // Don't touch paused_at_ms — they already have one.
         sqlx::query(
             "UPDATE tasks SET pause_reasons = pause_reasons | 8
              WHERE group_key = ? AND status = 'paused' AND (pause_reasons & 8) = 0",
@@ -188,12 +210,15 @@ impl TaskStore {
         .execute(&self.pool)
         .await?;
 
-        // Pause pending tasks with GROUP bit.
+        // Pause pending tasks with GROUP bit and set paused_at_ms.
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let result = sqlx::query(
             "UPDATE tasks SET status = 'paused',
-                              pause_reasons = pause_reasons | 8
+                              pause_reasons = pause_reasons | 8,
+                              paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
              WHERE group_key = ? AND status = 'pending'",
         )
+        .bind(now_ms)
         .bind(group_key)
         .execute(&self.pool)
         .await?;
@@ -203,22 +228,28 @@ impl TaskStore {
     /// Resume group-paused tasks. Two-step process:
     ///
     /// 1. **Fully resume** tasks where GROUP is the sole reason (pause_reasons = 8).
+    ///    Accumulates `pause_duration_ms` and clears `paused_at_ms`.
     /// 2. **Clear GROUP bit** from multi-reason tasks (they stay paused under
-    ///    their remaining reasons).
+    ///    their remaining reasons). `paused_at_ms` left as-is.
     ///
     /// Returns the count of tasks that fully resumed (became pending).
     pub async fn resume_paused_by_group(&self, group_key: &str) -> Result<u64, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
         // 1. Fully resume tasks where GROUP is the sole reason.
         let fully_resumed = sqlx::query(
-            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0,
+                              pause_duration_ms = pause_duration_ms + COALESCE(? - paused_at_ms, 0),
+                              paused_at_ms = NULL
              WHERE group_key = ? AND status = 'paused' AND pause_reasons = 8",
         )
+        .bind(now_ms)
         .bind(group_key)
         .execute(&self.pool)
         .await?
         .rows_affected();
 
         // 2. Clear GROUP bit from multi-reason tasks (stays paused).
+        // Don't accumulate — task is still paused.
         sqlx::query(
             "UPDATE tasks SET pause_reasons = pause_reasons & ~8
              WHERE group_key = ? AND status = 'paused' AND (pause_reasons & 8) != 0",
@@ -333,11 +364,14 @@ impl TaskStore {
     /// Returns the number of tasks whose status changed to paused.
     pub async fn pause_pending_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
         let pattern = format!("{prefix}%");
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let result = sqlx::query(
             "UPDATE tasks SET status = 'paused',
-                              pause_reasons = pause_reasons | 2
+                              pause_reasons = pause_reasons | 2,
+                              paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
              WHERE task_type LIKE ? AND status IN ('pending', 'paused')",
         )
+        .bind(now_ms)
         .bind(&pattern)
         .execute(&self.pool)
         .await?;
@@ -346,15 +380,20 @@ impl TaskStore {
 
     /// Resume module-paused tasks by type prefix. Clears the MODULE bit.
     /// Tasks fully resume (become pending) only if no other pause reasons remain.
+    /// Accumulates `pause_duration_ms` on full resume.
     /// Returns the count of tasks that fully resumed.
     pub async fn resume_paused_by_type_prefix(&self, prefix: &str) -> Result<u64, StoreError> {
         let pattern = format!("{prefix}%");
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
         // Fully resume tasks where MODULE is the only reason.
         let fully_resumed = sqlx::query(
-            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0,
+                              pause_duration_ms = pause_duration_ms + COALESCE(? - paused_at_ms, 0),
+                              paused_at_ms = NULL
              WHERE task_type LIKE ? AND status = 'paused' AND pause_reasons = 2",
         )
+        .bind(now_ms)
         .bind(&pattern)
         .execute(&self.pool)
         .await?

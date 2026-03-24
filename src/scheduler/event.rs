@@ -54,6 +54,8 @@ pub struct SchedulerSnapshot {
     pub paused_groups: Vec<PausedGroupInfo>,
     /// Configured rate limits with current utilization.
     pub rate_limits: Vec<RateLimitInfo>,
+    /// Priority aging configuration (if enabled).
+    pub aging_config: Option<super::aging::AgingConfig>,
 }
 
 /// Information about a paused group for snapshot/dashboard display.
@@ -88,6 +90,12 @@ pub struct TaskEventHeader {
     pub label: String,
     /// Key-value metadata tags from the task record.
     pub tags: HashMap<String, String>,
+    /// Stored (base) priority.
+    pub base_priority: Priority,
+    /// Effective priority at the time the event was emitted.
+    /// Computed by the scheduler from the `AgingConfig`; equals
+    /// `base_priority` when aging is disabled or the task hasn't aged.
+    pub effective_priority: Priority,
 }
 
 // ── Events ──────────────────────────────────────────────────────────
@@ -288,6 +296,8 @@ pub struct SchedulerConfig {
     /// How often to sweep for expired tasks. `None` disables periodic sweeps
     /// (dispatch-time checks still apply). Default: `Some(30s)`.
     pub expiry_sweep_interval: Option<Duration>,
+    /// Priority aging configuration. `None` (default) disables aging.
+    pub aging_config: Option<super::aging::AgingConfig>,
 }
 
 impl Default for SchedulerConfig {
@@ -303,6 +313,7 @@ impl Default for SchedulerConfig {
             cancel_hook_timeout: Duration::from_secs(30),
             default_ttl: None,
             expiry_sweep_interval: Some(Duration::from_secs(30)),
+            aging_config: None,
         }
     }
 }

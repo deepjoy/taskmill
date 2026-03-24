@@ -268,6 +268,10 @@ impl<'a, D: DomainKey, T: TypedTask<Domain = D>> ChildSpawnBuilder<'a, D, T> {
     }
 
     /// Submit the child task.
+    ///
+    /// When aging is enabled and no explicit priority override is set,
+    /// the child inherits the higher of the parent's effective priority
+    /// and the child's configured priority (lower numeric value wins).
     pub async fn submit(self) -> Result<SubmitOutcome, StoreError> {
         let mut sub = TaskSubmission::from_typed(&self.task);
         if let Some(k) = self.override_key {
@@ -275,6 +279,17 @@ impl<'a, D: DomainKey, T: TypedTask<Domain = D>> ChildSpawnBuilder<'a, D, T> {
         }
         if let Some(p) = self.override_priority {
             sub = sub.priority(p);
+        } else if let Some(ref config) = self.ctx.aging_config {
+            let parent = self.ctx.record();
+            let parent_effective = parent.effective_priority(Some(config));
+            // Take the higher priority (lower numeric value) of parent's
+            // effective and child's configured priority.
+            let child_config = <T as TypedTask>::config()
+                .priority
+                .unwrap_or(crate::priority::Priority::NORMAL);
+            let inherited =
+                crate::priority::Priority::new(parent_effective.value().min(child_config.value()));
+            sub = sub.priority(inherited);
         }
         if let Some(d) = self.override_ttl {
             sub = sub.ttl(d);

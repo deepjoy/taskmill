@@ -33,7 +33,7 @@ async fn history_by_id_lookup() {
     let store = test_store().await;
     let sub = make_submission("hist-id", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     store
         .complete(task.id, &IoBudget::disk(100, 50))
@@ -58,7 +58,7 @@ async fn history_stats_computation() {
     for i in 0..3 {
         let sub = make_submission(&format!("stat-{i}"), Priority::NORMAL);
         store.submit(&sub).await.unwrap();
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
         store
             .complete(task.id, &IoBudget::disk(1000, 500))
             .await
@@ -101,7 +101,7 @@ async fn task_lookup_active() {
     let result = store.task_lookup(&key).await.unwrap();
     assert!(matches!(result, TaskLookup::Active(ref r) if r.status == TaskStatus::Pending));
 
-    store.pop_next().await.unwrap();
+    store.pop_next(None).await.unwrap();
     let result = store.task_lookup(&key).await.unwrap();
     assert!(matches!(result, TaskLookup::Active(ref r) if r.status == TaskStatus::Running));
 }
@@ -112,7 +112,7 @@ async fn task_lookup_history() {
     let sub = make_submission("lookup-hist", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store.complete(task.id, &IoBudget::default()).await.unwrap();
 
     let result = store.task_lookup(&key).await.unwrap();
@@ -134,7 +134,7 @@ async fn prune_by_count() {
     for i in 0..5 {
         let sub = make_submission(&format!("prune-{i}"), Priority::NORMAL);
         store.submit(&sub).await.unwrap();
-        let task = store.pop_next().await.unwrap().unwrap();
+        let task = store.pop_next(None).await.unwrap().unwrap();
         store.complete(task.id, &IoBudget::default()).await.unwrap();
     }
 

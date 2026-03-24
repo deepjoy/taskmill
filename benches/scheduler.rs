@@ -211,7 +211,7 @@ fn bench_peek_next_varying_depth(c: &mut Criterion) {
                 async move {
                     let start = Instant::now();
                     for _ in 0..iters {
-                        let _ = store.peek_next().await.unwrap();
+                        let _ = store.peek_next(None).await.unwrap();
                     }
                     start.elapsed()
                 }
