@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774334873928,
+  "lastUpdate": 1774361960264,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -9863,6 +9863,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 454163,
             "range": "± 4962",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "cb48f0c1256236d6df0447d921be5e0e844cbab7",
+          "message": "feat!: implement priority aging and weighted fair scheduling (#84)\n\n## Summary\n\n- **Priority aging (phase 1):** Tasks waiting longer than a configurable\ngrace period are gradually promoted in effective priority at dispatch\ntime, preventing starvation of low-priority work under sustained\nhigh-priority load. The stored priority is never mutated — effective\npriority is computed in SQL via the aging formula. Pause duration is\nexcluded from the aging clock so paused tasks don't get unfair\npromotion.\n- **Weighted fair scheduling (phase 2):** Three-pass dispatch loop\nallocates slots proportional to per-group weights, fills remaining\ncapacity greedily, and dispatches urgently-aged tasks as a safety valve.\nUngrouped tasks compete as a virtual group with the default weight.\nMin-slots guarantees and concurrency caps are respected. Work-conserving\nby construction.\n- **Composes with existing features:** Rate limits, group pause,\nconcurrency caps, preemption, and backpressure all interact correctly.\nFast dispatch is disabled when aging or weights are configured.\n\nCloses #37 \n### New public API\n\n| Builder | Runtime | Event |\n|---------|---------|-------|\n| `priority_aging(AgingConfig)` | — | `base_priority` /\n`effective_priority` on `TaskEventHeader` |\n| `group_weight(group, weight)` | `set_group_weight(group, weight)` |\n`GroupWeightChanged` |\n| `default_group_weight(weight)` | `remove_group_weight(group)` | — |\n| `group_minimum_slots(group, slots)` | `reset_group_weights()` | — |\n| — | `set_group_minimum_slots(group, slots)` | — |\n\n### New store queries\n\n`peek_next_in_group()`, `peek_next_ungrouped()`,\n`running_counts_per_group()`, `pending_counts_per_group()`,\n`peek_next_urgent()`\n\n### Schema changes (pre-1.0, inline)\n\n`pause_duration_ms INTEGER NOT NULL DEFAULT 0` and `paused_at_ms INTEGER\nDEFAULT NULL` added to `tasks` table for aging clock management.",
+          "timestamp": "2026-03-24T13:54:06Z",
+          "tree_id": "a69875db55277aa2cb4d1b03279410877097011e",
+          "url": "https://github.com/deepjoy/taskmill/commit/cb48f0c1256236d6df0447d921be5e0e844cbab7"
+        },
+        "date": 1774361959752,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 2994629,
+            "range": "± 119635",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 16539712,
+            "range": "± 679589",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 75527340,
+            "range": "± 3502260",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 10776768,
+            "range": "± 158516",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 26595138,
+            "range": "± 555128",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 53066602,
+            "range": "± 801684",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 5967263,
+            "range": "± 140772",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 21480621,
+            "range": "± 322893",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 40740166,
+            "range": "± 871724",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups/500",
+            "value": 181985892,
+            "range": "± 3897421",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group/500",
+            "value": 411250431,
+            "range": "± 8533573",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 418532107,
+            "range": "± 7604186",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 418351315,
+            "range": "± 7432948",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 418128609,
+            "range": "± 7525560",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 420578345,
+            "range": "± 8042104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 415911,
+            "range": "± 21284",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 430931,
+            "range": "± 22588",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 446065,
+            "range": "± 21436",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 125870,
+            "range": "± 1062",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 191592,
+            "range": "± 967",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 484888,
+            "range": "± 2224",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 219848,
+            "range": "± 5061",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 843324,
+            "range": "± 71721",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 846639,
+            "range": "± 48931",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 44,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 75,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 190,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 408,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure/500",
+            "value": 350350482,
+            "range": "± 5801110",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 107101225,
+            "range": "± 994467",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 107288635,
+            "range": "± 971965",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 107591356,
+            "range": "± 1734611",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 107255551,
+            "range": "± 940668",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_tasks/1000",
+            "value": 180619749,
+            "range": "± 5683567",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit/1000",
+            "value": 207273115,
+            "range": "± 5836832",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete/1000",
+            "value": 368755468,
+            "range": "± 6608829",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 120388,
+            "range": "± 2861",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 120783,
+            "range": "± 2931",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 121991,
+            "range": "± 2889",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 376794935,
+            "range": "± 4709907",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 276716111,
+            "range": "± 4924905",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 230008840,
+            "range": "± 5801206",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 182572966,
+            "range": "± 3863321",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit/1000",
+            "value": 33971129,
+            "range": "± 2607801",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch/500",
+            "value": 232861594,
+            "range": "± 5448178",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 182488155,
+            "range": "± 4177663",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 194353213,
+            "range": "± 3974322",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot/100_tasks",
+            "value": 82493414,
+            "range": "± 2215694",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 90179341,
+            "range": "± 3487763",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 162849878,
+            "range": "± 6498020",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 237357368,
+            "range": "± 10016994",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 389023485,
+            "range": "± 16790958",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/100",
+            "value": 184795,
+            "range": "± 3165",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/1000",
+            "value": 811340,
+            "range": "± 11141",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/5000",
+            "value": 3703318,
+            "range": "± 69905",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 126476,
+            "range": "± 3125",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 216543,
+            "range": "± 4583",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 610454,
+            "range": "± 7087",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 131804,
+            "range": "± 3024",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 195314,
+            "range": "± 3396",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 459783,
+            "range": "± 4947",
             "unit": "ns/iter"
           }
         ]
