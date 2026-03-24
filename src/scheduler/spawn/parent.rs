@@ -41,12 +41,15 @@ pub(crate) async fn handle_parent_resolution(
                 {
                     tracing::error!(parent_id, error = %e, "failed to record parent failure");
                 }
-                emit_event(event_tx, SchedulerEvent::Failed {
-                    header: parent.event_header(),
-                    error: reason,
-                    will_retry: false,
-                    retry_after: None,
-                });
+                emit_event(
+                    event_tx,
+                    SchedulerEvent::Failed {
+                        header: parent.event_header(),
+                        error: reason,
+                        will_retry: false,
+                        retry_after: None,
+                    },
+                );
             }
         }
         Ok(Some(ParentResolution::StillWaiting)) | Ok(None) => {

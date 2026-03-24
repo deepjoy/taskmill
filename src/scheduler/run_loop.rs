@@ -80,10 +80,13 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    emit_event(&self.inner.event_tx, SchedulerEvent::TaskExpired {
-                        header: task.event_header(),
-                        age,
-                    });
+                    emit_event(
+                        &self.inner.event_tx,
+                        SchedulerEvent::TaskExpired {
+                            header: task.event_header(),
+                            age,
+                        },
+                    );
                 }
                 return Ok(true);
             }
@@ -339,10 +342,13 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    emit_event(&self.inner.event_tx, SchedulerEvent::TaskExpired {
-                        header: task.event_header(),
-                        age,
-                    });
+                    emit_event(
+                        &self.inner.event_tx,
+                        SchedulerEvent::TaskExpired {
+                            header: task.event_header(),
+                            age,
+                        },
+                    );
                 }
                 if !expired.is_empty() {
                     tracing::info!(count = expired.len(), "expired stale tasks");

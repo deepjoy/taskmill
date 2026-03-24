@@ -52,10 +52,13 @@ pub(crate) async fn handle_success(
                 }
                 decrement_module();
                 deps.active.remove(task_id);
-                emit_event(&deps.event_tx, SchedulerEvent::Waiting {
-                    task_id,
-                    children_count: count,
-                });
+                emit_event(
+                    &deps.event_tx,
+                    SchedulerEvent::Waiting {
+                        task_id,
+                        children_count: count,
+                    },
+                );
                 // Children may have completed before we set waiting.
                 // Re-check to avoid a missed finalization.
                 handle_parent_resolution(
@@ -186,11 +189,14 @@ pub(in crate::scheduler) fn emit_completion_events(
             Some((next, count)) => (Some(next), count),
             None => (None, task.recurring_execution_count + 1),
         };
-        emit_event(event_tx, SchedulerEvent::RecurringCompleted {
-            header: task.event_header(),
-            execution_count: exec_count,
-            next_run,
-        });
+        emit_event(
+            event_tx,
+            SchedulerEvent::RecurringCompleted {
+                header: task.event_header(),
+                execution_count: exec_count,
+                next_run,
+            },
+        );
     }
 
     emit_event(event_tx, SchedulerEvent::Completed(task.event_header()));

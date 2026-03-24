@@ -156,18 +156,24 @@ pub(crate) async fn handle_failure(
 
     let dead_lettered = error.retryable && !will_retry;
     if dead_lettered {
-        emit_event(&deps.event_tx, SchedulerEvent::DeadLettered {
-            header: task.event_header(),
-            error: error.message.clone(),
-            retry_count: task.retry_count + 1,
-        });
+        emit_event(
+            &deps.event_tx,
+            SchedulerEvent::DeadLettered {
+                header: task.event_header(),
+                error: error.message.clone(),
+                retry_count: task.retry_count + 1,
+            },
+        );
     } else {
-        emit_event(&deps.event_tx, SchedulerEvent::Failed {
-            header: task.event_header(),
-            error: error.message.clone(),
-            will_retry,
-            retry_after: retry_delay,
-        });
+        emit_event(
+            &deps.event_tx,
+            SchedulerEvent::Failed {
+                header: task.event_header(),
+                error: error.message.clone(),
+                will_retry,
+                retry_after: retry_delay,
+            },
+        );
     }
     deps.work_notify.notify_one();
 
@@ -204,13 +210,19 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
     match deps.store.fail_dependents(task_id).await {
         Ok((failed_ids, unblocked_ids)) => {
             for fid in &failed_ids {
-                emit_event(&deps.event_tx, SchedulerEvent::DependencyFailed {
-                    task_id: *fid,
-                    failed_dependency: task_id,
-                });
+                emit_event(
+                    &deps.event_tx,
+                    SchedulerEvent::DependencyFailed {
+                        task_id: *fid,
+                        failed_dependency: task_id,
+                    },
+                );
             }
             for uid in &unblocked_ids {
-                emit_event(&deps.event_tx, SchedulerEvent::TaskUnblocked { task_id: *uid });
+                emit_event(
+                    &deps.event_tx,
+                    SchedulerEvent::TaskUnblocked { task_id: *uid },
+                );
             }
             if !unblocked_ids.is_empty() {
                 deps.work_notify.notify_one();
@@ -231,7 +243,10 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
                         if let Some(at) = deps.active.remove(*rid) {
                             at.token.cancel();
                             let _ = deps.store.delete(*rid).await;
-                            emit_event(&deps.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
+                            emit_event(
+                                &deps.event_tx,
+                                SchedulerEvent::Cancelled(at.record.event_header()),
+                            );
                         }
                     }
                 }
@@ -255,12 +270,15 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
                         "failed to record parent failure"
                     );
                 }
-                emit_event(&deps.event_tx, SchedulerEvent::Failed {
-                    header: parent.event_header(),
-                    error: msg,
-                    will_retry: false,
-                    retry_after: None,
-                });
+                emit_event(
+                    &deps.event_tx,
+                    SchedulerEvent::Failed {
+                        header: parent.event_header(),
+                        error: msg,
+                        will_retry: false,
+                        retry_after: None,
+                    },
+                );
             } else {
                 // Not fail_fast — check if all children done.
                 handle_parent_resolution(

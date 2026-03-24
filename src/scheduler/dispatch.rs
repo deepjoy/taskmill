@@ -268,6 +268,9 @@ async fn cancel_pause_emit(
     for (id, at) in drained {
         at.token.cancel();
         let _ = store.pause(*id).await;
-        emit_event(event_tx, SchedulerEvent::Preempted(at.record.event_header()));
+        emit_event(
+            event_tx,
+            SchedulerEvent::Preempted(at.record.event_header()),
+        );
     }
 }

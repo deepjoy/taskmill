@@ -72,7 +72,10 @@ pub(crate) async fn spawn_task(
     }
 
     // Emit dispatched event.
-    emit_event(&ctx.event_tx, SchedulerEvent::Dispatched(task.event_header()));
+    emit_event(
+        &ctx.event_tx,
+        SchedulerEvent::Dispatched(task.event_header()),
+    );
 
     // Build deps for handlers (cloned from SpawnContext since they move into the spawned future).
     let completion_deps = completion::CompletionDeps {
@@ -188,12 +191,15 @@ pub(crate) async fn spawn_task(
                                 task.retry_count += 1;
 
                                 // Emit retry event.
-                                emit_event(&failure_deps.event_tx, SchedulerEvent::Failed {
-                                    header: task.event_header(),
-                                    error: te.message,
-                                    will_retry: true,
-                                    retry_after: None,
-                                });
+                                emit_event(
+                                    &failure_deps.event_tx,
+                                    SchedulerEvent::Failed {
+                                        header: task.event_header(),
+                                        error: te.message,
+                                        will_retry: true,
+                                        retry_after: None,
+                                    },
+                                );
 
                                 // Rebuild context for next attempt.
                                 prepared = context::build_task_context(&task, &spawn_ctx);

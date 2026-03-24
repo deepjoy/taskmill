@@ -64,10 +64,13 @@ impl Scheduler {
                 label: sub.label.clone(),
                 tags: sub.tags.clone(),
             };
-            emit_event(&self.inner.event_tx, SchedulerEvent::Superseded {
-                old: old_header,
-                new_task_id: *new_task_id,
-            });
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Superseded {
+                    old: old_header,
+                    new_task_id: *new_task_id,
+                },
+            );
         }
 
         if !matches!(outcome, SubmitOutcome::Duplicate | SubmitOutcome::Rejected) {
@@ -129,10 +132,13 @@ impl Scheduler {
                     label: sub.label.clone(),
                     tags: sub.tags.clone(),
                 };
-                emit_event(&self.inner.event_tx, SchedulerEvent::Superseded {
-                    old: old_header,
-                    new_task_id: *new_task_id,
-                });
+                emit_event(
+                    &self.inner.event_tx,
+                    SchedulerEvent::Superseded {
+                        old: old_header,
+                        new_task_id: *new_task_id,
+                    },
+                );
             }
         }
 
@@ -170,10 +176,13 @@ impl Scheduler {
 
         if any_changed {
             let inserted_ids = outcome.inserted();
-            emit_event(&self.inner.event_tx, SchedulerEvent::BatchSubmitted {
-                count: resolved.len(),
-                inserted_ids,
-            });
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::BatchSubmitted {
+                    count: resolved.len(),
+                    inserted_ids,
+                },
+            );
 
             self.inner.work_notify.notify_one();
         }
@@ -266,7 +275,10 @@ impl Scheduler {
                     .cancel_to_history_with_record(&at.record)
                     .await?;
                 self.fire_on_cancel(&at.record).await;
-                emit_event(&self.inner.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
+                emit_event(
+                    &self.inner.event_tx,
+                    SchedulerEvent::Cancelled(at.record.event_header()),
+                );
             }
         }
 
@@ -278,7 +290,10 @@ impl Scheduler {
                 .cancel_to_history_with_record(&at.record)
                 .await?;
             self.fire_on_cancel(&at.record).await;
-            emit_event(&self.inner.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
             return Ok(true);
         }
 
@@ -388,7 +403,10 @@ impl Scheduler {
                 .cancel_to_history_with_record(&at.record)
                 .await?;
             self.fire_on_cancel(&at.record).await;
-            emit_event(&self.inner.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
             return Ok(true);
         }
         self.inner.store.cancel_recurring(task_id).await
@@ -422,7 +440,10 @@ impl Scheduler {
         if let Some(at) = self.inner.active.remove(replaced_task_id) {
             at.token.cancel();
             self.fire_on_cancel(&at.record).await;
-            emit_event(&self.inner.event_tx, SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
         }
     }
 
