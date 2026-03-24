@@ -2,18 +2,19 @@
 //!
 //! [`Scheduler`] coordinates task execution — popping from the
 //! [`TaskStore`], applying [backpressure](crate::backpressure),
-//! IO-budget checks, and [group concurrency](crate::GroupLimits) limits,
+//! IO-budget checks, [group concurrency](crate::GroupLimits) limits,
+//! and [token-bucket rate limiting](crate::RateLimit) per task type and group,
 //! preempting lower-priority work, and emitting [`SchedulerEvent`]s for UI
 //! integration. Use [`SchedulerBuilder`] for ergonomic construction.
 //!
 //! The `Scheduler` implementation is split across focused submodules:
 //! - `submit` — task submission, lookup, cancellation, and superseding
 //! - `run_loop` — the main event loop, dispatch, and shutdown
-//! - `control` — pause/resume, concurrency limits, and group limits
+//! - `control` — pause/resume, concurrency limits, group limits, and rate limits
 //! - `queries` — read-only queries (active tasks, progress, snapshots)
 //! - `builder` — ergonomic construction via [`SchedulerBuilder`]
 //! - `dispatch` — task spawning, active-task tracking, and preemption
-//! - `gate` — admission control (IO budget, backpressure, group limits)
+//! - `gate` — admission control (IO budget, backpressure, group limits, rate limits)
 //! - `event` — event types and scheduler configuration
 //! - [`progress`] — progress reporting, byte-level tracking, and extrapolation
 //!
@@ -202,9 +203,10 @@ pub(crate) struct SchedulerInner {
 /// 1. Popping highest-priority pending tasks from the SQLite store
 /// 2. Checking IO budget against running task estimates and system capacity
 /// 3. Applying backpressure throttling based on external pressure sources
-/// 4. Preempting lower-priority tasks when high-priority work arrives
-/// 5. Managing retries and failure recording
-/// 6. Emitting lifecycle events for UI integration
+/// 4. Enforcing token-bucket rate limits per task type and group
+/// 5. Preempting lower-priority tasks when high-priority work arrives
+/// 6. Managing retries and failure recording
+/// 7. Emitting lifecycle events for UI integration
 ///
 /// `Scheduler` is `Clone` — each clone shares the same underlying state.
 /// This makes it easy to hold in `tauri::State<Scheduler>` or share across

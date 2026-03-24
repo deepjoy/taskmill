@@ -2,7 +2,8 @@
 //!
 //! The [`DispatchGate`] trait decides whether a popped task should run or be
 //! requeued. The built-in [`DefaultDispatchGate`] applies backpressure
-//! throttling and IO-budget checks.
+//! throttling, IO-budget checks, group/module concurrency limits, and
+//! token-bucket rate limiting.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -114,7 +115,7 @@ pub trait DispatchGate: Send + Sync + 'static {
 
 // ── Default Gate ───────────────────────────────────────────────────
 
-/// Default gate: backpressure throttling + IO budget.
+/// Default gate: backpressure, IO budget, concurrency, and rate limiting.
 ///
 /// This is what the scheduler uses unless you provide a custom gate via
 /// [`SchedulerBuilder::dispatch_gate`](super::SchedulerBuilder::dispatch_gate).

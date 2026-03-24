@@ -119,6 +119,26 @@ scheduler.remove_group_limit("bucket-prod").await;
 
 Group limits are checked *in addition to* `max_concurrency` — a task must pass both the global and group gate to be dispatched.
 
+### Rate limiting
+
+While concurrency limits control how many tasks run *simultaneously*, rate limits control how many tasks *start per unit of time*. This is essential when fast tasks (completing in milliseconds) produce bursts that overwhelm external APIs.
+
+Rate limits use a token-bucket algorithm and can be scoped by task type, group, or both:
+
+```rust
+Scheduler::builder()
+    .rate_limit("media::upload", RateLimit::per_second(100))
+    .group_rate_limit("s3://prod", RateLimit::per_second(50).with_burst(75))
+    .build()
+    .await?;
+```
+
+When a task is rate-limited, the scheduler sets its `run_after` to the next token availability. This prevents head-of-line blocking — other task types dispatch normally while the rate-limited type waits.
+
+Rate limits are checked *after* all other gate checks (backpressure, IO budget, concurrency), so tokens are never wasted on tasks that would be rejected for other reasons.
+
+See [Configuration — Rate limiting](configuration.md#rate-limiting) for full details and runtime adjustment APIs.
+
 ## Domain-level pause and resume
 
 Individual domains can be paused and resumed independently, without affecting other domains. This is useful for features like a user-togglable sync, or temporarily disabling a domain during maintenance.
