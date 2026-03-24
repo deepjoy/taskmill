@@ -8,6 +8,8 @@ use crate::task::{TaskHistoryRecord, TypeStats};
 
 impl TaskStore {
     /// Look up a history record by its row id.
+    ///
+    /// Tags are populated eagerly (single-record lookup is cheap).
     pub async fn history_by_id(&self, id: i64) -> Result<Option<TaskHistoryRecord>, StoreError> {
         let row = sqlx::query("SELECT * FROM task_history WHERE id = ?")
             .bind(id)
@@ -21,6 +23,9 @@ impl TaskStore {
     }
 
     /// Recent history entries, newest first.
+    ///
+    /// Tags are **not** populated — call [`populate_history_tags`](Self::populate_history_tags)
+    /// if needed.
     pub async fn history(
         &self,
         limit: i32,
@@ -32,12 +37,12 @@ impl TaskStore {
                 .bind(offset)
                 .fetch_all(&self.pool)
                 .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// History filtered by task type.
+    ///
+    /// Tags are **not** populated.
     pub async fn history_by_type(
         &self,
         task_type: &str,
@@ -50,16 +55,12 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// Most recent history record for a specific key.
     ///
-    /// Used by [`TypedEventStream`](crate::domain::TypedEventStream) to
-    /// attach the `TaskHistoryRecord` to terminal events without modifying
-    /// the internal broadcast channel.
+    /// Tags are populated eagerly (single-record lookup).
     pub async fn latest_history_by_key(
         &self,
         key: &str,
@@ -78,18 +79,20 @@ impl TaskStore {
     }
 
     /// History for a specific key (all past runs of that key).
+    ///
+    /// Tags are **not** populated.
     pub async fn history_by_key(&self, key: &str) -> Result<Vec<TaskHistoryRecord>, StoreError> {
         let rows =
             sqlx::query("SELECT * FROM task_history WHERE key = ? ORDER BY completed_at DESC")
                 .bind(key)
                 .fetch_all(&self.pool)
                 .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// Dead-lettered tasks from history filtered by `task_type` prefix.
+    ///
+    /// Tags are **not** populated.
     pub async fn dead_letter_tasks_by_prefix(
         &self,
         prefix: &str,
@@ -105,12 +108,12 @@ impl TaskStore {
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// Dead-lettered tasks from history (retries exhausted).
+    ///
+    /// Tags are **not** populated.
     pub async fn dead_letter_tasks(
         &self,
         limit: i64,
@@ -123,12 +126,12 @@ impl TaskStore {
         .bind(offset)
         .fetch_all(&self.pool)
         .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// Failed tasks from history.
+    ///
+    /// Tags are **not** populated.
     pub async fn failed_tasks(&self, limit: i32) -> Result<Vec<TaskHistoryRecord>, StoreError> {
         let rows = sqlx::query(
             "SELECT * FROM task_history WHERE status = 'failed' ORDER BY completed_at DESC LIMIT ?",
@@ -136,9 +139,7 @@ impl TaskStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        let mut records: Vec<TaskHistoryRecord> = rows.iter().map(row_to_history_record).collect();
-        self.populate_history_tags(&mut records).await?;
-        Ok(records)
+        Ok(rows.iter().map(row_to_history_record).collect())
     }
 
     /// Aggregate stats for a task type from completed history.
