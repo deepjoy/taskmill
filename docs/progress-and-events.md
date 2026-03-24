@@ -194,3 +194,8 @@ async fn scheduler_status(
     scheduler.snapshot().await
 }
 ```
+
+## See also
+
+- [Metrics & Observability](metrics.md) — for production monitoring with Prometheus, StatsD, or Datadog. The `metrics` crate integration emits counters, gauges, and histograms that complement the real-time event stream described above.
+- [Query APIs](query-apis.md) — for polling-based dashboards and task inspection.

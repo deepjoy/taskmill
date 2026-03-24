@@ -20,6 +20,9 @@ pub(crate) struct FailureDeps {
     pub failure_tx: tokio::sync::mpsc::UnboundedSender<FailureMsg>,
     pub failure_rx:
         std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<FailureMsg>>>,
+    pub counters: Arc<crate::scheduler::counters::SchedulerCounters>,
+    #[cfg(feature = "metrics")]
+    pub emitter: Arc<crate::scheduler::metrics_bridge::MetricsEmitter>,
 }
 
 /// Handle a failed task execution.
@@ -30,6 +33,7 @@ pub(crate) async fn handle_failure(
     task: &TaskRecord,
     error: TaskError,
     metrics: &IoBudget,
+    duration: std::time::Duration,
     deps: &FailureDeps,
     mut decrement_module: impl FnMut(),
 ) {
@@ -61,6 +65,38 @@ pub(crate) async fn handle_failure(
     } else {
         None
     };
+
+    // Increment failure counters.
+    deps.counters
+        .failed
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if error.retryable {
+        deps.counters
+            .failed_retryable
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if will_retry {
+        deps.counters
+            .retried
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(feature = "metrics")]
+    {
+        let module = task.module_name().unwrap_or_default();
+        let retryable_label = if error.retryable { "true" } else { "false" };
+        deps.emitter.record_failed(
+            &task.task_type,
+            module,
+            task.group_key.as_deref(),
+            retryable_label,
+        );
+        deps.emitter
+            .record_duration(duration, &task.task_type, module, "failed");
+        if will_retry {
+            deps.emitter
+                .record_retried(&task.task_type, module, task.group_key.as_deref());
+        }
+    }
 
     tracing::warn!(
         task_id,
@@ -111,6 +147,7 @@ pub(crate) async fn handle_failure(
             error: error.message.clone(),
             retryable: error.retryable,
             metrics: *metrics,
+            duration,
         };
 
         if deps.failure_tx.send(msg).is_err() {
@@ -156,6 +193,15 @@ pub(crate) async fn handle_failure(
 
     let dead_lettered = error.retryable && !will_retry;
     if dead_lettered {
+        deps.counters
+            .dead_lettered
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        {
+            let module = task.module_name().unwrap_or_default();
+            deps.emitter
+                .record_dead_lettered(&task.task_type, module, task.group_key.as_deref());
+        }
         emit_event(
             &deps.event_tx,
             SchedulerEvent::DeadLettered {
@@ -209,6 +255,12 @@ async fn propagate_failure(task: &TaskRecord, error: &TaskError, deps: &FailureD
 
     match deps.store.fail_dependents(task_id).await {
         Ok((failed_ids, unblocked_ids)) => {
+            if !failed_ids.is_empty() {
+                deps.counters.dependency_failures.fetch_add(
+                    failed_ids.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             for fid in &failed_ids {
                 emit_event(
                     &deps.event_tx,

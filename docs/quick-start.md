@@ -556,6 +556,7 @@ Work through the topic guides in order:
 4. [Persistence & Recovery](persistence-and-recovery.md) — understand crash safety and deduplication
 5. [Configuration](configuration.md) — tune for your workload
 6. [Query APIs](query-apis.md) — build dashboards and debug stuck tasks
-7. [Multi-Module Applications](multi-module-apps.md) — assemble multiple domains, cross-domain dependencies, tags, and dashboards
-8. [Writing a Reusable Module](library-modules.md) — publish a domain as a library crate
-9. [Design](design.md) — understand the architecture for advanced use
+7. [Metrics & Observability](metrics.md) — internal counters, `metrics` crate integration, Prometheus dashboards
+8. [Multi-Module Applications](multi-module-apps.md) — assemble multiple domains, cross-domain dependencies, tags, and dashboards
+9. [Writing a Reusable Module](library-modules.md) — publish a domain as a library crate
+10. [Design](design.md) — understand the architecture for advanced use

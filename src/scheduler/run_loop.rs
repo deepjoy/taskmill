@@ -39,6 +39,9 @@ impl Scheduler {
             failure_tx: self.inner.failure_tx.clone(),
             failure_rx: self.inner.failure_rx.clone(),
             aging_config: self.inner.aging_config.clone(),
+            counters: self.inner.counters.clone(),
+            #[cfg(feature = "metrics")]
+            emitter: self.inner.emitter.clone(),
         }
     }
 
@@ -89,6 +92,10 @@ impl Scheduler {
         if let Some(expires_at) = candidate.expires_at {
             if expires_at <= chrono::Utc::now() {
                 if let Ok(Some(task)) = self.inner.store.expire_single(candidate.id).await {
+                    self.inner
+                        .counters
+                        .expired
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
@@ -117,6 +124,7 @@ impl Scheduler {
             type_rate_limits: &self.inner.type_rate_limits,
             group_rate_limits: &self.inner.group_rate_limits,
             skip_group_concurrency: false,
+            counters: &self.inner.counters,
         };
 
         // Admission check while the task is still pending — no running
@@ -400,6 +408,7 @@ impl Scheduler {
                     type_rate_limits: &self.inner.type_rate_limits,
                     group_rate_limits: &self.inner.group_rate_limits,
                     skip_group_concurrency: true,
+                    counters: &self.inner.counters,
                 };
 
                 match self.inner.gate.admit(&candidate, &gate_ctx).await? {
@@ -472,6 +481,7 @@ impl Scheduler {
                     type_rate_limits: &self.inner.type_rate_limits,
                     group_rate_limits: &self.inner.group_rate_limits,
                     skip_group_concurrency: false,
+                    counters: &self.inner.counters,
                 };
 
                 match self.inner.gate.admit(&candidate, &gate_ctx).await? {
@@ -565,6 +575,7 @@ impl Scheduler {
                 type_rate_limits: &self.inner.type_rate_limits,
                 group_rate_limits: &self.inner.group_rate_limits,
                 skip_group_concurrency: false,
+                counters: &self.inner.counters,
             };
 
             match self.inner.gate.admit(&candidate, &gate_ctx).await? {
@@ -709,6 +720,12 @@ impl Scheduler {
 
         match self.inner.store.expire_tasks().await {
             Ok(expired) => {
+                if !expired.is_empty() {
+                    self.inner
+                        .counters
+                        .expired
+                        .fetch_add(expired.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
                 for task in &expired {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
@@ -851,6 +868,47 @@ impl Scheduler {
                         }
                     }
                 }
+            }
+        }
+
+        // Update metrics gauges.
+        #[cfg(feature = "metrics")]
+        {
+            let pending = self.inner.store.pending_count().await.unwrap_or(0);
+            let running = self.inner.active.count();
+            let pressure = self.inner.gate.pressure().await;
+            let emitter = &self.inner.emitter;
+            emitter.set_gauge_pending(pending);
+            emitter.set_gauge_running(running);
+            emitter.set_gauge_pressure(pressure);
+            emitter.set_gauge_max_concurrency(
+                self.inner.max_concurrency.load(AtomicOrdering::Relaxed),
+            );
+            emitter.set_gauge_groups_paused(self.inner.paused_groups.read().unwrap().len());
+            // Per-source pressure breakdown.
+            for (source, value) in self.inner.gate.pressure_breakdown().await {
+                emitter.set_gauge_pressure_source(&source, value);
+            }
+            // Per-module running counts.
+            for (module, count) in self.inner.module_running.iter() {
+                emitter.set_gauge_module_running(module, count.load(AtomicOrdering::Relaxed));
+            }
+            // Rate limit token availability.
+            for info in self.inner.type_rate_limits.snapshot_info("type") {
+                emitter.set_gauge_rate_limit_tokens("type", &info.scope, info.available_tokens);
+            }
+            for info in self.inner.group_rate_limits.snapshot_info("group") {
+                emitter.set_gauge_rate_limit_tokens("group", &info.scope, info.available_tokens);
+            }
+            // Additional gauges from store.
+            if let Ok(blocked) = self.inner.store.blocked_count().await {
+                emitter.set_gauge_blocked(blocked);
+            }
+            if let Ok(paused) = self.inner.store.paused_count().await {
+                emitter.set_gauge_paused(paused);
+            }
+            if let Ok(waiting) = self.inner.store.waiting_count().await {
+                emitter.set_gauge_waiting(waiting);
             }
         }
 

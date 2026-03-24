@@ -24,10 +24,13 @@
 pub mod aging;
 mod builder;
 mod control;
+pub(crate) mod counters;
 pub(crate) mod dispatch;
 pub(crate) mod event;
 pub mod fair;
 pub(crate) mod gate;
+#[cfg(feature = "metrics")]
+pub(crate) mod metrics_bridge;
 pub mod progress;
 mod queries;
 pub(crate) mod rate_limit;
@@ -47,6 +50,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::task::{IoBudget, TaskRecord};
 
+use counters::SchedulerCounters;
+
 use crate::backpressure::{CompositePressure, ThrottlePolicy};
 use crate::priority::Priority;
 use crate::registry::TaskTypeRegistry;
@@ -62,9 +67,11 @@ pub use builder::SchedulerBuilder;
 /// Message sent from spawned tasks to the scheduler's completion channel.
 ///
 /// Batched by `drain_completions` to reduce per-completion transaction overhead.
+#[allow(dead_code)]
 pub(crate) struct CompletionMsg {
     pub task: TaskRecord,
     pub metrics: IoBudget,
+    pub duration: std::time::Duration,
 }
 
 // ── Failure coalescing ───────────────────────────────────────────
@@ -73,13 +80,16 @@ pub(crate) struct CompletionMsg {
 ///
 /// Batched by `drain_failures` to reduce per-failure transaction overhead,
 /// mirroring the completion coalescing pattern.
+#[allow(dead_code)]
 pub(crate) struct FailureMsg {
     pub task: TaskRecord,
     pub error: String,
     pub retryable: bool,
     pub metrics: IoBudget,
+    pub duration: std::time::Duration,
 }
 pub use aging::AgingConfig;
+pub use counters::MetricsSnapshot;
 pub use event::{
     PausedGroupInfo, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
     TaskEventHeader,
@@ -203,6 +213,20 @@ pub(crate) struct SchedulerInner {
     pub(crate) aging_config: Option<Arc<aging::AgingConfig>>,
     /// Per-group scheduling weights for weighted fair dispatch.
     pub(crate) group_weights: fair::GroupWeights,
+    /// Internal atomic counters for throughput metrics (always active).
+    pub(crate) counters: Arc<SchedulerCounters>,
+    /// Prefix prepended to all `metrics` crate metric names (e.g. "myapp" → "myapp_taskmill_*").
+    #[allow(dead_code)]
+    pub(crate) metrics_prefix: Option<String>,
+    /// Global labels applied to every emitted `metrics` crate metric.
+    #[allow(dead_code)]
+    pub(crate) metrics_global_labels: Vec<(String, String)>,
+    /// Set of metric names to suppress.
+    #[allow(dead_code)]
+    pub(crate) metrics_disabled: std::collections::HashSet<String>,
+    /// The `metrics` crate emitter (feature-gated).
+    #[cfg(feature = "metrics")]
+    pub(crate) emitter: Arc<metrics_bridge::MetricsEmitter>,
 }
 
 /// IO-aware priority scheduler.
@@ -243,6 +267,14 @@ impl WeakScheduler {
     }
 }
 
+/// Configuration for metrics emission (internal).
+#[derive(Default)]
+pub(crate) struct MetricsConfig {
+    pub prefix: Option<String>,
+    pub global_labels: Vec<(String, String)>,
+    pub disabled: std::collections::HashSet<String>,
+}
+
 impl Scheduler {
     /// Create a weak handle that does not prevent scheduler shutdown.
     pub(crate) fn downgrade(&self) -> WeakScheduler {
@@ -279,6 +311,30 @@ impl Scheduler {
         app_state: Arc<crate::registry::StateMap>,
         module_registry: Arc<crate::module::ModuleRegistry>,
         module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
+    ) -> Self {
+        Self::with_gate_and_metrics(
+            store,
+            config,
+            registry,
+            gate,
+            app_state,
+            module_registry,
+            module_state,
+            MetricsConfig::default(),
+        )
+    }
+
+    /// Create a scheduler with a custom dispatch gate and metrics configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_gate_and_metrics(
+        store: TaskStore,
+        config: SchedulerConfig,
+        registry: Arc<TaskTypeRegistry>,
+        gate: Box<dyn gate::DispatchGate>,
+        app_state: Arc<crate::registry::StateMap>,
+        module_registry: Arc<crate::module::ModuleRegistry>,
+        module_state: Arc<HashMap<String, crate::registry::StateSnapshot>>,
+        metrics_config: MetricsConfig,
     ) -> Self {
         let module_paused: HashMap<String, AtomicBool> = module_registry
             .entries()
@@ -352,6 +408,15 @@ impl Scheduler {
                 failure_rx: std::sync::Arc::new(Mutex::new(failure_rx)),
                 aging_config: config.aging_config.map(Arc::new),
                 group_weights: fair::GroupWeights::new(),
+                counters: Arc::new(SchedulerCounters::new()),
+                #[cfg(feature = "metrics")]
+                emitter: Arc::new(metrics_bridge::MetricsEmitter::new(
+                    metrics_config.prefix.clone(),
+                    metrics_config.global_labels.clone(),
+                )),
+                metrics_prefix: metrics_config.prefix,
+                metrics_global_labels: metrics_config.global_labels,
+                metrics_disabled: metrics_config.disabled,
             }),
         }
     }

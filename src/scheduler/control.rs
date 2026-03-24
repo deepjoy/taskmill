@@ -137,6 +137,13 @@ impl Scheduler {
             .pause_group(group_key, &self.inner.store, &self.inner.event_tx)
             .await;
 
+        self.inner
+            .counters
+            .group_pauses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        self.inner.emitter.record_group_pause(group_key);
+
         let _ = self.inner.event_tx.send(SchedulerEvent::GroupPaused {
             group: group_key.to_string(),
             pending_count: pending_paused as usize,
@@ -194,6 +201,13 @@ impl Scheduler {
         if resumed_count > 0 {
             self.inner.work_notify.notify_one();
         }
+
+        self.inner
+            .counters
+            .group_resumes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(feature = "metrics")]
+        self.inner.emitter.record_group_resume(group_key);
 
         let _ = self.inner.event_tx.send(SchedulerEvent::GroupResumed {
             group: group_key.to_string(),

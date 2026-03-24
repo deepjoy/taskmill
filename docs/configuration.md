@@ -320,6 +320,7 @@ scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `sysinfo-monitor` | Enabled | Cross-platform CPU, disk IO, and network monitoring via `sysinfo`. Disable for mobile targets or when using a custom sampler. |
+| `metrics` | Disabled | Emit counters, gauges, and histograms via the [`metrics`](https://crates.io/crates/metrics) crate facade. See [Metrics & Observability](metrics.md). |
 
 ```toml
 # Disable platform monitoring
@@ -546,6 +547,9 @@ Scheduler::builder()
 | `group_minimum_slots(group, slots)` | Minimum guaranteed dispatch slots for a group, regardless of weight. |
 | `app_state(state)` | Register global state visible to all domains. |
 | `app_state_arc(arc)` | Register global state from a pre-existing `Arc`. |
+| `metrics_prefix(prefix)` | Prefix for all `metrics` crate metric names (e.g. `"myapp"` → `myapp_taskmill_*`). See [Metrics](metrics.md). |
+| `metrics_label(key, value)` | Global label applied to every emitted metric. |
+| `disable_metric(name)` | Suppress emission of a specific metric by unprefixed name. |
 | `build()` | Build and return the `Scheduler`. |
 
 ### `Domain<D>` builder methods

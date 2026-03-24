@@ -19,6 +19,9 @@ pub(crate) struct CompletionDeps {
     pub max_retries: i32,
     pub completion_tx: tokio::sync::mpsc::UnboundedSender<CompletionMsg>,
     pub completion_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<CompletionMsg>>>,
+    pub counters: Arc<crate::scheduler::counters::SchedulerCounters>,
+    #[cfg(feature = "metrics")]
+    pub emitter: Arc<crate::scheduler::metrics_bridge::MetricsEmitter>,
 }
 
 /// Handle a successful task execution.
@@ -31,6 +34,7 @@ pub(crate) async fn handle_success(
     phase: ExecutionPhase,
     metrics: &IoBudget,
     memo: Option<Vec<u8>>,
+    duration: std::time::Duration,
     deps: &CompletionDeps,
     mut decrement_module: impl FnMut(),
 ) {
@@ -84,10 +88,24 @@ pub(crate) async fn handle_success(
         }
     }
 
+    // Increment completion counter.
+    deps.counters
+        .completed
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "metrics")]
+    {
+        let module = task.module_name().unwrap_or_default();
+        deps.emitter
+            .record_completed(&task.task_type, module, task.group_key.as_deref());
+        deps.emitter
+            .record_duration(duration, &task.task_type, module, "completed");
+    }
+
     // Send completion to the coalescing channel.
     let msg = CompletionMsg {
         task: task.clone(),
         metrics: *metrics,
+        duration,
     };
 
     // Decrement module counter and remove from active map eagerly so that

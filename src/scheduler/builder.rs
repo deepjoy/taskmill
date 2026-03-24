@@ -60,6 +60,9 @@ pub struct SchedulerBuilder {
     group_weights: Vec<(String, u32)>,
     default_group_weight: u32,
     group_min_slots: Vec<(String, usize)>,
+    metrics_prefix: Option<String>,
+    metrics_global_labels: Vec<(String, String)>,
+    metrics_disabled: std::collections::HashSet<String>,
 }
 
 impl SchedulerBuilder {
@@ -85,6 +88,9 @@ impl SchedulerBuilder {
             group_weights: Vec::new(),
             default_group_weight: 1,
             group_min_slots: Vec::new(),
+            metrics_prefix: None,
+            metrics_global_labels: Vec::new(),
+            metrics_disabled: std::collections::HashSet::new(),
         }
     }
 
@@ -351,6 +357,34 @@ impl SchedulerBuilder {
         self
     }
 
+    /// Set a prefix prepended to all metric names.
+    ///
+    /// Example: `metrics_prefix("myapp")` →
+    /// `myapp_taskmill_tasks_submitted_total`
+    pub fn metrics_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.metrics_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Add a global label applied to all emitted metrics.
+    ///
+    /// Example: `metrics_label("service", "ingest")` adds
+    /// `service="ingest"` to every metric.
+    pub fn metrics_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.metrics_global_labels.push((key.into(), value.into()));
+        self
+    }
+
+    /// Disable emission of a specific metric by name.
+    ///
+    /// Useful for suppressing high-cardinality or expensive metrics
+    /// (e.g. histograms in extremely hot paths). The metric name should
+    /// be the full name without prefix (e.g. `"task_duration_seconds"`).
+    pub fn disable_metric(mut self, name: impl Into<String>) -> Self {
+        self.metrics_disabled.insert(name.into());
+        self
+    }
+
     /// Build the scheduler. Opens the database and wires all components.
     ///
     /// # Errors
@@ -498,7 +532,13 @@ impl SchedulerBuilder {
                 .map_err(|e| StoreError::Database(e.into()))?;
         }
 
-        let scheduler = Scheduler::with_gate(
+        let metrics_config = super::MetricsConfig {
+            prefix: self.metrics_prefix,
+            global_labels: self.metrics_global_labels,
+            disabled: self.metrics_disabled,
+        };
+
+        let scheduler = Scheduler::with_gate_and_metrics(
             store,
             self.config,
             Arc::new(registry),
@@ -506,6 +546,7 @@ impl SchedulerBuilder {
             app_state,
             module_registry,
             module_state,
+            metrics_config,
         );
 
         // Load persisted group pause state (survives restarts).
@@ -625,6 +666,10 @@ impl SchedulerBuilder {
                 .has_paused_tasks
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+
+        // Register metric descriptions (once, at build time).
+        #[cfg(feature = "metrics")]
+        scheduler.inner.emitter.describe_metrics();
 
         Ok(scheduler)
     }

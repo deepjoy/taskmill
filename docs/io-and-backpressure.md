@@ -237,3 +237,5 @@ for (name, value) in &snap.pressure_breakdown {
     println!("  {}: {:.0}%", name, value * 100.0);
 }
 ```
+
+For production monitoring beyond snapshots, see [Metrics & Observability](metrics.md) — the `metrics` crate integration exports pressure gauges, gate denial counters, and rate limit token availability as standard Prometheus/StatsD metrics.

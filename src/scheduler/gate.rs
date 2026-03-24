@@ -61,6 +61,8 @@ pub struct GateContext<'a> {
     /// `dispatch_fair()` pass 1 where group slot budgets are already
     /// enforced by the allocation algorithm.
     pub skip_group_concurrency: bool,
+    /// Internal atomic counters for throughput metrics.
+    pub counters: &'a super::counters::SchedulerCounters,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -144,6 +146,8 @@ impl DispatchGate for DefaultDispatchGate {
         ctx: &'a GateContext<'a>,
     ) -> BoxFuture<'a, Result<Admission, StoreError>> {
         Box::pin(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+
             // Backpressure check.
             let current_pressure = self.pressure.lock().await.pressure();
             if self.policy.should_throttle(task.priority, current_pressure) {
@@ -152,6 +156,7 @@ impl DispatchGate for DefaultDispatchGate {
                     pressure = current_pressure,
                     "task throttled by backpressure — requeuing"
                 );
+                ctx.counters.gate_denials.fetch_add(1, Relaxed);
                 return Ok(Admission::Deny);
             }
 
@@ -163,6 +168,7 @@ impl DispatchGate for DefaultDispatchGate {
                     expected_write = task.expected_io.disk_write,
                     "task deferred — disk IO budget exhausted — requeuing"
                 );
+                ctx.counters.gate_denials.fetch_add(1, Relaxed);
                 return Ok(Admission::Deny);
             }
 
@@ -174,6 +180,7 @@ impl DispatchGate for DefaultDispatchGate {
                     expected_tx = task.expected_io.net_tx,
                     "task deferred — network IO budget exhausted — requeuing"
                 );
+                ctx.counters.gate_denials.fetch_add(1, Relaxed);
                 return Ok(Admission::Deny);
             }
 
@@ -185,6 +192,7 @@ impl DispatchGate for DefaultDispatchGate {
                         group = group_key,
                         "task deferred — group paused — requeuing"
                     );
+                    ctx.counters.gate_denials.fetch_add(1, Relaxed);
                     return Ok(Admission::Deny);
                 }
             }
@@ -204,6 +212,7 @@ impl DispatchGate for DefaultDispatchGate {
                                     limit,
                                     "task deferred — group concurrency saturated — requeuing"
                                 );
+                                ctx.counters.gate_denials.fetch_add(1, Relaxed);
                                 return Ok(Admission::Deny);
                             }
                         }
@@ -227,6 +236,7 @@ impl DispatchGate for DefaultDispatchGate {
                             cap,
                             "task deferred — module concurrency saturated — requeuing"
                         );
+                        ctx.counters.gate_denials.fetch_add(1, Relaxed);
                         return Ok(Admission::Deny);
                     }
                 }
@@ -240,6 +250,8 @@ impl DispatchGate for DefaultDispatchGate {
                     task_type = task.task_type,
                     "task deferred — task-type rate limit"
                 );
+                ctx.counters.gate_denials.fetch_add(1, Relaxed);
+                ctx.counters.rate_limit_throttles.fetch_add(1, Relaxed);
                 return Ok(Admission::RateLimited(next));
             }
 
@@ -251,6 +263,8 @@ impl DispatchGate for DefaultDispatchGate {
                         group = group_key,
                         "task deferred — group rate limit"
                     );
+                    ctx.counters.gate_denials.fetch_add(1, Relaxed);
+                    ctx.counters.rate_limit_throttles.fetch_add(1, Relaxed);
                     return Ok(Admission::RateLimited(next));
                 }
             }

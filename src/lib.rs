@@ -801,6 +801,28 @@
 //!   when providing a custom [`ResourceSampler`]. Without this feature, calling
 //!   [`SchedulerBuilder::with_resource_monitoring`] requires a custom sampler
 //!   via [`resource_sampler()`](SchedulerBuilder::resource_sampler).
+//! - **`metrics`**: Enables integration with the [`metrics`](https://crates.io/crates/metrics) crate.
+//!   When enabled, the scheduler emits counters, gauges, and histograms via the `metrics`
+//!   facade — consumers choose their exporter (Prometheus, StatsD, etc.). Internal atomic
+//!   counters and [`MetricsSnapshot`] are always available regardless of this feature.
+//!
+//! # Metrics
+//!
+//! Taskmill provides two levels of observability:
+//!
+//! 1. **Always-on internal counters** — [`Scheduler::metrics_snapshot()`] returns a
+//!    [`MetricsSnapshot`] with cumulative counters (submitted, dispatched, completed,
+//!    failed, retried, dead-lettered, etc.) and point-in-time gauges (pending, running,
+//!    pressure, max_concurrency). Available without any feature flags.
+//!
+//! 2. **`metrics` crate integration** (feature-gated) — when the `metrics` feature is
+//!    enabled, the scheduler emits ~30 metrics via the standard `metrics` facade. All
+//!    metric names use the `taskmill_` prefix (customizable via
+//!    [`SchedulerBuilder::metrics_prefix`]). Labels include `type`, `module`, `group`,
+//!    and `reason` (bounded cardinality). Configure with:
+//!    - [`SchedulerBuilder::metrics_prefix`] — custom prefix
+//!    - [`SchedulerBuilder::metrics_label`] — global labels
+//!    - [`SchedulerBuilder::disable_metric`] — suppress specific metrics
 
 pub mod backpressure;
 pub mod domain;
@@ -826,9 +848,10 @@ pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    AgingConfig, EstimatedProgress, GroupAllocationInfo, GroupLimits, PausedGroupInfo,
-    ProgressReporter, RateLimit, RateLimitInfo, Scheduler, SchedulerBuilder, SchedulerConfig,
-    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader, TaskProgress,
+    AgingConfig, EstimatedProgress, GroupAllocationInfo, GroupLimits, MetricsSnapshot,
+    PausedGroupInfo, ProgressReporter, RateLimit, RateLimitInfo, Scheduler, SchedulerBuilder,
+    SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
+    TaskProgress,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{
