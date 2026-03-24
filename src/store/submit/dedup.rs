@@ -7,10 +7,14 @@ use crate::store::StoreError;
 use crate::task::{SubmitOutcome, TaskSubmission, TtlFrom};
 
 /// Default dedup behaviour: try priority upgrade, then requeue, then no-op.
+///
+/// When `skip_requeue` is `true` the running/paused requeue UPDATE is elided
+/// because no task has ever transitioned to `running` in this store instance.
 pub(super) async fn skip_existing(
     conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
     key: &str,
     priority: i32,
+    skip_requeue: bool,
 ) -> Result<SubmitOutcome, StoreError> {
     // Try to upgrade priority on pending/paused tasks.
     let row = sqlx::query(
@@ -26,6 +30,12 @@ pub(super) async fn skip_existing(
 
     if let Some(r) = row {
         return Ok(SubmitOutcome::Upgraded(r.get("id")));
+    }
+
+    // Fast path: no tasks have ever been dispatched, so there can be no
+    // running/paused tasks to mark for requeue.
+    if skip_requeue {
+        return Ok(SubmitOutcome::Duplicate);
     }
 
     // Dedup hit on running/paused task — mark for re-queue.

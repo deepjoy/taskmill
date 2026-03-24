@@ -32,12 +32,24 @@ mod submit;
 pub use lifecycle::FailBackoff;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
 
-use crate::task::MAX_PAYLOAD_BYTES;
+use crate::task::{SubmitOutcome, TaskSubmission, MAX_PAYLOAD_BYTES};
+
+/// Message sent through the submit coalescing channel.
+///
+/// Each caller packs its [`TaskSubmission`] and a oneshot response channel.
+/// The leader drains the channel and processes the batch in a single
+/// SQLite transaction, then sends individual results back.
+pub(crate) struct SubmitMsg {
+    pub submission: TaskSubmission,
+    pub response_tx: tokio::sync::oneshot::Sender<Result<SubmitOutcome, StoreError>>,
+}
 
 /// Serde-friendly error type for Tauri IPC and API boundaries.
 ///
@@ -171,6 +183,14 @@ pub struct TaskStore {
     /// Fast-path flag: `false` means no tasks with `parent_id` have been
     /// submitted, so `active_children_count` checks can be skipped.
     pub(crate) has_hierarchy: std::sync::Arc<AtomicBool>,
+    /// Fast-path flag: `false` means no task has ever transitioned to
+    /// `running`, so the requeue UPDATE in `skip_existing` can be skipped
+    /// (there are no running tasks to mark for requeue).
+    pub(crate) has_running: Arc<AtomicBool>,
+    /// Send side of the submit coalescing channel.
+    pub(crate) submit_tx: tokio::sync::mpsc::UnboundedSender<SubmitMsg>,
+    /// Receive side, `Arc`-wrapped for leader election (try_lock pattern).
+    pub(crate) submit_rx: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<SubmitMsg>>>,
 }
 
 impl TaskStore {
@@ -193,14 +213,20 @@ impl TaskStore {
             .connect_with(opts)
             .await?;
 
+        let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel();
         let store = Self {
             pool,
             retention_policy: config.retention_policy,
             prune_interval: config.prune_interval,
-            completion_count: std::sync::Arc::new(AtomicU64::new(0)),
+            completion_count: Arc::new(AtomicU64::new(0)),
             // Conservative for file-backed stores that may have existing tags/hierarchy.
-            has_tags: std::sync::Arc::new(AtomicBool::new(true)),
-            has_hierarchy: std::sync::Arc::new(AtomicBool::new(true)),
+            has_tags: Arc::new(AtomicBool::new(true)),
+            has_hierarchy: Arc::new(AtomicBool::new(true)),
+            // Conservative: file-backed stores may have running tasks from a
+            // previous session (before recover_running resets them).
+            has_running: Arc::new(AtomicBool::new(true)),
+            submit_tx,
+            submit_rx: Arc::new(Mutex::new(submit_rx)),
         };
         store.migrate().await?;
         store.recover_running().await?;
@@ -220,14 +246,18 @@ impl TaskStore {
             .connect_with(opts)
             .await?;
 
+        let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel();
         let store = Self {
             pool,
             retention_policy: Some(RetentionPolicy::MaxCount(10_000)),
             prune_interval: 100,
-            completion_count: std::sync::Arc::new(AtomicU64::new(0)),
+            completion_count: Arc::new(AtomicU64::new(0)),
             // In-memory stores start empty — no tags or hierarchy to query.
-            has_tags: std::sync::Arc::new(AtomicBool::new(false)),
-            has_hierarchy: std::sync::Arc::new(AtomicBool::new(false)),
+            has_tags: Arc::new(AtomicBool::new(false)),
+            has_hierarchy: Arc::new(AtomicBool::new(false)),
+            has_running: Arc::new(AtomicBool::new(false)),
+            submit_tx,
+            submit_rx: Arc::new(Mutex::new(submit_rx)),
         };
         store.migrate().await?;
         Ok(store)

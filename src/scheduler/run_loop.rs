@@ -381,6 +381,28 @@ impl Scheduler {
         .await;
     }
 
+    /// Drain the submit coalescing channel and process any stranded messages.
+    ///
+    /// Most submits are handled inline by the submitter (leader election in
+    /// `TaskStore::submit`). This is a safety-net drain for messages that
+    /// arrived after the last leader finished processing.
+    async fn drain_submits(&self) {
+        let mut batch = Vec::new();
+        {
+            let mut rx = self.inner.store.submit_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = batch.len(), "draining submit batch");
+        self.inner.store.process_submit_batch(batch).await;
+    }
+
     /// Drain the failure channel and process all queued terminal failures
     /// in a single batched transaction.
     async fn drain_failures(&self) {
@@ -406,7 +428,8 @@ impl Scheduler {
             return;
         }
 
-        // Drain queued completions and failures before dispatching new work.
+        // Drain queued submits, completions, and failures before dispatching.
+        self.drain_submits().await;
         self.drain_completions().await;
         self.drain_failures().await;
 
@@ -489,7 +512,8 @@ impl Scheduler {
             }
         }
 
-        // Drain any remaining completions and failures before closing the store.
+        // Drain any remaining submits, completions, and failures before closing.
+        self.drain_submits().await;
         self.drain_completions().await;
         self.drain_failures().await;
 

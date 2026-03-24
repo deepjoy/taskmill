@@ -103,7 +103,12 @@ impl TaskStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        let claimed = result.rows_affected() > 0;
+        if claimed {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(claimed)
     }
 
     /// Atomically claim up to `limit` highest-priority pending tasks and mark
@@ -147,6 +152,10 @@ impl TaskStore {
         .await?;
 
         let records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        if !records.is_empty() {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(records)
     }
 
@@ -188,7 +197,12 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| row_to_task_record(&r)))
+        let record = row.map(|r| row_to_task_record(&r));
+        if record.is_some() {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(record)
     }
 
     /// Atomically requeue a running task back to pending.
