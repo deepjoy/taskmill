@@ -42,7 +42,7 @@ use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use taskmill::{
     Domain, DomainKey, TypedTask, TypedExecutor, TaskTypeConfig,
-    TaskContext, TaskError, IoBudget, Priority, RetryPolicy,
+    DomainTaskContext, TaskError, IoBudget, Priority, RetryPolicy,
 };
 
 // ── Public API ──────────────────────────────────────────────────
@@ -154,7 +154,7 @@ Executors can access any type via `ctx.state::<T>()`. It is tempting to grab a d
 ```rust
 // BAD: invisible coupling to the host's global state
 impl TypedExecutor<UploadTask> for UploadExecutor {
-    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: UploadTask, ctx: DomainTaskContext<'_, AcmeCdn>) -> Result<(), TaskError> {
         let db = ctx.state::<AppDb>().expect("host must register AppDb");
         // ...
     }
@@ -180,7 +180,7 @@ Inside the executor:
 
 ```rust
 impl TypedExecutor<UploadTask> for UploadExecutor {
-    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: UploadTask, ctx: DomainTaskContext<'_, AcmeCdn>) -> Result<(), TaskError> {
         let config = ctx.state::<AcmeCdnConfig>()
             .expect("AcmeCdnConfig is registered by acme_cdn_domain()");
         // safe — this domain always registers its own config
@@ -276,9 +276,9 @@ If your library provides optional integration with another domain, use `ctx.try_
 use analytics::{Analytics, TrackEvent};
 
 impl TypedExecutor<UploadTask> for UploadExecutor {
-    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: UploadTask, ctx: DomainTaskContext<'_, AcmeCdn>) -> Result<(), TaskError> {
         // Core upload logic...
-        do_upload(ctx).await?;
+        do_upload(&ctx).await?;
 
         // Optional: notify analytics domain if present
         if let Some(analytics) = ctx.try_domain::<Analytics>() {

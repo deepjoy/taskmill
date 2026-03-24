@@ -17,7 +17,7 @@ Add taskmill to your Tauri app's `Cargo.toml`:
 
 ```toml
 [dependencies]
-taskmill = "0.4"
+taskmill = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio-util = "0.7"
@@ -74,12 +74,12 @@ impl TypedTask for UploadTask {
 The executor does the actual upload work. It reports progress and checks for preemption between chunks.
 
 ```rust
-use taskmill::{TypedExecutor, TaskContext, TaskError};
+use taskmill::{TypedExecutor, DomainTaskContext, TaskError};
 
 struct UploadExecutor;
 
 impl TypedExecutor<UploadTask> for UploadExecutor {
-    async fn execute(&self, task: UploadTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: UploadTask, ctx: DomainTaskContext<'_, Uploads>) -> Result<(), TaskError> {
         let file = tokio::fs::read(&task.file_path).await
             .map_err(|e| TaskError::permanent(format!("can't read file: {e}")))?;
 

@@ -63,7 +63,7 @@ Executors should check for cancellation at natural yield points — between chun
 
 ```rust
 impl TypedExecutor<MyTask> for MyExecutor {
-    async fn execute(&self, task: MyTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: MyTask, ctx: DomainTaskContext<'_, MyTask::Domain>) -> Result<(), TaskError> {
         for chunk in chunks {
             // Check before each unit of work
             if ctx.token().is_cancelled() {

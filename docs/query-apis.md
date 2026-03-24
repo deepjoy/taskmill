@@ -40,11 +40,11 @@ These methods are available on `DomainHandle<D>` and are automatically scoped to
 | `handle.estimated_progress()` | `Vec<EstimatedProgress>` | Extrapolated progress for each running task in this domain. |
 | `handle.byte_progress()` | `Vec<TaskProgress>` | Live byte-level progress for running tasks in this domain. |
 | `handle.dead_letter_tasks(limit, offset)` | `Vec<TaskHistoryRecord>` | Paginated dead-letter (permanently failed) tasks for this domain. |
-| `handle.tasks_by_tags(filters, status)` | `Vec<TaskRecord>` | Active tasks in this domain matching the given tag filters and optional status. |
+| `handle.task_ids_by_tags(filters, status)` | `Vec<i64>` | IDs of active tasks in this domain matching the given tag filters and optional status. Fetch full records via `task_by_id()` if needed. |
 | `handle.count_by_tag(key, status)` | `Vec<(String, i64)>` | Tag value counts for a given key within this domain. |
 | `handle.tag_values(key)` | `Vec<(String, i64)>` | Distinct values for a tag key within this domain. |
 | `handle.tag_keys_by_prefix(prefix)` | `Vec<String>` | Discover distinct tag keys matching a prefix (e.g. `"billing."`) within this domain. |
-| `handle.tasks_by_tag_key_prefix(prefix, status)` | `Vec<TaskRecord>` | Find tasks with any tag key matching the prefix, with optional status filter. |
+| `handle.task_ids_by_tag_key_prefix(prefix, status)` | `Vec<i64>` | IDs of tasks with any tag key matching the prefix, with optional status filter. Fetch full records via `task_by_id()` if needed. |
 | `handle.count_by_tag_key_prefix(prefix, status)` | `i64` | Count tasks with any tag key matching the prefix, with optional status filter. |
 
 ## Cross-domain operations (Scheduler)

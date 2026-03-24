@@ -64,8 +64,8 @@ flowchart TD
     S["submit() / submit_batch()"] --> TS["TaskStore\n(INSERT OR IGNORE)"]
     TS --> |SQLite| DB[(tasks table)]
     DB --> SCH["Scheduler run loop"]
-    SCH --> |"tokio::spawn"| E1["Executor + TaskContext"]
-    SCH --> |"tokio::spawn"| E2["Executor + TaskContext"]
+    SCH --> |"tokio::spawn"| E1["Executor + DomainTaskContext"]
+    SCH --> |"tokio::spawn"| E2["Executor + DomainTaskContext"]
     E1 --> CF["complete() / fail()"]
     E2 --> CF
     CF --> HIST[(task_history)]
@@ -193,8 +193,12 @@ Each cycle, the loop:
 Executor returns Err(TaskError)
   └─ retryable: false? ──► move to task_history (failed)
   └─ retryable: true?
-       └─ retry_count < max_retries? ──► status → pending, retry_count += 1
+       └─ retry_count < max_retries?
+            └─ delay == 0? ──► inline retry (stays running, retry_count += 1, re-execute)
+            └─ delay > 0?  ──► status → pending, retry_count += 1, requeued with backoff
        └─ otherwise ──► move to task_history (failed)
 ```
 
 Retried tasks keep their original priority and dedup key. `max_retries` defaults to 3.
+
+**Inline zero-delay retries:** When the retry delay is zero, the executor re-runs immediately within the same spawned task — avoiding the overhead of returning to the SQLite queue and being re-dispatched. The `retry_count` is persisted to the database, but the task stays in `running` status throughout.

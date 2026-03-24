@@ -47,12 +47,12 @@ impl TypedTask for ProcessImageTask {
 ## Implement the executor
 
 ```rust
-use taskmill::{TypedExecutor, TaskContext, TaskError};
+use taskmill::{TypedExecutor, DomainTaskContext, TaskError};
 
 struct ImageProcessor;
 
 impl TypedExecutor<ProcessImageTask> for ImageProcessor {
-    async fn execute(&self, task: ProcessImageTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: ProcessImageTask, ctx: DomainTaskContext<'_, Images>) -> Result<(), TaskError> {
         // Read the source image
         let data = tokio::fs::read(&task.path).await
             .map_err(|e| TaskError::permanent(format!("can't read: {e}")))?;
@@ -187,7 +187,7 @@ Scheduler::builder()
 Disable the default sampler in `Cargo.toml`:
 
 ```toml
-taskmill = { version = "0.4", default-features = false }
+taskmill = { version = "0.6", default-features = false }
 ```
 
 ## Key differences from desktop

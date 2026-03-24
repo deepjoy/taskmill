@@ -212,12 +212,14 @@ All columns from `tasks`, plus:
 | `actual_net_tx_bytes` | INTEGER | Reported by executor |
 | `completed_at` | TEXT | ISO 8601 timestamp |
 | `duration_ms` | INTEGER | Wall-clock duration |
-| `status` | TEXT | `completed`, `failed`, `cancelled`, `superseded`, or `expired` |
+| `status` | TEXT | `completed`, `failed`, `cancelled`, `superseded`, `expired`, or `dead_letter` |
 | `ttl_seconds` | INTEGER | TTL duration in seconds (NULL = no TTL) |
 | `ttl_from` | TEXT DEFAULT 'submission' | When TTL clock started |
 | `expires_at` | TEXT | ISO 8601 deadline (NULL = no expiry) |
 
-**Index:** `idx_history_type_completed(task_type, completed_at DESC) WHERE status = 'completed'` — for per-type history queries and throughput calculations.
+**Indexes:**
+- `idx_history_type_completed(task_type, completed_at DESC) WHERE status = 'completed'` — for per-type throughput calculations.
+- `idx_history_type(task_type, completed_at DESC)` — covering index for `history_stats`, `history_by_type`, and `avg_throughput` aggregate queries (all statuses).
 
 ### WAL mode
 
