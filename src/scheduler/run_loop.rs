@@ -1,11 +1,14 @@
 //! The main scheduler run loop, dispatch logic, and shutdown.
 
+use std::collections::HashMap;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::scheduler::aging::AgingParams;
+use crate::scheduler::fair::{self, GroupDemand};
 use crate::store::StoreError;
 use crate::task::IoBudget;
 
@@ -35,6 +38,7 @@ impl Scheduler {
             completion_rx: self.inner.completion_rx.clone(),
             failure_tx: self.inner.failure_tx.clone(),
             failure_rx: self.inner.failure_rx.clone(),
+            aging_config: self.inner.aging_config.clone(),
         }
     }
 
@@ -50,11 +54,18 @@ impl Scheduler {
             return Ok(false);
         }
 
+        // Compute aging params once per dispatch attempt.
+        let aging = self
+            .inner
+            .aging_config
+            .as_ref()
+            .map(|c| AgingParams::from_config(c));
+
         // Fast path: no gate checks needed, use pop_next() (single SQL)
         // instead of peek_next() + gate.admit() + claim_task() (2 SQL).
         // pop_next() skips expired tasks via its WHERE clause.
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
-            let Some(mut task) = self.inner.store.pop_next().await? else {
+            let Some(mut task) = self.inner.store.pop_next(aging.as_ref()).await? else {
                 return Ok(false);
             };
             self.inner
@@ -65,7 +76,7 @@ impl Scheduler {
         }
 
         // Slow path: peek → gate check → claim.
-        let Some(mut candidate) = self.inner.store.peek_next().await? else {
+        let Some(mut candidate) = self.inner.store.peek_next(aging.as_ref()).await? else {
             return Ok(false);
         };
         self.inner
@@ -105,6 +116,7 @@ impl Scheduler {
             paused_groups: &paused_groups,
             type_rate_limits: &self.inner.type_rate_limits,
             group_rate_limits: &self.inner.group_rate_limits,
+            skip_group_concurrency: false,
         };
 
         // Admission check while the task is still pending — no running
@@ -260,10 +272,18 @@ impl Scheduler {
         Ok(true)
     }
 
-    /// Dispatch pending tasks using batch pop on the fast path (no gate
-    /// checks), falling back to one-at-a-time dispatch on the slow path.
+    /// Dispatch pending tasks using fair scheduling (if configured), batch
+    /// pop on the fast path, or one-at-a-time on the slow path.
     async fn dispatch_pending(&self) -> Result<(), StoreError> {
+        if self.inner.group_weights.is_configured() {
+            return self.dispatch_fair().await;
+        }
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
+            let aging = self
+                .inner
+                .aging_config
+                .as_ref()
+                .map(|c| AgingParams::from_config(c));
             loop {
                 let active_count = self.inner.active.count();
                 let max = self.inner.max_concurrency.load(AtomicOrdering::Relaxed);
@@ -271,7 +291,11 @@ impl Scheduler {
                     break;
                 }
                 let available = max - active_count;
-                let mut tasks = self.inner.store.pop_next_batch(available).await?;
+                let mut tasks = self
+                    .inner
+                    .store
+                    .pop_next_batch(available, aging.as_ref())
+                    .await?;
                 if tasks.is_empty() {
                     break;
                 }
@@ -289,6 +313,314 @@ impl Scheduler {
                     Err(e) => return Err(e),
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Three-pass fair dispatch loop.
+    ///
+    /// Pass 1 (fair): Each group gets slots proportional to its weight.
+    /// Pass 2 (greedy): Unfilled slots filled by global priority order.
+    /// Pass 3 (urgent): Tasks aged past urgent_threshold bypass weights.
+    async fn dispatch_fair(&self) -> Result<(), StoreError> {
+        let active_count = self.inner.active.count();
+        let max = self.inner.max_concurrency.load(AtomicOrdering::Relaxed);
+        if active_count >= max {
+            return Ok(());
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let aging = self
+            .inner
+            .aging_config
+            .as_ref()
+            .map(|c| AgingParams::from_config(c));
+
+        // Gather demand.
+        let running = self.inner.store.running_counts_per_group().await?;
+        let pending = self.inner.store.pending_counts_per_group().await?;
+        let paused = self.inner.paused_groups.read().unwrap().clone();
+
+        let running_map: HashMap<Option<String>, usize> = running.iter().cloned().collect();
+
+        let demand = merge_demand(&running, &pending);
+        let allocation = fair::compute_allocation(
+            max,
+            &demand,
+            &self.inner.group_weights,
+            &self.inner.group_limits,
+            &paused,
+        );
+
+        let mut dispatched = 0;
+
+        // ── Pass 1: Fair per-group dispatch ────────────────────────
+        for (group, total_slots) in &allocation.groups {
+            let group_running = running_map.get(group).copied().unwrap_or(0);
+            let available = total_slots.saturating_sub(group_running);
+            for _ in 0..available {
+                if self.inner.active.count() + dispatched >= max {
+                    break;
+                }
+                let candidate = match group {
+                    Some(g) => {
+                        self.inner
+                            .store
+                            .peek_next_in_group(g, aging.as_ref())
+                            .await?
+                    }
+                    None => self.inner.store.peek_next_ungrouped(aging.as_ref()).await?,
+                };
+                let Some(mut candidate) = candidate else {
+                    break;
+                };
+
+                // Expiry check.
+                if let Some(expires_at) = candidate.expires_at {
+                    if expires_at.timestamp_millis() <= now_ms {
+                        self.expire_task_inline(candidate).await?;
+                        continue;
+                    }
+                }
+
+                self.inner
+                    .store
+                    .populate_tags(std::slice::from_mut(&mut candidate))
+                    .await?;
+
+                // Gate check — skip group concurrency (allocation handles it).
+                let reader_guard = self.inner.resource_reader.lock().await;
+                let gate_ctx = GateContext {
+                    store: &self.inner.store,
+                    resource_reader: reader_guard.as_ref(),
+                    group_limits: Some(&self.inner.group_limits),
+                    module_caps: &self.inner.module_caps,
+                    module_running: &self.inner.module_running,
+                    paused_groups: &paused,
+                    type_rate_limits: &self.inner.type_rate_limits,
+                    group_rate_limits: &self.inner.group_rate_limits,
+                    skip_group_concurrency: true,
+                };
+
+                match self.inner.gate.admit(&candidate, &gate_ctx).await? {
+                    Admission::Admit => {
+                        drop(reader_guard);
+                        if self.inner.store.claim_task(candidate.id).await? {
+                            let mut task = candidate;
+                            task.status = crate::task::TaskStatus::Running;
+                            task.started_at = Some(chrono::Utc::now());
+                            if task.ttl_from == crate::task::TtlFrom::FirstAttempt
+                                && task.expires_at.is_none()
+                            {
+                                if let Some(ttl) = task.ttl_seconds {
+                                    task.expires_at =
+                                        Some(chrono::Utc::now() + chrono::Duration::seconds(ttl));
+                                }
+                            }
+                            self.spawn_dispatched_task(task).await?;
+                            dispatched += 1;
+                        }
+                    }
+                    Admission::RateLimited(next) => {
+                        drop(reader_guard);
+                        let wait = next.duration_since(tokio::time::Instant::now());
+                        let run_after = chrono::Utc::now()
+                            + chrono::Duration::from_std(wait)
+                                .unwrap_or(chrono::Duration::milliseconds(1));
+                        self.inner
+                            .store
+                            .set_run_after(candidate.id, run_after)
+                            .await?;
+                    }
+                    Admission::Deny => {
+                        drop(reader_guard);
+                        break; // stop this group
+                    }
+                }
+            }
+        }
+
+        // ── Pass 2: Greedy fill (work-conserving) ─────────────────
+        let remaining = max.saturating_sub(self.inner.active.count() + dispatched);
+        if remaining > 0 {
+            for _ in 0..remaining {
+                let Some(mut candidate) = self.inner.store.peek_next(aging.as_ref()).await? else {
+                    break;
+                };
+
+                if let Some(expires_at) = candidate.expires_at {
+                    if expires_at.timestamp_millis() <= now_ms {
+                        self.expire_task_inline(candidate).await?;
+                        continue;
+                    }
+                }
+
+                self.inner
+                    .store
+                    .populate_tags(std::slice::from_mut(&mut candidate))
+                    .await?;
+
+                // Full gate check (group concurrency enforced here).
+                let reader_guard = self.inner.resource_reader.lock().await;
+                let gate_ctx = GateContext {
+                    store: &self.inner.store,
+                    resource_reader: reader_guard.as_ref(),
+                    group_limits: Some(&self.inner.group_limits),
+                    module_caps: &self.inner.module_caps,
+                    module_running: &self.inner.module_running,
+                    paused_groups: &paused,
+                    type_rate_limits: &self.inner.type_rate_limits,
+                    group_rate_limits: &self.inner.group_rate_limits,
+                    skip_group_concurrency: false,
+                };
+
+                match self.inner.gate.admit(&candidate, &gate_ctx).await? {
+                    Admission::Admit => {
+                        drop(reader_guard);
+                        if self.inner.store.claim_task(candidate.id).await? {
+                            let mut task = candidate;
+                            task.status = crate::task::TaskStatus::Running;
+                            task.started_at = Some(chrono::Utc::now());
+                            if task.ttl_from == crate::task::TtlFrom::FirstAttempt
+                                && task.expires_at.is_none()
+                            {
+                                if let Some(ttl) = task.ttl_seconds {
+                                    task.expires_at =
+                                        Some(chrono::Utc::now() + chrono::Duration::seconds(ttl));
+                                }
+                            }
+                            self.spawn_dispatched_task(task).await?;
+                        }
+                    }
+                    Admission::RateLimited(next) => {
+                        drop(reader_guard);
+                        let wait = next.duration_since(tokio::time::Instant::now());
+                        let run_after = chrono::Utc::now()
+                            + chrono::Duration::from_std(wait)
+                                .unwrap_or(chrono::Duration::milliseconds(1));
+                        self.inner
+                            .store
+                            .set_run_after(candidate.id, run_after)
+                            .await?;
+                    }
+                    Admission::Deny => {
+                        drop(reader_guard);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // ── Pass 3: Urgent threshold override ─────────────────────
+        if let Some(config) = &self.inner.aging_config {
+            if let Some(urgent) = config.urgent_threshold {
+                let remaining = max.saturating_sub(self.inner.active.count());
+                if remaining > 0 {
+                    self.dispatch_urgent(urgent, remaining, aging.as_ref())
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Dispatch tasks whose effective priority has aged past the urgent
+    /// threshold, regardless of group allocation. Respects max_concurrency.
+    async fn dispatch_urgent(
+        &self,
+        threshold: crate::priority::Priority,
+        limit: usize,
+        aging: Option<&AgingParams>,
+    ) -> Result<(), StoreError> {
+        let paused = self.inner.paused_groups.read().unwrap().clone();
+        for _ in 0..limit {
+            let Some(mut candidate) = self.inner.store.peek_next_urgent(threshold, aging).await?
+            else {
+                break;
+            };
+
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if let Some(expires_at) = candidate.expires_at {
+                if expires_at.timestamp_millis() <= now_ms {
+                    self.expire_task_inline(candidate).await?;
+                    continue;
+                }
+            }
+
+            self.inner
+                .store
+                .populate_tags(std::slice::from_mut(&mut candidate))
+                .await?;
+
+            // Full gate check (urgent bypasses weights, not concurrency/rate-limits).
+            let reader_guard = self.inner.resource_reader.lock().await;
+            let gate_ctx = GateContext {
+                store: &self.inner.store,
+                resource_reader: reader_guard.as_ref(),
+                group_limits: Some(&self.inner.group_limits),
+                module_caps: &self.inner.module_caps,
+                module_running: &self.inner.module_running,
+                paused_groups: &paused,
+                type_rate_limits: &self.inner.type_rate_limits,
+                group_rate_limits: &self.inner.group_rate_limits,
+                skip_group_concurrency: false,
+            };
+
+            match self.inner.gate.admit(&candidate, &gate_ctx).await? {
+                Admission::Admit => {
+                    drop(reader_guard);
+                    if self.inner.store.claim_task(candidate.id).await? {
+                        let mut task = candidate;
+                        task.status = crate::task::TaskStatus::Running;
+                        task.started_at = Some(chrono::Utc::now());
+                        if task.ttl_from == crate::task::TtlFrom::FirstAttempt
+                            && task.expires_at.is_none()
+                        {
+                            if let Some(ttl) = task.ttl_seconds {
+                                task.expires_at =
+                                    Some(chrono::Utc::now() + chrono::Duration::seconds(ttl));
+                            }
+                        }
+                        self.spawn_dispatched_task(task).await?;
+                    }
+                }
+                Admission::RateLimited(next) => {
+                    drop(reader_guard);
+                    let wait = next.duration_since(tokio::time::Instant::now());
+                    let run_after = chrono::Utc::now()
+                        + chrono::Duration::from_std(wait)
+                            .unwrap_or(chrono::Duration::milliseconds(1));
+                    self.inner
+                        .store
+                        .set_run_after(candidate.id, run_after)
+                        .await?;
+                }
+                Admission::Deny => {
+                    drop(reader_guard);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Expire a single task inline (used by dispatch_fair to avoid code duplication).
+    async fn expire_task_inline(
+        &self,
+        candidate: crate::task::TaskRecord,
+    ) -> Result<(), StoreError> {
+        if let Ok(Some(task)) = self.inner.store.expire_single(candidate.id).await {
+            let age = (chrono::Utc::now() - task.created_at)
+                .to_std()
+                .unwrap_or_default();
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::TaskExpired {
+                    header: task.event_header(),
+                    age,
+                },
+            );
         }
         Ok(())
     }
@@ -585,4 +917,29 @@ impl Scheduler {
         // Flush WAL and close the database.
         self.inner.store.close().await;
     }
+}
+
+/// Merge running and pending counts into a unified demand list.
+fn merge_demand(
+    running: &[(Option<String>, usize)],
+    pending: &[(Option<String>, usize)],
+) -> Vec<(Option<String>, GroupDemand)> {
+    let mut map: HashMap<Option<String>, GroupDemand> = HashMap::new();
+    for (g, count) in running {
+        map.entry(g.clone())
+            .or_insert(GroupDemand {
+                running: 0,
+                pending: 0,
+            })
+            .running = *count;
+    }
+    for (g, count) in pending {
+        map.entry(g.clone())
+            .or_insert(GroupDemand {
+                running: 0,
+                pending: 0,
+            })
+            .pending = *count;
+    }
+    map.into_iter().collect()
 }

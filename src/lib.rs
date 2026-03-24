@@ -24,6 +24,10 @@
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
 //! - Supports [token-bucket rate limiting](RateLimit) per task type and/or group to cap start rate
 //!   independently of concurrency
+//! - Supports [priority aging](AgingConfig) to prevent starvation of low-priority work — effective
+//!   priority is computed at dispatch time with zero write amplification
+//! - Supports weighted fair scheduling with per-group slot allocation, minimum slot
+//!   guarantees, and urgent threshold override for severely starved tasks
 //!
 //! # Concepts
 //!
@@ -120,6 +124,20 @@
 //! [`SchedulerBuilder::group_concurrency`] and
 //! [`SchedulerBuilder::default_group_concurrency`], or adjust at runtime via
 //! [`Scheduler::set_group_limit`] and [`Scheduler::set_default_group_concurrency`].
+//!
+//! ## Priority aging & fair scheduling
+//!
+//! [`AgingConfig`] enables anti-starvation priority aging: tasks waiting longer
+//! than a grace period are gradually promoted in effective priority at dispatch
+//! time. The stored priority is never mutated. Configure via
+//! [`SchedulerBuilder::priority_aging`].
+//!
+//! Weighted fair scheduling allocates dispatch slots proportionally to group
+//! weights using a three-pass loop (fair, greedy, urgent). Configure at
+//! build time with
+//! [`SchedulerBuilder::group_weight`] and
+//! [`SchedulerBuilder::group_minimum_slots`], or adjust at runtime via
+//! [`Scheduler::set_group_weight`] and [`Scheduler::set_group_minimum_slots`].
 //!
 //! ## Child tasks & two-phase execution
 //!
@@ -808,9 +826,9 @@ pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    EstimatedProgress, GroupLimits, PausedGroupInfo, ProgressReporter, RateLimit, RateLimitInfo,
-    Scheduler, SchedulerBuilder, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
-    TaskEventHeader, TaskProgress,
+    AgingConfig, EstimatedProgress, GroupAllocationInfo, GroupLimits, PausedGroupInfo,
+    ProgressReporter, RateLimit, RateLimitInfo, Scheduler, SchedulerBuilder, SchedulerConfig,
+    SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader, TaskProgress,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{

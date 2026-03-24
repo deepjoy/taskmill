@@ -180,11 +180,14 @@ pub(crate) async fn submit_one(
         };
 
         if is_group_paused {
+            let pause_now_ms = chrono::Utc::now().timestamp_millis();
             sqlx::query(
                 "UPDATE tasks SET status = 'paused',
-                                  pause_reasons = pause_reasons | 8
+                                  pause_reasons = pause_reasons | 8,
+                                  paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
                  WHERE id = ? AND status = 'pending'",
             )
+            .bind(pause_now_ms)
             .bind(task_id)
             .execute(&mut **conn)
             .await?;

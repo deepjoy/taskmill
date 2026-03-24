@@ -77,6 +77,10 @@ pub(crate) fn row_to_task_record(row: &sqlx::sqlite::SqliteRow) -> TaskRecord {
         max_retries: row.get("max_retries"),
         memo: row.get("memo"),
         pause_reasons: PauseReasons::from_bits(row.try_get::<i64, _>("pause_reasons").unwrap_or(0)),
+        pause_duration_ms: row.try_get::<i64, _>("pause_duration_ms").unwrap_or(0),
+        paused_at_ms: row
+            .try_get::<Option<i64>, _>("paused_at_ms")
+            .unwrap_or(None),
     }
 }
 

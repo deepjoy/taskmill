@@ -14,6 +14,7 @@ use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
 
+use super::aging::AgingConfig;
 use super::rate_limit::RateLimit;
 
 use super::event::{SchedulerConfig, ShutdownMode};
@@ -56,6 +57,9 @@ pub struct SchedulerBuilder {
     group_concurrency_overrides: Vec<(String, usize)>,
     type_rate_limits: Vec<(String, RateLimit)>,
     group_rate_limits: Vec<(String, RateLimit)>,
+    group_weights: Vec<(String, u32)>,
+    default_group_weight: u32,
+    group_min_slots: Vec<(String, usize)>,
 }
 
 impl SchedulerBuilder {
@@ -78,6 +82,9 @@ impl SchedulerBuilder {
             group_concurrency_overrides: Vec::new(),
             type_rate_limits: Vec::new(),
             group_rate_limits: Vec::new(),
+            group_weights: Vec::new(),
+            default_group_weight: 1,
+            group_min_slots: Vec::new(),
         }
     }
 
@@ -128,6 +135,20 @@ impl SchedulerBuilder {
     /// Set the priority threshold for preemption. Default: REALTIME.
     pub fn preempt_priority(mut self, priority: Priority) -> Self {
         self.config.preempt_priority = priority;
+        self
+    }
+
+    /// Enable priority aging with the given configuration.
+    ///
+    /// When enabled, tasks that wait longer than `grace_period` in the
+    /// pending queue are gradually promoted in effective priority, up to
+    /// `max_effective_priority`. This prevents starvation of low-priority
+    /// work when high-priority tasks arrive continuously.
+    ///
+    /// Effective priority is computed at dispatch time — the stored priority
+    /// is never mutated. Aging is visible in snapshots and events.
+    pub fn priority_aging(mut self, config: AgingConfig) -> Self {
+        self.config.aging_config = Some(config);
         self
     }
 
@@ -266,6 +287,26 @@ impl SchedulerBuilder {
     /// rate, independent of task-type rate limits (both must pass).
     pub fn group_rate_limit(mut self, group: impl Into<String>, limit: RateLimit) -> Self {
         self.group_rate_limits.push((group.into(), limit));
+        self
+    }
+
+    /// Set a scheduling weight for a specific group.
+    ///
+    /// Weights are relative — `(A:3, B:1)` gives A 75% and B 25%.
+    pub fn group_weight(mut self, group: impl Into<String>, weight: u32) -> Self {
+        self.group_weights.push((group.into(), weight));
+        self
+    }
+
+    /// Default weight for groups without a specific override. Default: 1.
+    pub fn default_group_weight(mut self, weight: u32) -> Self {
+        self.default_group_weight = weight;
+        self
+    }
+
+    /// Minimum guaranteed slots for a group, regardless of weight.
+    pub fn group_minimum_slots(mut self, group: impl Into<String>, slots: usize) -> Self {
+        self.group_min_slots.push((group.into(), slots));
         self
     }
 
@@ -450,6 +491,13 @@ impl SchedulerBuilder {
             self.app_state_entries,
         ));
 
+        // Validate aging config if present.
+        if let Some(ref aging) = self.config.aging_config {
+            aging
+                .validate()
+                .map_err(|e| StoreError::Database(e.into()))?;
+        }
+
         let scheduler = Scheduler::with_gate(
             store,
             self.config,
@@ -485,6 +533,27 @@ impl SchedulerBuilder {
         }
         for (scope, limit) in self.group_rate_limits {
             scheduler.inner.group_rate_limits.set(scope, limit);
+        }
+
+        // Apply group weights.
+        let has_group_weights = !self.group_weights.is_empty() || !self.group_min_slots.is_empty();
+        if self.default_group_weight != 1 {
+            scheduler
+                .inner
+                .group_weights
+                .set_default(self.default_group_weight);
+        }
+        for (group, weight) in &self.group_weights {
+            scheduler
+                .inner
+                .group_weights
+                .set_weight(group.clone(), *weight);
+        }
+        for (group, slots) in &self.group_min_slots {
+            scheduler
+                .inner
+                .group_weights
+                .set_min_slots(group.clone(), *slots);
         }
 
         // Compute fast-dispatch eligibility before consuming builder fields.
@@ -541,6 +610,7 @@ impl SchedulerBuilder {
             && !has_module_caps
             && !has_paused_groups
             && !has_rate_limits
+            && !has_group_weights
         {
             scheduler
                 .inner

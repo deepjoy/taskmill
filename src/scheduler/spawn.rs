@@ -71,10 +71,10 @@ pub(crate) async fn spawn_task(
         }
     }
 
-    // Emit dispatched event.
+    // Emit dispatched event with aging-aware effective priority.
     emit_event(
         &ctx.event_tx,
-        SchedulerEvent::Dispatched(task.event_header()),
+        SchedulerEvent::Dispatched(task.event_header_with_aging(ctx.aging_config.as_deref())),
     );
 
     // Build deps for handlers (cloned from SpawnContext since they move into the spawned future).

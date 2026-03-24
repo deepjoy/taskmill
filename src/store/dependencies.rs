@@ -60,13 +60,16 @@ impl TaskStore {
 
         // Step 3: If any newly-unblocked task's group is paused, downgrade to
         // paused with the GROUP reason bit instead of leaving it as pending.
+        let now_ms = chrono::Utc::now().timestamp_millis();
         for (task_id,) in &unblocked {
             sqlx::query(
                 "UPDATE tasks SET status = 'paused',
-                                  pause_reasons = pause_reasons | 8
+                                  pause_reasons = pause_reasons | 8,
+                                  paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
                  WHERE id = ? AND status = 'pending'
                    AND group_key IN (SELECT group_key FROM paused_groups)",
             )
+            .bind(now_ms)
             .bind(task_id)
             .execute(&mut **conn)
             .await?;
@@ -186,12 +189,15 @@ impl TaskStore {
                         .await?;
                             if result.rows_affected() > 0 {
                                 // If the task's group is paused, downgrade to paused.
+                                let pause_now_ms = chrono::Utc::now().timestamp_millis();
                                 sqlx::query(
                                     "UPDATE tasks SET status = 'paused',
-                                                      pause_reasons = pause_reasons | 8
+                                                      pause_reasons = pause_reasons | 8,
+                                                      paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
                                      WHERE id = ? AND status = 'pending'
                                        AND group_key IN (SELECT group_key FROM paused_groups)",
                                 )
+                                .bind(pause_now_ms)
                                 .bind(dep_id)
                                 .execute(&mut **conn)
                                 .await?;

@@ -45,6 +45,8 @@ pub(crate) struct SpawnContext {
     pub failure_rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<super::super::FailureMsg>>,
     >,
+    /// Priority aging configuration. `None` = aging disabled.
+    pub aging_config: Option<Arc<crate::scheduler::aging::AgingConfig>>,
 }
 
 /// Output of task context construction — everything needed to insert into the
@@ -86,7 +88,7 @@ pub(crate) fn build_task_context(task: &TaskRecord, spawn_ctx: &SpawnContext) ->
         record: task.clone(),
         token: token.clone(),
         progress: ProgressReporter::new(
-            task.event_header(),
+            task.event_header_with_aging(spawn_ctx.aging_config.as_deref()),
             spawn_ctx.event_tx.clone(),
             spawn_ctx.active.clone(),
             io.clone(),
@@ -98,6 +100,7 @@ pub(crate) fn build_task_context(task: &TaskRecord, spawn_ctx: &SpawnContext) ->
         io: io.clone(),
         module_registry: spawn_ctx.module_registry.clone(),
         owning_module: owning_module.clone(),
+        aging_config: spawn_ctx.aging_config.clone(),
     };
 
     PreparedTask { ctx, io, token }

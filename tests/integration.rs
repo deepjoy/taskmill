@@ -12,12 +12,16 @@
 //! - `cross_module`: steps 8–11 (TaskContext module access, cross-module child
 //!   spawning, Scheduler::modules(), event module identity)
 
+#[path = "integration/aging.rs"]
+mod aging;
 #[path = "integration/common.rs"]
 mod common;
 #[path = "integration/cross_module.rs"]
 mod cross_module;
 #[path = "integration/dependencies.rs"]
 mod dependencies;
+#[path = "integration/fair_scheduling.rs"]
+mod fair_scheduling;
 #[path = "integration/group_pause.rs"]
 mod group_pause;
 #[path = "integration/memo.rs"]

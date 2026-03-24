@@ -13,6 +13,8 @@ When your app starts up, taskmill automatically recovers:
 - **Dedup keys stay occupied** — no duplicate submissions sneak in during recovery.
 - **Retry counts are preserved** — a task that had retried twice before the crash still has two retries used.
 
+When [priority aging](priorities-and-preemption.md#priority-aging) is enabled, crash recovery also accumulates stale `pause_duration_ms` for tasks that were paused at crash time. This ensures the aging clock is approximately correct after recovery (slightly over-promoting, which is acceptable for anti-starvation).
+
 The guarantee is **at-least-once execution**: a task might run partially, crash, and re-run from the beginning. Design your executors to be idempotent (or to check for partial work) so re-execution is safe.
 
 ## Scheduled task recovery
@@ -195,6 +197,8 @@ You normally don't need to know the schema, but it's documented here for debuggi
 | `ttl_seconds` | INTEGER | TTL duration in seconds (NULL = no TTL) |
 | `ttl_from` | TEXT DEFAULT 'submission' | When TTL clock starts: `submission` or `first_attempt` |
 | `expires_at` | TEXT | ISO 8601 deadline (NULL = no expiry) |
+| `pause_duration_ms` | INTEGER DEFAULT 0 | Accumulated milliseconds spent in `paused` state. Excluded from the [priority aging](priorities-and-preemption.md#priority-aging) formula to freeze the aging clock while paused. |
+| `paused_at_ms` | INTEGER | Epoch-ms timestamp of the most recent pause transition. `NULL` when the task is not paused. On resume, `pause_duration_ms` is accumulated and this is cleared. |
 
 **Indexes:**
 - `idx_tasks_pending(status, priority ASC, id ASC) WHERE status = 'pending'` — fast priority-ordered dispatch.

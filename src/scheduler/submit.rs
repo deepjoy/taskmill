@@ -52,6 +52,7 @@ impl Scheduler {
             // Emit superseded event — we need the old record's header.
             // The old task is already in history, so build header from
             // submission info.
+            let priority = sub.priority;
             let old_header = super::event::TaskEventHeader {
                 task_id: *replaced_task_id,
                 module: sub
@@ -63,6 +64,8 @@ impl Scheduler {
                 key: sub.effective_key(),
                 label: sub.label.clone(),
                 tags: sub.tags.clone(),
+                base_priority: priority,
+                effective_priority: priority,
             };
             emit_event(
                 &self.inner.event_tx,
@@ -120,6 +123,7 @@ impl Scheduler {
             } = outcome
             {
                 self.handle_superseded_active(*replaced_task_id).await;
+                let priority = sub.priority;
                 let old_header = super::event::TaskEventHeader {
                     task_id: *replaced_task_id,
                     module: sub
@@ -131,6 +135,8 @@ impl Scheduler {
                     key: sub.effective_key(),
                     label: sub.label.clone(),
                     tags: sub.tags.clone(),
+                    base_priority: priority,
+                    effective_priority: priority,
                 };
                 emit_event(
                     &self.inner.event_tx,
@@ -548,6 +554,7 @@ impl Scheduler {
                 io,
                 module_registry,
                 owning_module,
+                aging_config: None,
             };
 
             match tokio::time::timeout(timeout, executor.on_cancel_erased(&ctx)).await {

@@ -14,6 +14,7 @@
 //! The `waiting` transition lives in `hierarchy.rs`, and pause/resume/cancel/expire
 //! live in `cancel_expire.rs`.
 
+use crate::scheduler::aging::AgingParams;
 use crate::store::row_mapping::row_to_task_record;
 use crate::store::{StoreError, TaskStore};
 use crate::task::{BackoffStrategy, IoBudget, TaskRecord};
@@ -26,21 +27,56 @@ impl TaskStore {
     /// Peek at the highest-priority pending task without modifying it.
     /// Returns `None` if the queue is empty. Tasks with a future `run_after`
     /// timestamp are excluded (not yet eligible for dispatch).
-    pub async fn peek_next(&self) -> Result<Option<TaskRecord>, StoreError> {
+    ///
+    /// When `aging` is `Some`, the ORDER BY uses the aging formula to compute
+    /// effective priority at dispatch time. When `None`, the original
+    /// index-ordered query is used (zero overhead).
+    pub async fn peek_next(
+        &self,
+        aging: Option<&AgingParams>,
+    ) -> Result<Option<TaskRecord>, StoreError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let row = sqlx::query(
-            "SELECT * FROM tasks
-             WHERE id = (
-                 SELECT id FROM tasks
-                 WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= ?)
-                 ORDER BY priority ASC, id ASC
-                 LIMIT 1
-             )",
-        )
-        .bind(now_ms)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = match aging {
+            None => {
+                sqlx::query(
+                    "SELECT * FROM tasks
+                     WHERE id = (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                         ORDER BY priority ASC, id ASC
+                         LIMIT 1
+                     )",
+                )
+                .bind(now_ms)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            Some(ap) => {
+                sqlx::query(
+                    "SELECT * FROM tasks
+                     WHERE id = (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                         ORDER BY
+                             MAX(
+                                 priority - MAX(0, (? - created_at - pause_duration_ms - ?) / ?),
+                                 ?
+                             ) ASC,
+                             id ASC
+                         LIMIT 1
+                     )",
+                )
+                .bind(now_ms)
+                .bind(ap.now_ms)
+                .bind(ap.grace_period_ms)
+                .bind(ap.aging_interval_ms)
+                .bind(ap.max_effective_priority)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
 
         Ok(row.as_ref().map(row_to_task_record))
     }
@@ -115,41 +151,88 @@ impl TaskStore {
     /// them as running. Returns an empty vec if no work is available. This
     /// avoids the N sequential `pop_next()` round-trips when filling
     /// concurrency slots.
-    pub async fn pop_next_batch(&self, limit: usize) -> Result<Vec<TaskRecord>, StoreError> {
+    ///
+    /// When `aging` is `Some`, the ORDER BY uses the aging formula.
+    pub async fn pop_next_batch(
+        &self,
+        limit: usize,
+        aging: Option<&AgingParams>,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         if limit == 1 {
-            return Ok(self.pop_next().await?.into_iter().collect());
+            return Ok(self.pop_next(aging).await?.into_iter().collect());
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let rows = sqlx::query(
-            "UPDATE tasks SET
-                status = 'running',
-                started_at = ?,
-                expires_at = CASE
-                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN ? + (ttl_seconds * 1000)
-                    ELSE expires_at
-                END
-             WHERE id IN (
-                 SELECT id FROM tasks
-                 WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= ?)
-                   AND (expires_at IS NULL OR expires_at > ?)
-                 ORDER BY priority ASC, id ASC
-                 LIMIT ?
-             )
-             RETURNING *",
-        )
-        .bind(now_ms)
-        .bind(now_ms)
-        .bind(now_ms)
-        .bind(now_ms)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = match aging {
+            None => {
+                sqlx::query(
+                    "UPDATE tasks SET
+                        status = 'running',
+                        started_at = ?,
+                        expires_at = CASE
+                            WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                            THEN ? + (ttl_seconds * 1000)
+                            ELSE expires_at
+                        END
+                     WHERE id IN (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                           AND (expires_at IS NULL OR expires_at > ?)
+                         ORDER BY priority ASC, id ASC
+                         LIMIT ?
+                     )
+                     RETURNING *",
+                )
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some(ap) => {
+                sqlx::query(
+                    "UPDATE tasks SET
+                        status = 'running',
+                        started_at = ?,
+                        expires_at = CASE
+                            WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                            THEN ? + (ttl_seconds * 1000)
+                            ELSE expires_at
+                        END
+                     WHERE id IN (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                           AND (expires_at IS NULL OR expires_at > ?)
+                         ORDER BY
+                             MAX(
+                                 priority - MAX(0, (? - created_at - pause_duration_ms - ?) / ?),
+                                 ?
+                             ) ASC,
+                             id ASC
+                         LIMIT ?
+                     )
+                     RETURNING *",
+                )
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(ap.now_ms)
+                .bind(ap.grace_period_ms)
+                .bind(ap.aging_interval_ms)
+                .bind(ap.max_effective_priority)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
 
         let records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
         if !records.is_empty() {
@@ -163,39 +246,84 @@ impl TaskStore {
     /// Returns `None` if the queue is empty. Tasks with a future `run_after`
     /// timestamp are excluded.
     ///
+    /// When `aging` is `Some`, the ORDER BY uses the aging formula.
+    ///
     /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
     /// the first pop.
     ///
     /// Tags are **not** populated — callers needing tags should call
     /// [`populate_tags`](Self::populate_tags) explicitly or use
     /// [`task_by_id`](Self::task_by_id).
-    pub async fn pop_next(&self) -> Result<Option<TaskRecord>, StoreError> {
+    pub async fn pop_next(
+        &self,
+        aging: Option<&AgingParams>,
+    ) -> Result<Option<TaskRecord>, StoreError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let row = sqlx::query(
-            "UPDATE tasks SET
-                status = 'running',
-                started_at = ?,
-                expires_at = CASE
-                    WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
-                    THEN ? + (ttl_seconds * 1000)
-                    ELSE expires_at
-                END
-             WHERE id = (
-                 SELECT id FROM tasks
-                 WHERE status = 'pending'
-                   AND (run_after IS NULL OR run_after <= ?)
-                   AND (expires_at IS NULL OR expires_at > ?)
-                 ORDER BY priority ASC, id ASC
-                 LIMIT 1
-             )
-             RETURNING *",
-        )
-        .bind(now_ms)
-        .bind(now_ms)
-        .bind(now_ms)
-        .bind(now_ms)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = match aging {
+            None => {
+                sqlx::query(
+                    "UPDATE tasks SET
+                        status = 'running',
+                        started_at = ?,
+                        expires_at = CASE
+                            WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                            THEN ? + (ttl_seconds * 1000)
+                            ELSE expires_at
+                        END
+                     WHERE id = (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                           AND (expires_at IS NULL OR expires_at > ?)
+                         ORDER BY priority ASC, id ASC
+                         LIMIT 1
+                     )
+                     RETURNING *",
+                )
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            Some(ap) => {
+                sqlx::query(
+                    "UPDATE tasks SET
+                        status = 'running',
+                        started_at = ?,
+                        expires_at = CASE
+                            WHEN ttl_from = 'first_attempt' AND ttl_seconds IS NOT NULL AND expires_at IS NULL
+                            THEN ? + (ttl_seconds * 1000)
+                            ELSE expires_at
+                        END
+                     WHERE id = (
+                         SELECT id FROM tasks
+                         WHERE status = 'pending'
+                           AND (run_after IS NULL OR run_after <= ?)
+                           AND (expires_at IS NULL OR expires_at > ?)
+                         ORDER BY
+                             MAX(
+                                 priority - MAX(0, (? - created_at - pause_duration_ms - ?) / ?),
+                                 ?
+                             ) ASC,
+                             id ASC
+                         LIMIT 1
+                     )
+                     RETURNING *",
+                )
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(now_ms)
+                .bind(ap.now_ms)
+                .bind(ap.grace_period_ms)
+                .bind(ap.aging_interval_ms)
+                .bind(ap.max_effective_priority)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
 
         let record = row.map(|r| row_to_task_record(&r));
         if record.is_some() {
@@ -452,13 +580,16 @@ impl TaskStore {
             all_unblocked = unblocked.into_iter().map(|(id,)| id).collect();
 
             // Downgrade any newly-unblocked tasks whose group is paused.
+            let pause_now_ms = chrono::Utc::now().timestamp_millis();
             for task_id in &all_unblocked {
                 sqlx::query(
                     "UPDATE tasks SET status = 'paused',
-                                      pause_reasons = pause_reasons | 8
+                                      pause_reasons = pause_reasons | 8,
+                                      paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
                      WHERE id = ? AND status = 'pending'
                        AND group_key IN (SELECT group_key FROM paused_groups)",
                 )
+                .bind(pause_now_ms)
                 .bind(task_id)
                 .execute(&mut *conn)
                 .await?;
@@ -647,11 +778,14 @@ impl TaskStore {
                                     .await?;
 
                             if is_paused.is_some() {
+                                let pause_ts = chrono::Utc::now().timestamp_millis();
                                 sqlx::query(
                                     "UPDATE tasks SET status = 'paused',
-                                                      pause_reasons = pause_reasons | 8
+                                                      pause_reasons = pause_reasons | 8,
+                                                      paused_at_ms = CASE WHEN paused_at_ms IS NULL THEN ? ELSE paused_at_ms END
                                      WHERE id = ?",
                                 )
+                                .bind(pause_ts)
                                 .bind(next_id)
                                 .execute(&mut **conn)
                                 .await?;

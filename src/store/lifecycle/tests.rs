@@ -36,13 +36,13 @@ async fn priority_ordering() {
     store.submit(&rt).await.unwrap();
     store.submit(&normal).await.unwrap();
 
-    let first = store.pop_next().await.unwrap().unwrap();
+    let first = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(first.key, rt_key);
 
-    let second = store.pop_next().await.unwrap().unwrap();
+    let second = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(second.key, normal_key);
 
-    let third = store.pop_next().await.unwrap().unwrap();
+    let third = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(third.key, bg_key);
 }
 
@@ -52,7 +52,7 @@ async fn complete_moves_to_history() {
     let sub = make_submission("done", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     store
         .complete(task.id, &IoBudget::disk(2000, 1000))
@@ -73,7 +73,7 @@ async fn fail_retryable_requeues() {
     let sub = make_submission("retry-me", Priority::HIGH);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     store
         .fail(
@@ -99,7 +99,7 @@ async fn fail_exhausted_retries_moves_to_history() {
     let sub = make_submission("permanent", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     store
         .fail(
@@ -112,7 +112,7 @@ async fn fail_exhausted_retries_moves_to_history() {
         )
         .await
         .unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 1);
     store
         .fail(
@@ -140,7 +140,7 @@ async fn pause_and_resume() {
         .submit(&make_submission("pausable", Priority::NORMAL))
         .await
         .unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     store
         .pause(task.id, PauseReasons::PREEMPTION)
@@ -163,7 +163,7 @@ async fn pause_reasons_accumulate_across_sources() {
     let store = test_store().await;
     let sub = TaskSubmission::new("mod1.work").key("multi-pause");
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Preemption pause.
     store
@@ -200,7 +200,7 @@ async fn preemption_paused_tasks_filters_by_bit() {
     // Task A: preemption-paused.
     let sub_a = TaskSubmission::new("test").key("a");
     store.submit(&sub_a).await.unwrap();
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store.pause(a.id, PauseReasons::PREEMPTION).await.unwrap();
 
     // Task B: module-paused only.
@@ -222,13 +222,13 @@ async fn clear_pause_bit_resumes_sole_reason_tasks() {
     // Task with only GLOBAL reason.
     let sub_a = TaskSubmission::new("test").key("global-only");
     store.submit(&sub_a).await.unwrap();
-    let a = store.pop_next().await.unwrap().unwrap();
+    let a = store.pop_next(None).await.unwrap().unwrap();
     store.pause(a.id, PauseReasons::GLOBAL).await.unwrap();
 
     // Task with GLOBAL + PREEMPTION reasons.
     let sub_b = TaskSubmission::new("test").key("multi");
     store.submit(&sub_b).await.unwrap();
-    let b = store.pop_next().await.unwrap().unwrap();
+    let b = store.pop_next(None).await.unwrap().unwrap();
     store.pause(b.id, PauseReasons::PREEMPTION).await.unwrap();
     store.pause(b.id, PauseReasons::GLOBAL).await.unwrap();
 
@@ -293,8 +293,8 @@ async fn running_io_totals() {
         .expected_io(IoBudget::disk(3000, 1000));
     store.submit(&sub2).await.unwrap();
 
-    store.pop_next().await.unwrap();
-    store.pop_next().await.unwrap();
+    store.pop_next(None).await.unwrap();
+    store.pop_next(None).await.unwrap();
 
     let (read, write) = store.running_io_totals().await.unwrap();
     assert_eq!(read, 8000);
@@ -306,7 +306,7 @@ async fn key_freed_after_completion() {
     let store = test_store().await;
     let sub = make_submission("reuse", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store.complete(task.id, &IoBudget::default()).await.unwrap();
 
     let outcome = store.submit(&sub).await.unwrap();
@@ -319,7 +319,7 @@ async fn requeue_running_task() {
     let sub = make_submission("rq", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.status, TaskStatus::Running);
 
     store.requeue(task.id).await.unwrap();
@@ -335,7 +335,7 @@ async fn peek_next_does_not_modify_status() {
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
 
-    let peeked = store.peek_next().await.unwrap().unwrap();
+    let peeked = store.peek_next(None).await.unwrap().unwrap();
     assert_eq!(peeked.key, key);
     assert_eq!(peeked.status, TaskStatus::Pending);
 
@@ -343,14 +343,14 @@ async fn peek_next_does_not_modify_status() {
     assert_eq!(t.status, TaskStatus::Pending);
     assert!(t.started_at.is_none());
 
-    let peeked2 = store.peek_next().await.unwrap().unwrap();
+    let peeked2 = store.peek_next(None).await.unwrap().unwrap();
     assert_eq!(peeked2.id, peeked.id);
 }
 
 #[tokio::test]
 async fn peek_next_empty_queue() {
     let store = test_store().await;
-    assert!(store.peek_next().await.unwrap().is_none());
+    assert!(store.peek_next(None).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -372,7 +372,7 @@ async fn pop_by_id_returns_none_if_already_running() {
     let sub = make_submission("already-taken", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
 
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     assert!(store.pop_by_id(task.id).await.unwrap().is_none());
 }
@@ -390,12 +390,12 @@ async fn peek_then_pop_by_id_workflow() {
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
 
-    let peeked = store.peek_next().await.unwrap().unwrap();
+    let peeked = store.peek_next(None).await.unwrap().unwrap();
     let claimed = store.pop_by_id(peeked.id).await.unwrap().unwrap();
     assert_eq!(claimed.key, key);
     assert_eq!(claimed.status, TaskStatus::Running);
 
-    assert!(store.peek_next().await.unwrap().is_none());
+    assert!(store.peek_next(None).await.unwrap().is_none());
 }
 
 // ── Tag lifecycle tests ───────────────────────────────────────────
@@ -409,7 +409,7 @@ async fn tags_copied_to_history_on_complete() {
         .tag("owner", "alice");
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store.complete(task.id, &IoBudget::default()).await.unwrap();
 
     let mut hist = store.history_by_key(&sub.effective_key()).await.unwrap();
@@ -427,7 +427,7 @@ async fn tags_copied_to_history_on_fail() {
         .tag("region", "us-west");
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             task.id,
@@ -499,7 +499,7 @@ async fn tags_preserved_on_recurring_requeue() {
         .recurring(Duration::from_secs(3600));
 
     store.submit(&sub).await.unwrap();
-    let mut task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next(None).await.unwrap().unwrap();
     store
         .populate_tags(std::slice::from_mut(&mut task))
         .await
@@ -525,7 +525,7 @@ async fn tags_in_pop_next() {
         .tag("color", "blue");
 
     store.submit(&sub).await.unwrap();
-    let mut task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next(None).await.unwrap().unwrap();
     store
         .populate_tags(std::slice::from_mut(&mut task))
         .await
@@ -565,7 +565,7 @@ async fn max_retries_preserved_in_history_on_complete() {
         .max_retries(7);
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.max_retries, Some(7));
 
     store.complete(task.id, &IoBudget::default()).await.unwrap();
@@ -584,7 +584,7 @@ async fn max_retries_preserved_in_history_on_fail() {
         .max_retries(3);
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Permanent failure (non-retryable).
     store
@@ -612,7 +612,7 @@ async fn max_retries_null_reads_back_as_none() {
     // Submit without max_retries (NULL in DB).
     let sub = TaskSubmission::new("test").key("mr-null");
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.max_retries, None);
 
     // Complete it and verify history also has None.
@@ -633,7 +633,7 @@ async fn backoff_constant_sets_run_after() {
     let sub = make_submission("const-backoff", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     let strategy = BackoffStrategy::Constant {
         delay: Duration::from_secs(60),
@@ -683,7 +683,7 @@ async fn backoff_exponential_increases_across_retries() {
     };
 
     // First failure (retry_count=0): delay = 10s
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 0);
     store
         .fail(
@@ -715,7 +715,7 @@ async fn backoff_exponential_increases_across_retries() {
         .unwrap();
 
     // Second failure (retry_count=1): delay = 20s
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 1);
     store
         .fail(
@@ -749,7 +749,7 @@ async fn executor_retry_after_overrides_strategy() {
     let sub = make_submission("override-backoff", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Strategy says 10s, but executor override says 120s.
     let strategy = BackoffStrategy::Constant {
@@ -786,7 +786,7 @@ async fn no_backoff_requeues_immediately() {
     let sub = make_submission("no-backoff", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // No strategy, no executor override → immediate retry.
     store
@@ -820,7 +820,7 @@ async fn permanent_error_skips_retry_moves_to_history() {
     let sub = make_submission("permanent-err", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Even with a backoff strategy, non-retryable errors go straight to history.
     let strategy = BackoffStrategy::Constant {
@@ -861,7 +861,7 @@ async fn exhausted_retries_produce_dead_letter_status() {
     store.submit(&sub).await.unwrap();
 
     // First failure: retry_count=0, max_retries=1 → requeue.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 0);
     store
         .fail(
@@ -876,7 +876,7 @@ async fn exhausted_retries_produce_dead_letter_status() {
         .unwrap();
 
     // Second failure: retry_count=1, max_retries=1 → exhausted → dead_letter.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.retry_count, 1);
     store
         .fail(
@@ -907,7 +907,7 @@ async fn non_retryable_error_still_produces_failed_status() {
     let sub = make_submission("dl-permanent", Priority::NORMAL);
     let key = sub.effective_key();
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Non-retryable error with remaining retries → should be "failed", not "dead_letter".
     store
@@ -940,7 +940,7 @@ async fn dead_letter_tasks_query_returns_only_dead_lettered() {
     // Create a dead-lettered task (retryable, exhausted).
     let sub_dl = make_submission("dl-query-dl", Priority::NORMAL);
     store.submit(&sub_dl).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             task.id,
@@ -956,7 +956,7 @@ async fn dead_letter_tasks_query_returns_only_dead_lettered() {
     // Create a failed task (non-retryable).
     let sub_fail = make_submission("dl-query-fail", Priority::NORMAL);
     store.submit(&sub_fail).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store
         .fail(
             task.id,
@@ -972,7 +972,7 @@ async fn dead_letter_tasks_query_returns_only_dead_lettered() {
     // Create a completed task.
     let sub_ok = make_submission("dl-query-ok", Priority::NORMAL);
     store.submit(&sub_ok).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store.complete(task.id, &IoBudget::default()).await.unwrap();
 
     // dead_letter_tasks should return only the dead-lettered one.
@@ -1077,7 +1077,7 @@ async fn pause_tasks_in_group_adds_bit_to_already_paused() {
     let store = test_store().await;
     let sub = TaskSubmission::new("test").key("t1").group("g1");
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Preemption pause first.
     store
@@ -1115,7 +1115,7 @@ async fn resume_paused_by_group_clears_bit_but_stays_paused_with_other_reasons()
     let store = test_store().await;
     let sub = TaskSubmission::new("test").key("t1").group("g1");
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     // Preemption pause + group pause.
     store
@@ -1179,4 +1179,303 @@ async fn pending_and_paused_count_for_group() {
     // g2 unaffected.
     assert_eq!(store.pending_count_for_group("g2").await.unwrap(), 1);
     assert_eq!(store.paused_count_for_group("g2").await.unwrap(), 0);
+}
+
+// ── Priority Aging (Phase 1) ─────────────────────────────────────
+
+use crate::scheduler::aging::{AgingConfig, AgingParams};
+
+#[tokio::test]
+async fn peek_next_with_aging_promotes_old_task() {
+    let store = test_store().await;
+
+    // Submit an IDLE task with a very old created_at (via raw SQL).
+    let old_ms = chrono::Utc::now().timestamp_millis() - 600_000; // 10 min ago
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'old', 'old', ?, 'pending', ?)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // Submit a fresh NORMAL task.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'new', 'new', ?, 'pending', ?)",
+    )
+    .bind(Priority::NORMAL.value() as i32)
+    .bind(now_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // Without aging: NORMAL (128) pops before IDLE (255).
+    let peeked = store.peek_next(None).await.unwrap().unwrap();
+    assert_eq!(peeked.label, "new");
+
+    // With aging (grace=0, interval=1s, max=HIGH(64)): IDLE aged to 64 < NORMAL(128).
+    let config = AgingConfig {
+        grace_period: Duration::from_secs(0),
+        aging_interval: Duration::from_secs(1),
+        max_effective_priority: Priority::HIGH,
+        urgent_threshold: None,
+    };
+    let aging = AgingParams::from_config(&config);
+    let peeked = store.peek_next(Some(&aging)).await.unwrap().unwrap();
+    assert_eq!(peeked.label, "old");
+}
+
+#[tokio::test]
+async fn pop_next_with_aging_selects_aged() {
+    let store = test_store().await;
+
+    let old_ms = chrono::Utc::now().timestamp_millis() - 600_000;
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'old', 'old', ?, 'pending', ?)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'new', 'new', ?, 'pending', ?)",
+    )
+    .bind(Priority::NORMAL.value() as i32)
+    .bind(now_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let config = AgingConfig {
+        grace_period: Duration::from_secs(0),
+        aging_interval: Duration::from_secs(1),
+        max_effective_priority: Priority::HIGH,
+        urgent_threshold: None,
+    };
+    let aging = AgingParams::from_config(&config);
+    let popped = store.pop_next(Some(&aging)).await.unwrap().unwrap();
+    assert_eq!(popped.label, "old");
+    assert_eq!(popped.status, TaskStatus::Running);
+}
+
+#[tokio::test]
+async fn pop_next_batch_respects_aging_order() {
+    let store = test_store().await;
+
+    let old_ms = chrono::Utc::now().timestamp_millis() - 600_000;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'old', 'old', ?, 'pending', ?)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'new', 'new', ?, 'pending', ?)",
+    )
+    .bind(Priority::NORMAL.value() as i32)
+    .bind(now_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let config = AgingConfig {
+        grace_period: Duration::from_secs(0),
+        aging_interval: Duration::from_secs(1),
+        max_effective_priority: Priority::HIGH,
+        urgent_threshold: None,
+    };
+    let aging = AgingParams::from_config(&config);
+    // Batch pop selects both; verify both are claimed.
+    let batch = store.pop_next_batch(10, Some(&aging)).await.unwrap();
+    assert_eq!(batch.len(), 2);
+    let labels: Vec<&str> = batch.iter().map(|t| t.label.as_str()).collect();
+    assert!(labels.contains(&"old"));
+    assert!(labels.contains(&"new"));
+}
+
+#[tokio::test]
+async fn aging_disabled_preserves_original_order() {
+    let store = test_store().await;
+
+    let old_ms = chrono::Utc::now().timestamp_millis() - 600_000;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'old', 'old', ?, 'pending', ?)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at) VALUES ('test', 'new', 'new', ?, 'pending', ?)",
+    )
+    .bind(Priority::NORMAL.value() as i32)
+    .bind(now_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // Without aging, NORMAL (128) peeks before IDLE (255).
+    let peeked = store.peek_next(None).await.unwrap().unwrap();
+    assert_eq!(peeked.label, "new");
+}
+
+#[tokio::test]
+async fn pause_duration_freezes_aging_clock() {
+    let store = test_store().await;
+
+    let config = AgingConfig {
+        grace_period: Duration::from_secs(0),
+        aging_interval: Duration::from_secs(60),
+        max_effective_priority: Priority::HIGH,
+        urgent_threshold: None,
+    };
+
+    // Two tasks created 600s ago. One has 500s of pause_duration (effective age = 100s),
+    // the other has 0s (effective age = 600s). The unpaused one should age more.
+    let old_ms = chrono::Utc::now().timestamp_millis() - 600_000;
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at, pause_duration_ms)
+         VALUES ('test', 'paused', 'paused', ?, 'pending', ?, 500000)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO tasks (task_type, key, label, priority, status, created_at, pause_duration_ms)
+         VALUES ('test', 'unpaused', 'unpaused', ?, 'pending', ?, 0)",
+    )
+    .bind(Priority::IDLE.value() as i32)
+    .bind(old_ms)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // The unpaused one aged more (10 promotions) vs paused (1 promotion),
+    // so it has lower effective priority value → higher priority → dispatched first.
+    let aging = AgingParams::from_config(&config);
+    let popped = store.pop_next(Some(&aging)).await.unwrap().unwrap();
+    assert_eq!(popped.label, "unpaused");
+}
+
+#[tokio::test]
+async fn pause_sets_paused_at_ms() {
+    let store = test_store().await;
+    store
+        .submit(&make_submission("t1", Priority::NORMAL))
+        .await
+        .unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
+
+    // Initially no paused_at_ms.
+    assert!(task.paused_at_ms.is_none());
+
+    // Pause sets it.
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert!(t.paused_at_ms.is_some());
+
+    // Adding another pause reason doesn't overwrite it.
+    let original = t.paused_at_ms.unwrap();
+    store.pause(task.id, PauseReasons::GROUP).await.unwrap();
+    let t2 = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert_eq!(t2.paused_at_ms.unwrap(), original);
+}
+
+#[tokio::test]
+async fn resume_accumulates_pause_duration() {
+    let store = test_store().await;
+    store
+        .submit(&make_submission("t1", Priority::NORMAL))
+        .await
+        .unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
+
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.resume(task.id).await.unwrap();
+
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert!(
+        t.pause_duration_ms >= 40,
+        "pause_duration_ms={}",
+        t.pause_duration_ms
+    );
+    assert!(t.paused_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn bulk_pause_resume_group_accumulates() {
+    let store = test_store().await;
+    let sub = TaskSubmission::new("test").key("t1").group("g1");
+    store.submit(&sub).await.unwrap();
+
+    store.pause_group_state("g1", None).await.unwrap();
+    store.pause_tasks_in_group("g1").await.unwrap();
+
+    // Verify paused_at_ms is set.
+    let t = store.task_by_id(1).await.unwrap().unwrap();
+    assert!(t.paused_at_ms.is_some());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.resume_paused_by_group("g1").await.unwrap();
+
+    let t = store.task_by_id(1).await.unwrap().unwrap();
+    assert!(
+        t.pause_duration_ms >= 40,
+        "pause_duration_ms={}",
+        t.pause_duration_ms
+    );
+    assert!(t.paused_at_ms.is_none());
+}
+
+#[tokio::test]
+async fn crash_recovery_accumulates_stale_pause() {
+    let store = test_store().await;
+    store
+        .submit(&make_submission("t1", Priority::NORMAL))
+        .await
+        .unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
+
+    store
+        .pause(task.id, PauseReasons::PREEMPTION)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Simulate crash recovery.
+    store.recover_running().await.unwrap();
+
+    // paused_at_ms should be cleared and pause_duration_ms accumulated.
+    let t = store.task_by_id(task.id).await.unwrap().unwrap();
+    assert!(t.paused_at_ms.is_none());
+    assert!(
+        t.pause_duration_ms >= 40,
+        "pause_duration_ms={}",
+        t.pause_duration_ms
+    );
 }

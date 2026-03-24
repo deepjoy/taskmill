@@ -282,6 +282,12 @@ pub struct TaskRecord {
     pub memo: Option<Vec<u8>>,
     /// Bitmask of active pause reasons. 0 when the task is not paused.
     pub pause_reasons: PauseReasons,
+    /// Accumulated milliseconds spent in `paused` state. Excluded from
+    /// the aging formula to freeze the aging clock while paused.
+    pub pause_duration_ms: i64,
+    /// Epoch-ms timestamp of the most recent pause transition. `None`
+    /// when the task is not paused.
+    pub paused_at_ms: Option<i64>,
 }
 
 impl TaskRecord {
@@ -302,8 +308,39 @@ impl TaskRecord {
         }
     }
 
+    /// Compute effective priority with aging applied.
+    ///
+    /// Returns `self.priority` when `config` is `None` (aging disabled)
+    /// or the task hasn't aged past the grace period.
+    pub fn effective_priority(
+        &self,
+        config: Option<&crate::scheduler::aging::AgingConfig>,
+    ) -> crate::priority::Priority {
+        let Some(config) = config else {
+            return self.priority;
+        };
+        crate::scheduler::aging::effective_priority(
+            self.priority,
+            self.created_at.timestamp_millis(),
+            self.pause_duration_ms,
+            config,
+        )
+    }
+
     /// Build a [`TaskEventHeader`](crate::scheduler::event::TaskEventHeader) from this record.
+    ///
+    /// When `aging_config` is provided, the header's `effective_priority` reflects
+    /// the aging computation. Otherwise, `effective_priority == base_priority`.
     pub fn event_header(&self) -> crate::scheduler::event::TaskEventHeader {
+        self.event_header_with_aging(None)
+    }
+
+    /// Build a [`TaskEventHeader`](crate::scheduler::event::TaskEventHeader) with aging-aware effective priority.
+    pub fn event_header_with_aging(
+        &self,
+        aging_config: Option<&crate::scheduler::aging::AgingConfig>,
+    ) -> crate::scheduler::event::TaskEventHeader {
+        let effective = self.effective_priority(aging_config);
         crate::scheduler::event::TaskEventHeader {
             task_id: self.id,
             module: self
@@ -315,6 +352,8 @@ impl TaskRecord {
             key: self.key.clone(),
             label: self.label.clone(),
             tags: self.tags.clone(),
+            base_priority: self.priority,
+            effective_priority: effective,
         }
     }
 }

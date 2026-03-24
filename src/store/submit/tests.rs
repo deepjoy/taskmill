@@ -25,7 +25,7 @@ async fn submit_and_pop() {
     let outcome = store.submit(&sub).await.unwrap();
     assert!(outcome.is_inserted());
 
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.key, expected_key);
     assert_eq!(task.status, TaskStatus::Running);
     assert!(task.started_at.is_some());
@@ -73,7 +73,7 @@ async fn dedup_requeues_when_running() {
 
     let sub = make_submission("running-task", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     let sub_high = make_submission("running-task", Priority::HIGH);
     let outcome = store.submit(&sub_high).await.unwrap();
@@ -92,7 +92,7 @@ async fn dedup_requeues_when_running() {
     assert!(!requeued.requeue);
     assert_eq!(requeued.requeue_priority, None);
 
-    let popped = store.pop_next().await.unwrap().unwrap();
+    let popped = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(popped.id, task.id);
 }
 
@@ -102,7 +102,7 @@ async fn dedup_requeue_already_requeued_same_priority() {
 
     let sub = make_submission("rq-dup", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
-    store.pop_next().await.unwrap();
+    store.pop_next(None).await.unwrap();
 
     let sub_high = make_submission("rq-dup", Priority::HIGH);
     let outcome = store.submit(&sub_high).await.unwrap();
@@ -118,7 +118,7 @@ async fn dedup_requeue_upgrades_priority() {
 
     let sub = make_submission("rq-upgrade", Priority::BACKGROUND);
     store.submit(&sub).await.unwrap();
-    store.pop_next().await.unwrap();
+    store.pop_next(None).await.unwrap();
 
     let sub_normal = make_submission("rq-upgrade", Priority::NORMAL);
     let outcome = store.submit(&sub_normal).await.unwrap();
@@ -139,7 +139,7 @@ async fn permanent_failure_drops_requeue() {
 
     let sub = make_submission("fail-rq", Priority::NORMAL);
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
 
     let sub_high = make_submission("fail-rq", Priority::HIGH);
     store.submit(&sub_high).await.unwrap();

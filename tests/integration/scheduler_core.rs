@@ -657,7 +657,7 @@ async fn running_tasks_reset_to_pending_on_restart() {
     let store = TaskStore::open(&db_path).await.unwrap();
     let sub = TaskSubmission::new("test").key("crash-recovery");
     store.submit(&sub).await.unwrap();
-    store.pop_next().await.unwrap(); // now "running"
+    store.pop_next(None).await.unwrap(); // now "running"
 
     let running = store.running_count().await.unwrap();
     assert_eq!(running, 1, "task should be running");
@@ -774,9 +774,9 @@ async fn delayed_task_not_dispatched_before_run_after() {
     store.submit(&sub).await.unwrap();
 
     // peek_next should return None because run_after is in the future.
-    assert!(store.peek_next().await.unwrap().is_none());
+    assert!(store.peek_next(None).await.unwrap().is_none());
     // pop_next should also return None.
-    assert!(store.pop_next().await.unwrap().is_none());
+    assert!(store.pop_next(None).await.unwrap().is_none());
 
     // But the task is still pending.
     assert_eq!(store.pending_count().await.unwrap(), 1);
@@ -793,7 +793,7 @@ async fn delayed_task_dispatched_after_run_after() {
     store.submit(&sub).await.unwrap();
 
     // Should be immediately dispatchable since run_after is in the past.
-    let task = store.peek_next().await.unwrap();
+    let task = store.peek_next(None).await.unwrap();
     assert!(task.is_some());
     assert!(task.unwrap().run_after.is_some());
 }
@@ -810,7 +810,7 @@ async fn recurring_task_creates_next_instance_on_completion() {
     let dedup_key = sub.effective_key();
 
     // Pop and complete.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert_eq!(task.recurring_interval_secs, Some(60));
     assert_eq!(task.recurring_execution_count, 0);
 
@@ -845,7 +845,7 @@ async fn recurring_task_respects_max_executions() {
     let dedup_key = sub.effective_key();
 
     // First execution.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(task.id, &taskmill::IoBudget::default())
         .await
@@ -858,7 +858,7 @@ async fn recurring_task_respects_max_executions() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Second execution.
-    let task2 = store.pop_next().await.unwrap().unwrap();
+    let task2 = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(task2.id, &taskmill::IoBudget::default())
         .await
@@ -881,7 +881,7 @@ async fn recurring_pile_up_prevention() {
     let dedup_key = sub.effective_key();
 
     // Pop, complete → next instance created.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     store
         .complete(task.id, &taskmill::IoBudget::default())
         .await
@@ -913,7 +913,7 @@ async fn pause_and_resume_recurring_schedule() {
     store.pause_recurring(id).await.unwrap();
 
     // Pop and complete — should NOT create next instance.
-    let task = store.pop_next().await.unwrap().unwrap();
+    let task = store.pop_next(None).await.unwrap().unwrap();
     assert!(task.recurring_paused);
     store
         .complete(task.id, &taskmill::IoBudget::default())

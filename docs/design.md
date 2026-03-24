@@ -28,12 +28,15 @@ taskmill/src/
     mod.rs               — Scheduler, SchedulerBuilder, public API
     run_loop.rs          — main event loop, dispatch cycle
     submit.rs            — submit, submit_batch, cancellation
-    control.rs           — pause/resume, concurrency limits
+    control.rs           — pause/resume, concurrency limits, group weights
     queries.rs           — snapshot, active tasks, progress
     gate.rs              — DispatchGate, IO budget check
     dispatch.rs          — ActiveTaskMap, spawn_task, preemption
     progress.rs          — ProgressReporter, throughput extrapolation
     event.rs             — SchedulerEvent, SchedulerSnapshot
+    aging.rs             — AgingConfig, AgingParams, effective_priority()
+    fair.rs              — GroupWeights, SlotAllocation, compute_allocation()
+    rate_limit.rs        — RateLimit, token-bucket rate limiting
   resource/
     mod.rs               — ResourceSampler + ResourceReader traits
     sampler.rs           — EWMA-smoothed background loop
@@ -183,9 +186,15 @@ Each cycle, the loop:
 
 1. Checks if the scheduler is globally paused.
 2. Sweeps expired tasks (if the expiry sweep interval has elapsed).
-3. Resumes paused tasks if no active preemptors remain.
-4. While `active_count < max_concurrency`: peek the next candidate, check for TTL expiry, check the dispatch gate, pop-by-id if admitted, spawn the executor.
-5. Sleep until the next signal.
+3. Auto-resumes timed group pauses that have reached their deadline.
+4. Resumes paused tasks if no active preemptors remain.
+5. Dispatches pending tasks using one of three paths:
+   - **Fair dispatch** (when group weights are configured) — three-pass loop: fair per-group allocation, greedy fill, urgent threshold override.
+   - **Fast dispatch** (when no groups, no monitoring, no pressure, no rate limits, no weights) — batch `pop_next` in priority order with no gate checks.
+   - **Slow dispatch** (otherwise) — peek the next candidate, check for TTL expiry, check the dispatch gate, pop-by-id if admitted, spawn the executor.
+6. Sleep until the next signal.
+
+When [priority aging](priorities-and-preemption.md#priority-aging) is enabled, `AgingParams` are computed once per dispatch cycle and passed to peek/pop queries. The SQL ORDER BY uses a computed expression for effective priority instead of the stored priority column.
 
 ## Retry flow
 
