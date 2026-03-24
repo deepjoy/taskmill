@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774361960264,
+  "lastUpdate": 1774362983175,
   "repoUrl": "https://github.com/deepjoy/taskmill",
   "entries": {
     "Benchmark": [
@@ -10253,6 +10253,396 @@ window.BENCHMARK_DATA = {
             "name": "tag_values/5000",
             "value": 459783,
             "range": "± 4947",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "code@deepjoy.com",
+            "name": "DJ Majumdar",
+            "username": "deepjoy"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "88dd2aa097d400af719c33d840382d89ba30eea9",
+          "message": "docs: add migration guide for 0.7.0 (#85)\n\n## Summary\n- Adds `docs/migrating-to-0.7.md` covering all breaking changes and new\nfeatures since 0.6 (15 commits from `d903234..HEAD`)\n- Documents 5 breaking changes: database recreation (timestamp\nnormalization + migration consolidation), typed Memo on `TypedExecutor`,\n`SubmitOutcome::Inserted` struct variant, `DispatchGate::admit()`\nreturning `Admission` enum, and tag query method renames\n- Documents 6 new features: group pause/resume, token-bucket rate\nlimiting, priority aging, weighted fair scheduling, `fail_fast()`\nbuilder method, and tag key prefix queries\n- Includes before/after Rust code examples and import guidance, matching\nexisting migration doc style",
+          "timestamp": "2026-03-24T14:11:08Z",
+          "tree_id": "c04f3b6c666f5818a23480bc4509b6228b8ee40d",
+          "url": "https://github.com/deepjoy/taskmill/commit/88dd2aa097d400af719c33d840382d89ba30eea9"
+        },
+        "date": 1774362982485,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "dep_chain_submit/10",
+            "value": 2996443,
+            "range": "± 106484",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/50",
+            "value": 16299341,
+            "range": "± 646925",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_submit/200",
+            "value": 74990741,
+            "range": "± 4127266",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/10",
+            "value": 10775726,
+            "range": "± 139930",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/25",
+            "value": 26177083,
+            "range": "± 369228",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_chain_dispatch/50",
+            "value": 52748727,
+            "range": "± 724978",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/10",
+            "value": 5855652,
+            "range": "± 81610",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/50",
+            "value": 21264970,
+            "range": "± 245895",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dep_fan_in_dispatch/100",
+            "value": 40405794,
+            "range": "± 884016",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_no_groups/500",
+            "value": 178402661,
+            "range": "± 4436413",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_one_group/500",
+            "value": 409237878,
+            "range": "± 17428081",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/1",
+            "value": 410967123,
+            "range": "± 5741915",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/10",
+            "value": 412420460,
+            "range": "± 6347128",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/50",
+            "value": 412229133,
+            "range": "± 7116491",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_group_scaling/100",
+            "value": 414414569,
+            "range": "± 5783592",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/100",
+            "value": 420058,
+            "range": "± 21360",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/1000",
+            "value": 420385,
+            "range": "± 17019",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_query/5000",
+            "value": 423719,
+            "range": "± 26793",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/100",
+            "value": 125765,
+            "range": "± 864",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/1000",
+            "value": 190021,
+            "range": "± 901",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_stats/5000",
+            "value": 477663,
+            "range": "± 3262",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/100",
+            "value": 220241,
+            "range": "± 6442",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/1000",
+            "value": 796504,
+            "range": "± 44943",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "history_by_type/5000",
+            "value": 799534,
+            "range": "± 55972",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/constant",
+            "value": 44,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/linear",
+            "value": 75,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential",
+            "value": 190,
+            "range": "± 0",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "backoff_delay/exponential_jitter",
+            "value": 449,
+            "range": "± 1",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_permanent_failure/500",
+            "value": 345917170,
+            "range": "± 3846552",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/constant",
+            "value": 106500305,
+            "range": "± 1237868",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/linear",
+            "value": 106021839,
+            "range": "± 1155961",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential",
+            "value": 104886559,
+            "range": "± 1147002",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "retryable_dead_letter/exponential_jitter",
+            "value": 105720788,
+            "range": "± 792761",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_tasks/1000",
+            "value": 177820552,
+            "range": "± 5016736",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_dedup_hit/1000",
+            "value": 206806280,
+            "range": "± 5501078",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "dispatch_and_complete/1000",
+            "value": 357682688,
+            "range": "± 6014056",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/100",
+            "value": 121155,
+            "range": "± 3007",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/1000",
+            "value": 118020,
+            "range": "± 2937",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "peek_next/5000",
+            "value": 121771,
+            "range": "± 3362",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/1",
+            "value": 366720229,
+            "range": "± 3864539",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/2",
+            "value": 272218306,
+            "range": "± 3855248",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/4",
+            "value": 228201954,
+            "range": "± 7566091",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "concurrency_scaling/8",
+            "value": 177945561,
+            "range": "± 3611909",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "batch_submit/1000",
+            "value": 33697943,
+            "range": "± 2060362",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "mixed_priority_dispatch/500",
+            "value": 224940248,
+            "range": "± 7140988",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/noop_500",
+            "value": 176666518,
+            "range": "± 3163807",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress/byte_reporting_500",
+            "value": 190004100,
+            "range": "± 3411555",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "byte_progress_snapshot/100_tasks",
+            "value": 80569778,
+            "range": "± 2267935",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/0",
+            "value": 89092018,
+            "range": "± 2649644",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/5",
+            "value": 161327809,
+            "range": "± 6592636",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/10",
+            "value": 235731717,
+            "range": "± 9506364",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "submit_with_tags/20",
+            "value": 383071238,
+            "range": "± 15258602",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/100",
+            "value": 185273,
+            "range": "± 2029",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/1000",
+            "value": 812492,
+            "range": "± 10040",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "query_ids_by_tags/5000",
+            "value": 3657405,
+            "range": "± 26044",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/100",
+            "value": 127750,
+            "range": "± 2692",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/1000",
+            "value": 215511,
+            "range": "± 3090",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "count_by_tags/5000",
+            "value": 599177,
+            "range": "± 5027",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/100",
+            "value": 132360,
+            "range": "± 3538",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/1000",
+            "value": 192981,
+            "range": "± 3087",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "tag_values/5000",
+            "value": 455213,
+            "range": "± 5023",
             "unit": "ns/iter"
           }
         ]
