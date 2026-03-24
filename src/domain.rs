@@ -640,13 +640,13 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.cancel_where(predicate).await
     }
 
-    /// Find domain tasks matching all specified tag filters (AND semantics).
-    pub async fn tasks_by_tags(
+    /// Return IDs of domain tasks matching all specified tag filters (AND semantics).
+    pub async fn task_ids_by_tags(
         &self,
         filters: &[(&str, &str)],
         status: Option<TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
-        self.inner.tasks_by_tags(filters, status).await
+    ) -> Result<Vec<i64>, StoreError> {
+        self.inner.task_ids_by_tags(filters, status).await
     }
 
     /// Discover tag keys matching a prefix within this domain.
@@ -654,13 +654,13 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.tag_keys_by_prefix(prefix).await
     }
 
-    /// Find domain tasks with any tag key matching the given prefix.
-    pub async fn tasks_by_tag_key_prefix(
+    /// Return IDs of domain tasks with any tag key matching the given prefix.
+    pub async fn task_ids_by_tag_key_prefix(
         &self,
         prefix: &str,
         status: Option<TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
-        self.inner.tasks_by_tag_key_prefix(prefix, status).await
+    ) -> Result<Vec<i64>, StoreError> {
+        self.inner.task_ids_by_tag_key_prefix(prefix, status).await
     }
 
     /// Count domain tasks with any tag key matching the given prefix.

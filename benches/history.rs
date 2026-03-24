@@ -5,70 +5,33 @@
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde::{Deserialize, Serialize};
-use taskmill::{
-    Domain, DomainKey, DomainTaskContext, Scheduler, SchedulerEvent, TaskError, TaskStore,
-    TaskSubmission, TypedExecutor, TypedTask,
-};
+use taskmill::{IoBudget, TaskStore, TaskSubmission};
 use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
 
-struct BenchDomain;
-impl DomainKey for BenchDomain {
-    const NAME: &'static str = "bench";
-}
+/// Task types used to create a realistic multi-type history table.
+const TASK_TYPES: &[&str] = &[
+    "media::thumbnail",
+    "media::transcode",
+    "billing::charge",
+    "billing::refund",
+    "email::send",
+];
 
-#[derive(Serialize, Deserialize)]
-struct BenchTask;
-impl TypedTask for BenchTask {
-    type Domain = BenchDomain;
-    const TASK_TYPE: &'static str = "test";
-}
-
-struct NoopExecutor;
-
-impl TypedExecutor<BenchTask> for NoopExecutor {
-    async fn execute<'a>(
-        &'a self,
-        _payload: BenchTask,
-        _ctx: DomainTaskContext<'a, BenchDomain>,
-    ) -> Result<(), TaskError> {
-        Ok(())
-    }
-}
-
-/// Build a scheduler and run `n` noop tasks to completion, populating history.
-async fn build_scheduler_with_history(n: usize) -> Scheduler {
-    let sched = Scheduler::builder()
-        .store(TaskStore::open_memory().await.unwrap())
-        .domain(Domain::<BenchDomain>::new().task::<BenchTask>(NoopExecutor))
-        .max_concurrency(32)
-        .poll_interval(Duration::from_millis(10))
-        .build()
-        .await
-        .unwrap();
-
+/// Populate history directly via store (no scheduler overhead).
+/// Distributes tasks across multiple types for realistic selectivity.
+async fn store_with_history(n: usize) -> TaskStore {
+    let store = TaskStore::open_memory().await.unwrap();
+    let budget = IoBudget::default();
     for i in 0..n {
-        sched
-            .submit(&TaskSubmission::new("bench::test").key(format!("h-{i}")))
+        let task_type = TASK_TYPES[i % TASK_TYPES.len()];
+        store
+            .submit(&TaskSubmission::new(task_type).key(format!("h-{i}")))
             .await
             .unwrap();
+        let task = store.pop_next().await.unwrap().unwrap();
+        store.complete(task.id, &budget).await.unwrap();
     }
-
-    let mut rx = sched.subscribe();
-    let token = CancellationToken::new();
-    let sched_clone = sched.clone();
-    let token_clone = token.clone();
-    tokio::spawn(async move { sched_clone.run(token_clone).await });
-
-    let mut completed = 0;
-    while completed < n {
-        if let Ok(SchedulerEvent::Completed { .. }) = rx.recv().await {
-            completed += 1;
-        }
-    }
-
-    sched
+    store
 }
 
 // ── Benchmarks ──────────────────────────────────────────────────────
@@ -82,8 +45,7 @@ fn bench_history_query(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
-        let sched = rt.block_on(build_scheduler_with_history(history_size));
-        let store = sched.store().clone();
+        let store = rt.block_on(store_with_history(history_size));
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
@@ -107,6 +69,7 @@ fn bench_history_query(c: &mut Criterion) {
 }
 
 /// Aggregate stats query (`COUNT`, `AVG` duration and IO) at varying history sizes.
+/// History contains 5 task types; the query filters to one (20% selectivity).
 fn bench_history_stats(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_stats");
@@ -115,8 +78,7 @@ fn bench_history_stats(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
-        let sched = rt.block_on(build_scheduler_with_history(history_size));
-        let store = sched.store().clone();
+        let store = rt.block_on(store_with_history(history_size));
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
@@ -127,7 +89,7 @@ fn bench_history_stats(c: &mut Criterion) {
                     async move {
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let _ = store.history_stats("bench::test").await.unwrap();
+                            let _ = store.history_stats("media::thumbnail").await.unwrap();
                         }
                         start.elapsed()
                     }
@@ -140,6 +102,7 @@ fn bench_history_stats(c: &mut Criterion) {
 }
 
 /// Filter-by-type history query at varying history sizes.
+/// History contains 5 task types; the query filters to one (20% selectivity).
 fn bench_history_by_type(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("history_by_type");
@@ -148,8 +111,7 @@ fn bench_history_by_type(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for history_size in [100usize, 1000, 5000] {
-        let sched = rt.block_on(build_scheduler_with_history(history_size));
-        let store = sched.store().clone();
+        let store = rt.block_on(store_with_history(history_size));
         group.bench_with_input(
             BenchmarkId::from_parameter(history_size),
             &history_size,
@@ -160,7 +122,10 @@ fn bench_history_by_type(c: &mut Criterion) {
                     async move {
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let _ = store.history_by_type("bench::test", 100).await.unwrap();
+                            let _ = store
+                                .history_by_type("media::thumbnail", 100)
+                                .await
+                                .unwrap();
                         }
                         start.elapsed()
                     }

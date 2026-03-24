@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::store::StoreError;
 use crate::task::IoBudget;
 
-use super::SchedulerEvent;
+use super::{emit_event, SchedulerEvent};
 
 use super::gate::GateContext;
 use super::spawn::{self, SpawnContext};
@@ -32,6 +32,8 @@ impl Scheduler {
             module_registry: Arc::clone(&self.inner.module_registry),
             completion_tx: self.inner.completion_tx.clone(),
             completion_rx: self.inner.completion_rx.clone(),
+            failure_tx: self.inner.failure_tx.clone(),
+            failure_rx: self.inner.failure_rx.clone(),
         }
     }
 
@@ -51,16 +53,24 @@ impl Scheduler {
         // instead of peek_next() + gate.admit() + claim_task() (2 SQL).
         // pop_next() skips expired tasks via its WHERE clause.
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
-            let Some(task) = self.inner.store.pop_next().await? else {
+            let Some(mut task) = self.inner.store.pop_next().await? else {
                 return Ok(false);
             };
+            self.inner
+                .store
+                .populate_tags(std::slice::from_mut(&mut task))
+                .await?;
             return self.spawn_dispatched_task(task).await;
         }
 
         // Slow path: peek → gate check → claim.
-        let Some(candidate) = self.inner.store.peek_next().await? else {
+        let Some(mut candidate) = self.inner.store.peek_next().await? else {
             return Ok(false);
         };
+        self.inner
+            .store
+            .populate_tags(std::slice::from_mut(&mut candidate))
+            .await?;
 
         // Dispatch-time expiry check: if the candidate has expired, expire
         // it and retry (return Ok(true) to loop again).
@@ -70,10 +80,13 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
-                        header: task.event_header(),
-                        age,
-                    });
+                    emit_event(
+                        &self.inner.event_tx,
+                        SchedulerEvent::TaskExpired {
+                            header: task.event_header(),
+                            age,
+                        },
+                    );
                 }
                 return Ok(true);
             }
@@ -219,10 +232,12 @@ impl Scheduler {
                     break;
                 }
                 let available = max - active_count;
-                let tasks = self.inner.store.pop_next_batch(available).await?;
+                let mut tasks = self.inner.store.pop_next_batch(available).await?;
                 if tasks.is_empty() {
                     break;
                 }
+                // Populate tags in one batch query (lazy — not done at pop time).
+                self.inner.store.populate_tags(&mut tasks).await?;
                 for task in tasks {
                     self.spawn_dispatched_task(task).await?;
                 }
@@ -327,10 +342,13 @@ impl Scheduler {
                     let age = (chrono::Utc::now() - task.created_at)
                         .to_std()
                         .unwrap_or_default();
-                    let _ = self.inner.event_tx.send(SchedulerEvent::TaskExpired {
-                        header: task.event_header(),
-                        age,
-                    });
+                    emit_event(
+                        &self.inner.event_tx,
+                        SchedulerEvent::TaskExpired {
+                            header: task.event_header(),
+                            age,
+                        },
+                    );
                 }
                 if !expired.is_empty() {
                     tracing::info!(count = expired.len(), "expired stale tasks");
@@ -369,16 +387,57 @@ impl Scheduler {
         .await;
     }
 
+    /// Drain the submit coalescing channel and process any stranded messages.
+    ///
+    /// Most submits are handled inline by the submitter (leader election in
+    /// `TaskStore::submit`). This is a safety-net drain for messages that
+    /// arrived after the last leader finished processing.
+    async fn drain_submits(&self) {
+        let mut batch = Vec::new();
+        {
+            let mut rx = self.inner.store.submit_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = batch.len(), "draining submit batch");
+        self.inner.store.process_submit_batch(batch).await;
+    }
+
+    /// Drain the failure channel and process all queued terminal failures
+    /// in a single batched transaction.
+    async fn drain_failures(&self) {
+        let mut batch = Vec::new();
+        {
+            let mut rx = self.inner.failure_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                batch.push(msg);
+            }
+        }
+
+        if batch.is_empty() {
+            return;
+        }
+
+        tracing::debug!(count = batch.len(), "draining failure batch");
+        spawn::process_failure_batch(&batch, &self.inner.store, &self.inner.event_tx).await;
+    }
+
     /// Resume paused tasks, dispatch finalizers, and dispatch pending work.
     async fn poll_and_dispatch(&self) {
         if self.is_paused() {
             return;
         }
 
-        // Drain queued completions before dispatching new work.
-        // This ensures completed tasks are processed first, freeing
-        // dependency edges and unblocking downstream tasks.
+        // Drain queued submits, completions, and failures before dispatching.
+        self.drain_submits().await;
         self.drain_completions().await;
+        self.drain_failures().await;
 
         // Run expiry sweep before dispatching.
         self.maybe_expire_tasks().await;
@@ -459,8 +518,10 @@ impl Scheduler {
             }
         }
 
-        // Drain any remaining completions before closing the store.
+        // Drain any remaining submits, completions, and failures before closing.
+        self.drain_submits().await;
         self.drain_completions().await;
+        self.drain_failures().await;
 
         // Flush WAL and close the database.
         self.inner.store.close().await;

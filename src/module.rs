@@ -711,16 +711,16 @@ impl ModuleHandle {
             .await
     }
 
-    /// Find module tasks matching all specified tag filters (AND semantics).
-    pub async fn tasks_by_tags(
+    /// Return IDs of module tasks matching all specified tag filters (AND semantics).
+    pub async fn task_ids_by_tags(
         &self,
         filters: &[(&str, &str)],
         status: Option<TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         self.scheduler
             .inner
             .store
-            .tasks_by_tags_with_prefix(&self.prefix, filters, status)
+            .task_ids_by_tags_with_prefix(&self.prefix, filters, status)
             .await
     }
 
@@ -733,16 +733,16 @@ impl ModuleHandle {
             .await
     }
 
-    /// Find module tasks with any tag key matching the given prefix.
-    pub async fn tasks_by_tag_key_prefix(
+    /// Return IDs of module tasks with any tag key matching the given prefix.
+    pub async fn task_ids_by_tag_key_prefix(
         &self,
         prefix: &str,
         status: Option<TaskStatus>,
-    ) -> Result<Vec<TaskRecord>, StoreError> {
+    ) -> Result<Vec<i64>, StoreError> {
         self.scheduler
             .inner
             .store
-            .tasks_by_tag_key_prefix_with_prefix(&self.prefix, prefix, status)
+            .task_ids_by_tag_key_prefix_with_prefix(&self.prefix, prefix, status)
             .await
     }
 
@@ -761,16 +761,16 @@ impl ModuleHandle {
 
     /// Cancel module tasks with any tag key matching the given prefix.
     pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
-        let tasks = self
+        let ids = self
             .scheduler
             .inner
             .store
-            .tasks_by_tag_key_prefix_with_prefix(&self.prefix, prefix, None)
+            .task_ids_by_tag_key_prefix_with_prefix(&self.prefix, prefix, None)
             .await?;
         let mut cancelled = Vec::new();
-        for task in &tasks {
-            if self.scheduler.cancel(task.id).await? {
-                cancelled.push(task.id);
+        for id in ids {
+            if self.scheduler.cancel(id).await? {
+                cancelled.push(id);
             }
         }
         Ok(cancelled)

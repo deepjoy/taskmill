@@ -76,7 +76,7 @@ let scheduler = Scheduler::builder()
 
 State registered on `SchedulerBuilder::app_state()` is **global** — visible to executors in every domain. State registered on `Domain::state()` is **domain-scoped** — visible only to executors in that domain.
 
-`TaskContext::state::<T>()` checks domain-scoped state first, then falls back to global state.
+`DomainTaskContext::state::<T>()` checks domain-scoped state first, then falls back to global state.
 
 | What | Where to register | Why |
 |------|-------------------|-----|
@@ -158,7 +158,7 @@ Executors can submit to other domains via `ctx.domain::<D>()`:
 
 ```rust
 impl TypedExecutor<FetchTask> for FetchExecutor {
-    async fn execute(&self, task: FetchTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: FetchTask, ctx: DomainTaskContext<'_, Ingest>) -> Result<(), TaskError> {
         let data = fetch_remote(&task).await?;
 
         // Submit a follow-up in a different domain.
@@ -285,8 +285,8 @@ let keys = billing.tag_keys_by_prefix("billing.").await?;
 // Count how many billing tasks are active
 let count = billing.count_by_tag_key_prefix("billing.", None).await?;
 
-// Fetch those tasks (optionally filter by status)
-let tasks = billing.tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Pending)).await?;
+// Fetch IDs of matching tasks (optionally filter by status)
+let task_ids = billing.task_ids_by_tag_key_prefix("billing.", Some(TaskStatus::Pending)).await?;
 
 // Cancel all tasks in the billing namespace
 let cancelled = billing.cancel_by_tag_key_prefix("billing.").await?;

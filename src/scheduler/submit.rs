@@ -13,7 +13,7 @@ use crate::task::{
 };
 
 use super::progress::ProgressReporter;
-use super::{Scheduler, SchedulerEvent};
+use super::{emit_event, Scheduler, SchedulerEvent};
 
 impl Scheduler {
     /// Resolve the effective TTL for a submission.
@@ -64,10 +64,13 @@ impl Scheduler {
                 label: sub.label.clone(),
                 tags: sub.tags.clone(),
             };
-            let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
-                old: old_header,
-                new_task_id: *new_task_id,
-            });
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Superseded {
+                    old: old_header,
+                    new_task_id: *new_task_id,
+                },
+            );
         }
 
         if !matches!(outcome, SubmitOutcome::Duplicate | SubmitOutcome::Rejected) {
@@ -129,10 +132,13 @@ impl Scheduler {
                     label: sub.label.clone(),
                     tags: sub.tags.clone(),
                 };
-                let _ = self.inner.event_tx.send(SchedulerEvent::Superseded {
-                    old: old_header,
-                    new_task_id: *new_task_id,
-                });
+                emit_event(
+                    &self.inner.event_tx,
+                    SchedulerEvent::Superseded {
+                        old: old_header,
+                        new_task_id: *new_task_id,
+                    },
+                );
             }
         }
 
@@ -170,10 +176,13 @@ impl Scheduler {
 
         if any_changed {
             let inserted_ids = outcome.inserted();
-            let _ = self.inner.event_tx.send(SchedulerEvent::BatchSubmitted {
-                count: resolved.len(),
-                inserted_ids,
-            });
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::BatchSubmitted {
+                    count: resolved.len(),
+                    inserted_ids,
+                },
+            );
 
             self.inner.work_notify.notify_one();
         }
@@ -266,10 +275,10 @@ impl Scheduler {
                     .cancel_to_history_with_record(&at.record)
                     .await?;
                 self.fire_on_cancel(&at.record).await;
-                let _ = self
-                    .inner
-                    .event_tx
-                    .send(SchedulerEvent::Cancelled(at.record.event_header()));
+                emit_event(
+                    &self.inner.event_tx,
+                    SchedulerEvent::Cancelled(at.record.event_header()),
+                );
             }
         }
 
@@ -281,10 +290,10 @@ impl Scheduler {
                 .cancel_to_history_with_record(&at.record)
                 .await?;
             self.fire_on_cancel(&at.record).await;
-            let _ = self
-                .inner
-                .event_tx
-                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
             return Ok(true);
         }
 
@@ -320,18 +329,19 @@ impl Scheduler {
 
     /// Cancel all active tasks matching a tag key-value pair.
     ///
-    /// Finds tasks via [`TaskStore::tasks_by_tags`](crate::TaskStore::tasks_by_tags) and cancels each one.
+    /// Uses [`TaskStore::task_ids_by_tags`](crate::TaskStore::task_ids_by_tags) (ID-only query)
+    /// to avoid full record deserialization and tag population overhead.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag(&self, key: &str, value: &str) -> Result<Vec<i64>, StoreError> {
-        let tasks = self
+        let ids = self
             .inner
             .store
-            .tasks_by_tags(&[(key, value)], None)
+            .task_ids_by_tags(&[(key, value)], None)
             .await?;
         let mut cancelled = Vec::new();
-        for task in &tasks {
-            if self.cancel(task.id).await? {
-                cancelled.push(task.id);
+        for id in ids {
+            if self.cancel(id).await? {
+                cancelled.push(id);
             }
         }
         Ok(cancelled)
@@ -339,18 +349,18 @@ impl Scheduler {
 
     /// Cancel all active tasks that have any tag key matching the given prefix.
     ///
-    /// Finds tasks via [`crate::TaskStore::tasks_by_tag_key_prefix`] and cancels each.
+    /// Uses [`crate::TaskStore::task_ids_by_tag_key_prefix`] for ID-only lookup.
     /// Returns the ids of tasks that were successfully cancelled.
     pub async fn cancel_by_tag_key_prefix(&self, prefix: &str) -> Result<Vec<i64>, StoreError> {
-        let tasks = self
+        let ids = self
             .inner
             .store
-            .tasks_by_tag_key_prefix(prefix, None)
+            .task_ids_by_tag_key_prefix(prefix, None)
             .await?;
         let mut cancelled = Vec::new();
-        for task in &tasks {
-            if self.cancel(task.id).await? {
-                cancelled.push(task.id);
+        for id in ids {
+            if self.cancel(id).await? {
+                cancelled.push(id);
             }
         }
         Ok(cancelled)
@@ -393,10 +403,10 @@ impl Scheduler {
                 .cancel_to_history_with_record(&at.record)
                 .await?;
             self.fire_on_cancel(&at.record).await;
-            let _ = self
-                .inner
-                .event_tx
-                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
             return Ok(true);
         }
         self.inner.store.cancel_recurring(task_id).await
@@ -430,10 +440,10 @@ impl Scheduler {
         if let Some(at) = self.inner.active.remove(replaced_task_id) {
             at.token.cancel();
             self.fire_on_cancel(&at.record).await;
-            let _ = self
-                .inner
-                .event_tx
-                .send(SchedulerEvent::Cancelled(at.record.event_header()));
+            emit_event(
+                &self.inner.event_tx,
+                SchedulerEvent::Cancelled(at.record.event_header()),
+            );
         }
     }
 

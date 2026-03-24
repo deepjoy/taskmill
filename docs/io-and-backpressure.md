@@ -142,7 +142,7 @@ let scheduler = Scheduler::builder()
 Disable the built-in sampler in `Cargo.toml`:
 
 ```toml
-taskmill = { version = "0.3", default-features = false }
+taskmill = { version = "0.6", default-features = false }
 ```
 
 ## Backpressure: external pressure signals

@@ -39,6 +39,12 @@ pub(crate) struct SpawnContext {
     pub completion_rx: std::sync::Arc<
         tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<super::super::CompletionMsg>>,
     >,
+    /// Failure coalescing channel sender.
+    pub failure_tx: tokio::sync::mpsc::UnboundedSender<super::super::FailureMsg>,
+    /// Failure coalescing channel receiver (Arc-wrapped for leader election).
+    pub failure_rx: std::sync::Arc<
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<super::super::FailureMsg>>,
+    >,
 }
 
 /// Output of task context construction — everything needed to insert into the

@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS task_history (
     expires_at            INTEGER
 );
 
+-- Aggregate stats and filtered queries by task type.
+-- Covers history_stats (aggregation), history_by_type (ordered pagination),
+-- and avg_throughput (filtered subquery).
+CREATE INDEX IF NOT EXISTS idx_history_type
+    ON task_history (task_type, completed_at DESC);
+
 -- IO learning: recent completions by task type.
 CREATE INDEX IF NOT EXISTS idx_history_type_completed
     ON task_history (task_type, completed_at DESC)

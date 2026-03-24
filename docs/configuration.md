@@ -322,7 +322,7 @@ scheduler.register_state(Arc::new(LibraryState { /* ... */ })).await;
 
 ```toml
 # Disable platform monitoring
-taskmill = { version = "0.4", default-features = false }
+taskmill = { version = "0.6", default-features = false }
 ```
 
 When disabled, you can still provide a custom `ResourceSampler` via `.resource_sampler()`.
@@ -446,7 +446,7 @@ Scheduler::builder()
 | `Domain::<D>::new()` | Create a domain. The domain name is taken from `D::NAME`. Task types are prefixed `"{name}::"`. |
 | `task::<T>(executor)` | Register a `TypedExecutor<T>` using `T::TASK_TYPE` as the name. TTL and retry policy from `T::config()` are used automatically. |
 | `task_with::<T>(executor, options)` | Register with per-type option overrides (for executor-instance-dependent config). |
-| `raw_executor(name, executor)` | Escape hatch: register an untyped `TaskExecutor` by type name. |
+| ~~`raw_executor(name, executor)`~~ | **Removed in 0.6.** Use `task::<T>(executor)` with a `TypedExecutor<T>`. |
 | `default_priority(p)` | Domain-wide priority for all submissions. |
 | `default_retry(policy)` | Domain-wide retry policy. |
 | `default_group(group)` | Domain-wide group key. |

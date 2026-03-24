@@ -10,7 +10,7 @@ use crate::registry::IoTracker;
 use crate::store::TaskStore;
 use crate::task::TaskRecord;
 
-use super::SchedulerEvent;
+use super::{emit_event, SchedulerEvent};
 
 // ── Active Task ────────────────────────────────────────────────────
 
@@ -268,6 +268,9 @@ async fn cancel_pause_emit(
     for (id, at) in drained {
         at.token.cancel();
         let _ = store.pause(*id).await;
-        let _ = event_tx.send(SchedulerEvent::Preempted(at.record.event_header()));
+        emit_event(
+            event_tx,
+            SchedulerEvent::Preempted(at.record.event_header()),
+        );
     }
 }

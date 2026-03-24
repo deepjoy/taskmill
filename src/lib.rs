@@ -48,7 +48,7 @@
 //! 2. **Pending** — the task waits in a priority queue. The scheduler's run loop
 //!    pops the highest-priority pending task on each tick.
 //! 3. **Running** — the scheduler calls the [`TypedExecutor::execute`] method with the
-//!    deserialized payload and a [`TaskContext`] containing the task record,
+//!    deserialized payload and a [`DomainTaskContext`] containing the task record,
 //!    a cancellation token, and a progress reporter.
 //! 4. **Terminal** — on success the task moves to the history table. On failure,
 //!    a [`retryable`](TaskError::retryable) error requeues it (up to
@@ -99,9 +99,9 @@
 //! [resource monitoring](SchedulerBuilder::with_resource_monitoring) is enabled,
 //! compares them against observed system throughput to avoid over-saturating
 //! the disk or network. Executors report actual IO via
-//! [`TaskContext::record_read_bytes`] / [`record_write_bytes`](TaskContext::record_write_bytes) /
-//! [`record_net_rx_bytes`](TaskContext::record_net_rx_bytes) /
-//! [`record_net_tx_bytes`](TaskContext::record_net_tx_bytes),
+//! [`DomainTaskContext::record_read_bytes`] / [`record_write_bytes`](DomainTaskContext::record_write_bytes) /
+//! [`record_net_rx_bytes`](DomainTaskContext::record_net_rx_bytes) /
+//! [`record_net_tx_bytes`](DomainTaskContext::record_net_tx_bytes),
 //! which feeds back into historical throughput averages for future scheduling
 //! decisions.
 //!
@@ -121,7 +121,7 @@
 //!
 //! ## Child tasks & two-phase execution
 //!
-//! An executor can spawn child tasks via [`TaskContext::spawn_child`]. When
+//! An executor can spawn child tasks via [`DomainTaskContext::spawn_child_with`]. When
 //! children exist, the parent enters a **waiting** state after its executor
 //! returns. Once all children complete, the parent's
 //! [`TypedExecutor::finalize`] method is called — useful for assembly work
@@ -172,10 +172,10 @@
 //! Tags are copied to history on all terminal transitions and are included in
 //! [`TaskEventHeader`] for event subscribers.
 //!
-//! Query by exact tags via [`DomainHandle::tasks_by_tags`] (AND semantics),
+//! Query by exact tags via [`DomainHandle::task_ids_by_tags`] (AND semantics),
 //! or discover and query by tag key prefix via
 //! [`DomainHandle::tag_keys_by_prefix`],
-//! [`DomainHandle::tasks_by_tag_key_prefix`],
+//! [`DomainHandle::task_ids_by_tag_key_prefix`],
 //! [`DomainHandle::count_by_tag_key_prefix`], and
 //! [`DomainHandle::cancel_by_tag_key_prefix`]. Prefix queries are useful when
 //! multiple libraries share a scheduler and namespace their tags
@@ -287,15 +287,15 @@
 //! [`cancel_hook_timeout`](SchedulerBuilder::cancel_hook_timeout)) so
 //! executors can clean up external resources — for example, aborting an S3
 //! multipart upload. Executors can check for cancellation cooperatively via
-//! [`TaskContext::check_cancelled`].
+//! [`DomainTaskContext::check_cancelled`].
 //!
 //! Cancelling a parent task cascade-cancels all its children.
 //!
 //! ## Byte-level progress
 //!
 //! For long-running transfers (file copies, uploads, downloads), executors can
-//! report byte-level progress via [`TaskContext::set_bytes_total`] and
-//! [`TaskContext::add_bytes`]. The scheduler maintains per-task atomic counters
+//! report byte-level progress via [`DomainTaskContext::set_bytes_total`] and
+//! [`DomainTaskContext::add_bytes`]. The scheduler maintains per-task atomic counters
 //! on the `IoTracker` — updates are lock-free and
 //! impose no overhead on the executor hot path.
 //!
@@ -313,7 +313,7 @@
 //! ```ignore
 //! use taskmill::{
 //!     Domain, DomainKey, DomainHandle, Scheduler, TypedExecutor,
-//!     TaskContext, TaskError, TypedTask, TaskTypeConfig, IoBudget, Priority,
+//!     DomainTaskContext, TaskError, TypedTask, TaskTypeConfig, IoBudget, Priority,
 //! };
 //! use serde::{Serialize, Deserialize};
 //! use tokio_util::sync::CancellationToken;
@@ -375,7 +375,7 @@
 //! ## Shared application state
 //!
 //! Register shared services (database pools, HTTP clients, etc.) at build time
-//! and retrieve them from any executor via [`TaskContext::state`]. State can be
+//! and retrieve them from any executor via [`DomainTaskContext::state`]. State can be
 //! domain-scoped (checked first) or global (fallback):
 //!
 //! ```ignore

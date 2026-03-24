@@ -6,14 +6,14 @@ Add taskmill to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-taskmill = "0.5"
+taskmill = "0.6"
 ```
 
 To disable platform resource monitoring (e.g., for mobile targets or custom samplers):
 
 ```toml
 [dependencies]
-taskmill = { version = "0.5", default-features = false }
+taskmill = { version = "0.6", default-features = false }
 ```
 
 ## Core concepts
@@ -43,7 +43,7 @@ scheduler.domain::<Media>()            <- get a typed handle at runtime
 
 Every task type needs code that knows how to do the work. Implement the `TypedExecutor<T>` trait. The scheduler deserializes the payload for you and passes it directly to your executor.
 
-Your executor receives the deserialized payload `T` and a `TaskContext` with everything it needs:
+Your executor receives the deserialized payload `T` and a `DomainTaskContext` with everything it needs:
 
 - `record()` — the full task record including priority and retry count
 - `token()` — a cancellation token for responding to preemption (see [Priorities & Preemption](priorities-and-preemption.md#handling-preemption-in-executors))
@@ -51,7 +51,7 @@ Your executor receives the deserialized payload `T` and a `TaskContext` with eve
 - `state::<T>()` — shared application state registered at build time
 
 ```rust
-use taskmill::{TypedExecutor, TypedTask, TaskContext, TaskError, TaskTypeConfig, IoBudget, DomainKey};
+use taskmill::{TypedExecutor, TypedTask, DomainTaskContext, TaskError, TaskTypeConfig, IoBudget, DomainKey};
 use serde::{Serialize, Deserialize};
 
 // Define the domain identity.
@@ -84,7 +84,7 @@ impl TypedExecutor<ResizeTask> for ImageResizer {
     async fn execute(
         &self,
         task: ResizeTask,
-        ctx: &TaskContext,
+        ctx: DomainTaskContext<'_, Media>,
     ) -> Result<(), TaskError> {
         // Check for preemption at yield points
         if ctx.token().is_cancelled() {
@@ -258,26 +258,25 @@ media.submit_with(task)
 
 Some work is naturally hierarchical — a multipart upload needs to upload individual parts, then call `CompleteMultipartUpload`. Taskmill supports this with child tasks and two-phase execution.
 
-Spawn children from within an executor using `ctx.spawn_child()`. Children are automatically domain-aware: the task type is prefixed and domain defaults are applied. The parent enters a `waiting` state until all children complete, then `finalize()` is called on the parent executor.
+Spawn children from within an executor using `ctx.spawn_child_with()`. Children are automatically domain-aware: the task type is prefixed and domain defaults are applied. The parent enters a `waiting` state until all children complete, then `finalize()` is called on the parent executor.
 
 ```rust
 impl TypedExecutor<MultipartUpload> for MultipartUploader {
-    async fn execute(
-        &self, upload: MultipartUpload, ctx: &TaskContext,
+    async fn execute<'a>(
+        &'a self, upload: MultipartUpload, ctx: DomainTaskContext<'a, Media>,
     ) -> Result<(), TaskError> {
         let parts = split_into_parts(&upload);
         for part in parts {
-            ctx.spawn_child(
-                TaskSubmission::new("upload-part")
-                    .payload_json(&part)
-                    .expected_io(IoBudget::net(0, part.size))
-            ).await?;
+            ctx.spawn_child_with(UploadPart {
+                etag: part.etag.clone(),
+                size: part.size,
+            }).await?;
         }
         Ok(()) // parent enters 'waiting' state
     }
 
-    async fn finalize(
-        &self, upload: MultipartUpload, _memo: (), ctx: &TaskContext,
+    async fn finalize<'a>(
+        &'a self, upload: MultipartUpload, _memo: (), ctx: DomainTaskContext<'a, Media>,
     ) -> Result<(), TaskError> {
         // Called after all children complete
         complete_multipart_upload(&upload).await
@@ -285,12 +284,12 @@ impl TypedExecutor<MultipartUpload> for MultipartUploader {
 }
 ```
 
-For cross-domain children, use `ctx.domain::<D>()` to get a handle and `.parent()` on the submit builder:
+For cross-domain children, use `ctx.domain::<D>()` to get a handle and `.child_of(&ctx)` on the submit builder:
 
 ```rust
 ctx.domain::<Storage>()
     .submit_with(Upload { /* ... */ })
-    .parent(ctx.record().id)
+    .child_of(&ctx)
     .await?;
 ```
 

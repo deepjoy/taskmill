@@ -38,7 +38,7 @@ use crate::task::TaskRecord;
 
 use super::dispatch::ActiveTaskMap;
 use super::event::TaskEventHeader;
-use super::SchedulerEvent;
+use super::{emit_event, SchedulerEvent};
 
 // ── Progress Reporter ──────────────────────────────────────────────
 
@@ -94,11 +94,14 @@ impl ProgressReporter {
         // Update internal progress tracking directly (sync, no broadcast roundtrip).
         self.active.update_progress(self.header.task_id, clamped);
         // Broadcast for external subscribers (UI / Tauri).
-        let _ = self.event_tx.send(SchedulerEvent::Progress {
-            header: self.header.clone(),
-            percent: clamped,
-            message,
-        });
+        emit_event(
+            &self.event_tx,
+            SchedulerEvent::Progress {
+                header: self.header.clone(),
+                percent: clamped,
+                message,
+            },
+        );
     }
 
     /// Report progress as a fraction (completed / total) with an optional message.

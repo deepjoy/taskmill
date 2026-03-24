@@ -6,7 +6,7 @@ use crate::store::TaskStore;
 use crate::task::{IoBudget, TaskRecord};
 
 use super::super::dispatch::ActiveTaskMap;
-use super::super::{CompletionMsg, SchedulerEvent};
+use super::super::{emit_event, CompletionMsg, SchedulerEvent};
 use super::parent::handle_parent_resolution;
 use super::ExecutionPhase;
 
@@ -32,7 +32,7 @@ pub(crate) async fn handle_success(
     metrics: &IoBudget,
     memo: Option<Vec<u8>>,
     deps: &CompletionDeps,
-    decrement_module: impl FnOnce(),
+    mut decrement_module: impl FnMut(),
 ) {
     let task_id = task.id;
 
@@ -52,10 +52,13 @@ pub(crate) async fn handle_success(
                 }
                 decrement_module();
                 deps.active.remove(task_id);
-                let _ = deps.event_tx.send(SchedulerEvent::Waiting {
-                    task_id,
-                    children_count: count,
-                });
+                emit_event(
+                    &deps.event_tx,
+                    SchedulerEvent::Waiting {
+                        task_id,
+                        children_count: count,
+                    },
+                );
                 // Children may have completed before we set waiting.
                 // Re-check to avoid a missed finalization.
                 handle_parent_resolution(
@@ -103,6 +106,10 @@ pub(crate) async fn handle_success(
         }
         return;
     }
+
+    // Yield before draining to let more completions accumulate in the
+    // channel, increasing batch size under high throughput.
+    tokio::task::yield_now().await;
 
     // Leader election: try to grab the rx lock and drain the batch.
     // Under high concurrency, only one task wins — it processes the batch
@@ -182,16 +189,19 @@ pub(in crate::scheduler) fn emit_completion_events(
             Some((next, count)) => (Some(next), count),
             None => (None, task.recurring_execution_count + 1),
         };
-        let _ = event_tx.send(SchedulerEvent::RecurringCompleted {
-            header: task.event_header(),
-            execution_count: exec_count,
-            next_run,
-        });
+        emit_event(
+            event_tx,
+            SchedulerEvent::RecurringCompleted {
+                header: task.event_header(),
+                execution_count: exec_count,
+                next_run,
+            },
+        );
     }
 
-    let _ = event_tx.send(SchedulerEvent::Completed(task.event_header()));
+    emit_event(event_tx, SchedulerEvent::Completed(task.event_header()));
 
     for uid in unblocked {
-        let _ = event_tx.send(SchedulerEvent::TaskUnblocked { task_id: *uid });
+        emit_event(event_tx, SchedulerEvent::TaskUnblocked { task_id: *uid });
     }
 }

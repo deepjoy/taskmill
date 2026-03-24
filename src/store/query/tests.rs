@@ -151,7 +151,7 @@ async fn prune_by_count() {
 // ── Tag query tests ───────────────────────────────────────────────
 
 #[tokio::test]
-async fn tasks_by_tags_single_filter() {
+async fn task_ids_by_tags_single_filter() {
     let store = test_store().await;
 
     store
@@ -171,18 +171,21 @@ async fn tasks_by_tags_single_filter() {
         .await
         .unwrap();
 
-    let results = store.tasks_by_tags(&[("env", "prod")], None).await.unwrap();
+    let results = store
+        .task_ids_by_tags(&[("env", "prod")], None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
 
     let results = store
-        .tasks_by_tags(&[("env", "staging")], None)
+        .task_ids_by_tags(&[("env", "staging")], None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
 }
 
 #[tokio::test]
-async fn tasks_by_tags_multiple_filters_and() {
+async fn task_ids_by_tags_multiple_filters_and() {
     let store = test_store().await;
 
     store
@@ -215,14 +218,14 @@ async fn tasks_by_tags_multiple_filters_and() {
 
     // AND semantics: only task matching both filters.
     let results = store
-        .tasks_by_tags(&[("env", "prod"), ("region", "us")], None)
+        .task_ids_by_tags(&[("env", "prod"), ("region", "us")], None)
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
 
     // With status filter.
     let results = store
-        .tasks_by_tags(&[("env", "prod")], Some(TaskStatus::Pending))
+        .task_ids_by_tags(&[("env", "prod")], Some(TaskStatus::Pending))
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -326,7 +329,7 @@ async fn tag_keys_by_prefix_discovers_keys() {
 }
 
 #[tokio::test]
-async fn tasks_by_tag_key_prefix_finds_tasks() {
+async fn task_ids_by_tag_key_prefix_finds_tasks() {
     let store = test_store().await;
 
     store
@@ -356,17 +359,20 @@ async fn tasks_by_tag_key_prefix_finds_tasks() {
         .unwrap();
 
     let tasks = store
-        .tasks_by_tag_key_prefix("billing.", None)
+        .task_ids_by_tag_key_prefix("billing.", None)
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2); // tp-1 and tp-2
 
-    let tasks = store.tasks_by_tag_key_prefix("media.", None).await.unwrap();
+    let tasks = store
+        .task_ids_by_tag_key_prefix("media.", None)
+        .await
+        .unwrap();
     assert_eq!(tasks.len(), 2); // tp-2 and tp-3
 }
 
 #[tokio::test]
-async fn tasks_by_tag_key_prefix_with_status_filter() {
+async fn task_ids_by_tag_key_prefix_with_status_filter() {
     let store = test_store().await;
 
     store
@@ -379,13 +385,13 @@ async fn tasks_by_tag_key_prefix_with_status_filter() {
         .unwrap();
 
     let tasks = store
-        .tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Pending))
+        .task_ids_by_tag_key_prefix("billing.", Some(TaskStatus::Pending))
         .await
         .unwrap();
     assert_eq!(tasks.len(), 1);
 
     let tasks = store
-        .tasks_by_tag_key_prefix("billing.", Some(TaskStatus::Running))
+        .task_ids_by_tag_key_prefix("billing.", Some(TaskStatus::Running))
         .await
         .unwrap();
     assert_eq!(tasks.len(), 0);
@@ -514,7 +520,7 @@ async fn tag_keys_by_prefix_with_prefix_scopes_to_task_type() {
 }
 
 #[tokio::test]
-async fn tasks_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
+async fn task_ids_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
     let store = test_store().await;
 
     store
@@ -535,12 +541,18 @@ async fn tasks_by_tag_key_prefix_with_prefix_scopes_to_task_type() {
         .unwrap();
 
     // Both tasks have billing.* tags, but scoped query returns only the billing module's task.
-    let tasks = store
-        .tasks_by_tag_key_prefix_with_prefix("billing::", "billing.", None)
+    let ids = store
+        .task_ids_by_tag_key_prefix_with_prefix("billing::", "billing.", None)
         .await
         .unwrap();
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].task_type, "billing::charge");
+    assert_eq!(ids.len(), 1);
+
+    // Unscoped returns both.
+    let all_ids = store
+        .task_ids_by_tag_key_prefix("billing.", None)
+        .await
+        .unwrap();
+    assert_eq!(all_ids.len(), 2);
 }
 
 #[tokio::test]

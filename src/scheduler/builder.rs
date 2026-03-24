@@ -491,6 +491,14 @@ impl SchedulerBuilder {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // Check for pre-existing paused tasks (persistent store recovery).
+        if scheduler.inner.store.paused_count().await.unwrap_or(0) > 0 {
+            scheduler
+                .inner
+                .has_paused_tasks
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         Ok(scheduler)
     }
 }

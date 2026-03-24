@@ -96,11 +96,11 @@ fn bench_submit_with_tags(c: &mut Criterion) {
     group.finish();
 }
 
-/// `tasks_by_tags` with a single filter at varying queue depths.
+/// `task_ids_by_tags` with a single filter at varying queue depths.
 /// All tasks match the filter, so result size equals queue depth.
-fn bench_query_by_tags(c: &mut Criterion) {
+fn bench_query_ids_by_tags(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("query_by_tags");
+    let mut group = c.benchmark_group("query_ids_by_tags");
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
@@ -119,7 +119,7 @@ fn bench_query_by_tags(c: &mut Criterion) {
                         let start = Instant::now();
                         for _ in 0..iters {
                             let _ = store
-                                .tasks_by_tags(&[("bucket", "b0")], None)
+                                .task_ids_by_tags(&[("bucket", "b0")], None)
                                 .await
                                 .unwrap();
                         }
@@ -214,7 +214,7 @@ fn bench_tag_values_scan(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_submit_with_tags,
-    bench_query_by_tags,
+    bench_query_ids_by_tags,
     bench_count_by_tags,
     bench_tag_values_scan,
 );

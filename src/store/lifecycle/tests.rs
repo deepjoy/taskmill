@@ -286,8 +286,9 @@ async fn tags_copied_to_history_on_complete() {
     let task = store.pop_next().await.unwrap().unwrap();
     store.complete(task.id, &IoBudget::default()).await.unwrap();
 
-    let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+    let mut hist = store.history_by_key(&sub.effective_key()).await.unwrap();
     assert_eq!(hist.len(), 1);
+    store.populate_history_tags(&mut hist).await.unwrap();
     assert_eq!(hist[0].tags.get("env").unwrap(), "staging");
     assert_eq!(hist[0].tags.get("owner").unwrap(), "alice");
 }
@@ -313,8 +314,9 @@ async fn tags_copied_to_history_on_fail() {
         .await
         .unwrap();
 
-    let hist = store.failed_tasks(10).await.unwrap();
+    let mut hist = store.failed_tasks(10).await.unwrap();
     assert_eq!(hist.len(), 1);
+    store.populate_history_tags(&mut hist).await.unwrap();
     assert_eq!(hist[0].tags.get("region").unwrap(), "us-west");
 }
 
@@ -328,9 +330,10 @@ async fn tags_copied_to_history_on_cancel() {
     let id = store.submit(&sub).await.unwrap().id().unwrap();
     store.cancel_to_history(id).await.unwrap();
 
-    let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+    let mut hist = store.history_by_key(&sub.effective_key()).await.unwrap();
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].status, HistoryStatus::Cancelled);
+    store.populate_history_tags(&mut hist).await.unwrap();
     assert_eq!(hist[0].tags.get("priority_class").unwrap(), "low");
 }
 
@@ -352,9 +355,10 @@ async fn tags_copied_to_history_on_expire() {
     let expired = store.expire_tasks().await.unwrap();
     assert!(!expired.is_empty());
 
-    let hist = store.history_by_key(&sub.effective_key()).await.unwrap();
+    let mut hist = store.history_by_key(&sub.effective_key()).await.unwrap();
     assert_eq!(hist.len(), 1);
     assert_eq!(hist[0].status, HistoryStatus::Expired);
+    store.populate_history_tags(&mut hist).await.unwrap();
     assert_eq!(hist[0].tags.get("source").unwrap(), "cron");
 }
 
@@ -369,7 +373,11 @@ async fn tags_preserved_on_recurring_requeue() {
         .recurring(Duration::from_secs(3600));
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next().await.unwrap().unwrap();
+    store
+        .populate_tags(std::slice::from_mut(&mut task))
+        .await
+        .unwrap();
     assert_eq!(task.tags.get("schedule").unwrap(), "hourly");
 
     store
@@ -391,7 +399,11 @@ async fn tags_in_pop_next() {
         .tag("color", "blue");
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next().await.unwrap().unwrap();
+    store
+        .populate_tags(std::slice::from_mut(&mut task))
+        .await
+        .unwrap();
     assert_eq!(task.tags.get("color").unwrap(), "blue");
 }
 

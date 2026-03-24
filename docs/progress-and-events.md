@@ -8,7 +8,7 @@ Executors report progress via `ctx.progress()`. This emits events that your UI c
 
 ```rust
 impl TypedExecutor<MyTask> for MyExecutor {
-    async fn execute(&self, task: MyTask, ctx: &TaskContext) -> Result<(), TaskError> {
+    async fn execute(&self, task: MyTask, ctx: DomainTaskContext<'_, MyTask::Domain>) -> Result<(), TaskError> {
         let items = get_work_items(&task);
 
         for (i, item) in items.iter().enumerate() {

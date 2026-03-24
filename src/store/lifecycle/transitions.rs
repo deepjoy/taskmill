@@ -42,11 +42,7 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let mut record = row.as_ref().map(row_to_task_record);
-        if let Some(ref mut r) = record {
-            self.populate_tags(std::slice::from_mut(r)).await?;
-        }
-        Ok(record)
+        Ok(row.as_ref().map(row_to_task_record))
     }
 
     /// Atomically claim a specific pending task by id, setting it to running.
@@ -107,7 +103,12 @@ impl TaskStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        let claimed = result.rows_affected() > 0;
+        if claimed {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(claimed)
     }
 
     /// Atomically claim up to `limit` highest-priority pending tasks and mark
@@ -150,8 +151,11 @@ impl TaskStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
+        let records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
+        if !records.is_empty() {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(records)
     }
 
@@ -161,6 +165,10 @@ impl TaskStore {
     ///
     /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
     /// the first pop.
+    ///
+    /// Tags are **not** populated — callers needing tags should call
+    /// [`populate_tags`](Self::populate_tags) explicitly or use
+    /// [`task_by_id`](Self::task_by_id).
     pub async fn pop_next(&self) -> Result<Option<TaskRecord>, StoreError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
@@ -189,9 +197,10 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let mut record = row.map(|r| row_to_task_record(&r));
-        if let Some(ref mut r) = record {
-            self.populate_tags(std::slice::from_mut(r)).await?;
+        let record = row.map(|r| row_to_task_record(&r));
+        if record.is_some() {
+            self.has_running
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(record)
     }
@@ -721,6 +730,93 @@ impl TaskStore {
 
         self.maybe_prune().await;
 
+        Ok(())
+    }
+
+    /// Batch-process terminal failures in a single transaction.
+    ///
+    /// Each item is a `(task, error, retryable)` triple that has already been
+    /// determined to be terminal (retries exhausted or non-retryable). The
+    /// method inserts history rows and deletes active tasks in one
+    /// `BEGIN IMMEDIATE` / `COMMIT` cycle, amortizing SQLite's WAL sync.
+    pub async fn fail_batch(
+        &self,
+        items: &[(&crate::task::TaskRecord, &str, bool, &IoBudget)],
+    ) -> Result<(), StoreError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        if items.len() == 1 {
+            let (task, error, retryable, metrics) = items[0];
+            return self
+                .fail_with_record(task, error, retryable, 0, metrics, &FailBackoff::default())
+                .await;
+        }
+
+        let skip_tags = !self.has_tags.load(std::sync::atomic::Ordering::Relaxed);
+
+        tracing::debug!(count = items.len(), "store.fail_batch: BEGIN tx");
+        let mut conn = self.begin_write().await?;
+
+        // Step 1: Insert history rows (per-task — each has unique binds).
+        for &(task, error, retryable, metrics) in items {
+            let status = if retryable {
+                HistoryStatus::DeadLetter
+            } else {
+                HistoryStatus::Failed
+            };
+            let duration_ms = compute_duration_ms(task);
+            insert_history(
+                &mut conn,
+                task,
+                status,
+                metrics,
+                duration_ms,
+                Some(error),
+                skip_tags,
+            )
+            .await?;
+        }
+
+        // Step 2: Batch-delete active task rows.
+        let ids: Vec<i64> = items.iter().map(|(t, _, _, _)| t.id).collect();
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM tasks WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        q.execute(&mut *conn).await?;
+
+        // Step 3: Batch-delete orphaned tags.
+        if !skip_tags {
+            let tag_sql = format!("DELETE FROM task_tags WHERE task_id IN ({placeholders})");
+            let mut tq = sqlx::query(&tag_sql);
+            for id in &ids {
+                tq = tq.bind(id);
+            }
+            tq.execute(&mut *conn).await?;
+        }
+
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        drop(conn);
+        tracing::debug!(count = items.len(), "store.fail_batch: COMMIT ok");
+
+        self.maybe_prune().await;
+        Ok(())
+    }
+
+    /// Increment retry count in-place without changing task status.
+    ///
+    /// Used by inline immediate retries: the task stays `running` and is
+    /// re-executed directly in the same spawned future, avoiding the
+    /// requeue-to-pending → pop_next round-trip through SQLite.
+    pub async fn increment_retry(&self, task_id: i64, error: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE tasks SET retry_count = retry_count + 1, last_error = ? WHERE id = ?")
+            .bind(error)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
