@@ -56,6 +56,9 @@ pub struct SchedulerSnapshot {
     pub rate_limits: Vec<RateLimitInfo>,
     /// Priority aging configuration (if enabled).
     pub aging_config: Option<super::aging::AgingConfig>,
+    /// Per-group slot allocations (current cycle). Empty when fair scheduling
+    /// is not configured.
+    pub group_allocations: Vec<super::fair::GroupAllocationInfo>,
 }
 
 /// Information about a paused group for snapshot/dashboard display.
@@ -198,6 +201,12 @@ pub enum SchedulerEvent {
     },
     /// A task group was resumed.
     GroupResumed { group: String, resumed_count: usize },
+    /// A group's scheduling weight was changed at runtime.
+    GroupWeightChanged {
+        group: String,
+        previous_weight: u32,
+        new_weight: u32,
+    },
 }
 
 impl SchedulerEvent {
@@ -221,7 +230,8 @@ impl SchedulerEvent {
             | Self::Paused
             | Self::Resumed
             | Self::GroupPaused { .. }
-            | Self::GroupResumed { .. } => None,
+            | Self::GroupResumed { .. }
+            | Self::GroupWeightChanged { .. } => None,
         }
     }
 }

@@ -242,6 +242,46 @@ impl Scheduler {
         self.inner.paused_groups.read().unwrap().contains(group_key)
     }
 
+    // ── Group Weights (Fair Scheduling) ─────────────────────────────
+
+    /// Set or update the scheduling weight for a group at runtime.
+    pub fn set_group_weight(&self, group: impl Into<String>, weight: u32) {
+        let group = group.into();
+        let previous = self.inner.group_weights.weight_for(&group);
+        self.inner.group_weights.set_weight(group.clone(), weight);
+        self.inner
+            .fast_dispatch
+            .store(false, AtomicOrdering::Relaxed);
+        emit_event(
+            &self.inner.event_tx,
+            SchedulerEvent::GroupWeightChanged {
+                group,
+                previous_weight: previous,
+                new_weight: weight,
+            },
+        );
+    }
+
+    /// Remove a group weight override, falling back to the default weight.
+    pub fn remove_group_weight(&self, group: &str) {
+        self.inner.group_weights.remove_weight(group);
+        self.maybe_restore_fast_dispatch();
+    }
+
+    /// Reset all group weights to the default.
+    pub fn reset_group_weights(&self) {
+        self.inner.group_weights.reset_all();
+        self.maybe_restore_fast_dispatch();
+    }
+
+    /// Set the minimum guaranteed slots for a group.
+    pub fn set_group_minimum_slots(&self, group: impl Into<String>, slots: usize) {
+        self.inner.group_weights.set_min_slots(group.into(), slots);
+        self.inner
+            .fast_dispatch
+            .store(false, AtomicOrdering::Relaxed);
+    }
+
     // ── Rate Limiting ──────────────────────────────────────────────
 
     /// Set or update the rate limit for a task type at runtime.
@@ -279,7 +319,8 @@ impl Scheduler {
     ///
     /// Must mirror the conditions in `SchedulerBuilder::build()`:
     /// no paused groups, no group limits (default or overrides), no resource
-    /// monitoring, no pressure sources, no module concurrency caps, no rate limits.
+    /// monitoring, no pressure sources, no module concurrency caps, no rate limits,
+    /// no group weights.
     fn maybe_restore_fast_dispatch(&self) {
         let has_groups = self.inner.group_limits.default_limit() > 0
             || self.inner.group_limits.has_overrides()
@@ -287,6 +328,7 @@ impl Scheduler {
         let has_module_caps = !self.inner.module_caps.read().unwrap().is_empty();
         let has_rate_limits =
             !self.inner.type_rate_limits.is_empty() || !self.inner.group_rate_limits.is_empty();
+        let has_group_weights = self.inner.group_weights.is_configured();
 
         if !has_groups
             && !self
@@ -299,6 +341,7 @@ impl Scheduler {
                 .has_pressure_sources
                 .load(AtomicOrdering::Relaxed)
             && !has_rate_limits
+            && !has_group_weights
         {
             self.inner
                 .fast_dispatch

@@ -57,6 +57,10 @@ pub struct GateContext<'a> {
     pub type_rate_limits: &'a RateLimits,
     /// Per-group rate limits.
     pub group_rate_limits: &'a RateLimits,
+    /// When true, the gate skips the group concurrency check. Used by
+    /// `dispatch_fair()` pass 1 where group slot budgets are already
+    /// enforced by the allocation algorithm.
+    pub skip_group_concurrency: bool,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -185,20 +189,23 @@ impl DispatchGate for DefaultDispatchGate {
                 }
             }
 
-            // Group concurrency check.
-            if let Some(group_key) = &task.group_key {
-                if let Some(limits) = ctx.group_limits {
-                    if let Some(limit) = limits.limit_for(group_key) {
-                        let running = ctx.store.running_count_for_group(group_key).await?;
-                        if running >= limit as i64 {
-                            tracing::trace!(
-                                task_type = task.task_type,
-                                group = group_key,
-                                running,
-                                limit,
-                                "task deferred — group concurrency saturated — requeuing"
-                            );
-                            return Ok(Admission::Deny);
+            // Group concurrency check (skipped in fair dispatch pass 1
+            // where the allocation already enforces group slot budgets).
+            if !ctx.skip_group_concurrency {
+                if let Some(group_key) = &task.group_key {
+                    if let Some(limits) = ctx.group_limits {
+                        if let Some(limit) = limits.limit_for(group_key) {
+                            let running = ctx.store.running_count_for_group(group_key).await?;
+                            if running >= limit as i64 {
+                                tracing::trace!(
+                                    task_type = task.task_type,
+                                    group = group_key,
+                                    running,
+                                    limit,
+                                    "task deferred — group concurrency saturated — requeuing"
+                                );
+                                return Ok(Admission::Deny);
+                            }
                         }
                     }
                 }

@@ -26,6 +26,7 @@ mod builder;
 mod control;
 pub(crate) mod dispatch;
 pub(crate) mod event;
+pub mod fair;
 pub(crate) mod gate;
 pub mod progress;
 mod queries;
@@ -83,6 +84,7 @@ pub use event::{
     PausedGroupInfo, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
     TaskEventHeader,
 };
+pub use fair::GroupAllocationInfo;
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
 pub use rate_limit::{RateLimit, RateLimitInfo, RateLimits};
@@ -199,6 +201,8 @@ pub(crate) struct SchedulerInner {
     pub(crate) failure_rx: std::sync::Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<FailureMsg>>>,
     /// Priority aging configuration. `None` = aging disabled.
     pub(crate) aging_config: Option<Arc<aging::AgingConfig>>,
+    /// Per-group scheduling weights for weighted fair dispatch.
+    pub(crate) group_weights: fair::GroupWeights,
 }
 
 /// IO-aware priority scheduler.
@@ -347,6 +351,7 @@ impl Scheduler {
                 failure_tx,
                 failure_rx: std::sync::Arc::new(Mutex::new(failure_rx)),
                 aging_config: config.aging_config.map(Arc::new),
+                group_weights: fair::GroupWeights::new(),
             }),
         }
     }

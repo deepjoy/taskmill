@@ -745,6 +745,28 @@ impl ModuleHandle {
         self.scheduler.remove_group_rate_limit(group);
     }
 
+    // ── Group Weights (Fair Scheduling) ──────────────────────────────
+
+    /// Set or update the scheduling weight for a group at runtime.
+    pub fn set_group_weight(&self, group: impl Into<String>, weight: u32) {
+        self.scheduler.set_group_weight(group, weight);
+    }
+
+    /// Remove a group weight override, falling back to the default weight.
+    pub fn remove_group_weight(&self, group: &str) {
+        self.scheduler.remove_group_weight(group);
+    }
+
+    /// Reset all group weights to the default.
+    pub fn reset_group_weights(&self) {
+        self.scheduler.reset_group_weights();
+    }
+
+    /// Set the minimum guaranteed slots for a group.
+    pub fn set_group_minimum_slots(&self, group: impl Into<String>, slots: usize) {
+        self.scheduler.set_group_minimum_slots(group, slots);
+    }
+
     // ── Scoped queries ────────────────────────────────────────────
 
     /// All active tasks in this module (any status).

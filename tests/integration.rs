@@ -20,6 +20,8 @@ mod common;
 mod cross_module;
 #[path = "integration/dependencies.rs"]
 mod dependencies;
+#[path = "integration/fair_scheduling.rs"]
+mod fair_scheduling;
 #[path = "integration/group_pause.rs"]
 mod group_pause;
 #[path = "integration/memo.rs"]

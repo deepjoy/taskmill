@@ -3,6 +3,7 @@
 use crate::store::StoreError;
 
 use super::event::PausedGroupInfo;
+use super::fair::GroupAllocationInfo;
 use super::progress::TaskProgress;
 use super::{EstimatedProgress, Scheduler, SchedulerSnapshot};
 
@@ -172,6 +173,49 @@ impl Scheduler {
         let mut rate_limits = self.inner.type_rate_limits.snapshot_info("type");
         rate_limits.extend(self.inner.group_rate_limits.snapshot_info("group"));
 
+        // Group allocations (fair scheduling).
+        let group_allocations = if self.inner.group_weights.is_configured() {
+            let running_groups = self.inner.store.running_counts_per_group().await?;
+            let pending_groups = self.inner.store.pending_counts_per_group().await?;
+            let mut alloc_info = Vec::new();
+            // Merge running and pending into a combined view.
+            let mut groups_seen: std::collections::HashMap<Option<String>, (usize, usize)> =
+                std::collections::HashMap::new();
+            for (g, c) in &running_groups {
+                groups_seen.entry(g.clone()).or_default().0 = *c;
+            }
+            for (g, c) in &pending_groups {
+                groups_seen.entry(g.clone()).or_default().1 = *c;
+            }
+            for (g, (r, p)) in &groups_seen {
+                let name = g.clone().unwrap_or_default();
+                let weight = match g {
+                    Some(key) => self.inner.group_weights.weight_for(key),
+                    None => self.inner.group_weights.default_weight(),
+                };
+                let min = match g {
+                    Some(key) => self.inner.group_weights.min_slots_for(key),
+                    None => None,
+                };
+                let cap = match g {
+                    Some(key) => self.inner.group_limits.limit_for(key),
+                    None => None,
+                };
+                alloc_info.push(GroupAllocationInfo {
+                    group: name,
+                    weight,
+                    allocated_slots: 0, // snapshot is a point-in-time; allocation is per-cycle
+                    running: *r,
+                    pending: *p,
+                    min_slots: min,
+                    cap,
+                });
+            }
+            alloc_info
+        } else {
+            Vec::new()
+        };
+
         Ok(SchedulerSnapshot {
             running,
             pending_count,
@@ -188,6 +232,7 @@ impl Scheduler {
             paused_groups,
             rate_limits,
             aging_config: self.inner.aging_config.as_ref().map(|arc| (**arc).clone()),
+            group_allocations,
         })
     }
 }

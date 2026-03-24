@@ -57,6 +57,9 @@ pub struct SchedulerBuilder {
     group_concurrency_overrides: Vec<(String, usize)>,
     type_rate_limits: Vec<(String, RateLimit)>,
     group_rate_limits: Vec<(String, RateLimit)>,
+    group_weights: Vec<(String, u32)>,
+    default_group_weight: u32,
+    group_min_slots: Vec<(String, usize)>,
 }
 
 impl SchedulerBuilder {
@@ -79,6 +82,9 @@ impl SchedulerBuilder {
             group_concurrency_overrides: Vec::new(),
             type_rate_limits: Vec::new(),
             group_rate_limits: Vec::new(),
+            group_weights: Vec::new(),
+            default_group_weight: 1,
+            group_min_slots: Vec::new(),
         }
     }
 
@@ -281,6 +287,26 @@ impl SchedulerBuilder {
     /// rate, independent of task-type rate limits (both must pass).
     pub fn group_rate_limit(mut self, group: impl Into<String>, limit: RateLimit) -> Self {
         self.group_rate_limits.push((group.into(), limit));
+        self
+    }
+
+    /// Set a scheduling weight for a specific group.
+    ///
+    /// Weights are relative — `(A:3, B:1)` gives A 75% and B 25%.
+    pub fn group_weight(mut self, group: impl Into<String>, weight: u32) -> Self {
+        self.group_weights.push((group.into(), weight));
+        self
+    }
+
+    /// Default weight for groups without a specific override. Default: 1.
+    pub fn default_group_weight(mut self, weight: u32) -> Self {
+        self.default_group_weight = weight;
+        self
+    }
+
+    /// Minimum guaranteed slots for a group, regardless of weight.
+    pub fn group_minimum_slots(mut self, group: impl Into<String>, slots: usize) -> Self {
+        self.group_min_slots.push((group.into(), slots));
         self
     }
 
@@ -509,6 +535,27 @@ impl SchedulerBuilder {
             scheduler.inner.group_rate_limits.set(scope, limit);
         }
 
+        // Apply group weights.
+        let has_group_weights = !self.group_weights.is_empty() || !self.group_min_slots.is_empty();
+        if self.default_group_weight != 1 {
+            scheduler
+                .inner
+                .group_weights
+                .set_default(self.default_group_weight);
+        }
+        for (group, weight) in &self.group_weights {
+            scheduler
+                .inner
+                .group_weights
+                .set_weight(group.clone(), *weight);
+        }
+        for (group, slots) in &self.group_min_slots {
+            scheduler
+                .inner
+                .group_weights
+                .set_min_slots(group.clone(), *slots);
+        }
+
         // Compute fast-dispatch eligibility before consuming builder fields.
         let has_groups =
             self.default_group_concurrency > 0 || !self.group_concurrency_overrides.is_empty();
@@ -563,6 +610,7 @@ impl SchedulerBuilder {
             && !has_module_caps
             && !has_paused_groups
             && !has_rate_limits
+            && !has_group_weights
         {
             scheduler
                 .inner
