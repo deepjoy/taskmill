@@ -66,7 +66,10 @@ async fn submit_to_paused_group_inserts_as_paused() {
 
     match outcome2 {
         SubmitOutcome::Inserted { group_paused, .. } => {
-            assert!(!group_paused, "group_paused should be false for non-paused group");
+            assert!(
+                !group_paused,
+                "group_paused should be false for non-paused group"
+            );
         }
         other => panic!("expected Inserted, got {other:?}"),
     }
@@ -144,7 +147,11 @@ async fn submit_to_paused_group_resumes_on_group_resume() {
 
     // Brief wait to verify nothing dispatches while paused.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(count.load(Ordering::SeqCst), 0, "no tasks should run while group is paused");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "no tasks should run while group is paused"
+    );
 
     // Resume the group.
     sched.resume_group("g1").await.unwrap();
@@ -163,7 +170,10 @@ async fn submit_to_paused_group_resumes_on_group_resume() {
     token.cancel();
     let _ = handle.await;
 
-    assert_eq!(completed, 3, "all 3 tasks should complete after group resume");
+    assert_eq!(
+        completed, 3,
+        "all 3 tasks should complete after group resume"
+    );
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
