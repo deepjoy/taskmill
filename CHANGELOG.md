@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/deepjoy/taskmill/compare/v0.6.0...v0.7.0) - 2026-03-24
+
+### Added
+
+- implement observability metrics export ([#20](https://github.com/deepjoy/taskmill/pull/20)) ([#88](https://github.com/deepjoy/taskmill/pull/88))
+- [**breaking**] implement priority aging and weighted fair scheduling ([#84](https://github.com/deepjoy/taskmill/pull/84))
+- [**breaking**] implement token-bucket rate limiting per task type and group ([#82](https://github.com/deepjoy/taskmill/pull/82))
+- [**breaking**] implement group-level pause and resume ([#81](https://github.com/deepjoy/taskmill/pull/81))
+- add Throughput to all criterion benchmarks so critcmp shows ops/sec ([#78](https://github.com/deepjoy/taskmill/pull/78))
+- [**breaking**] normalize timestamps from TEXT to epoch millisecond INTEGER ([#75](https://github.com/deepjoy/taskmill/pull/75))
+- expose `fail_fast()` on `SubmitBuilder` and `DomainSubmitBuilder` ([#73](https://github.com/deepjoy/taskmill/pull/73))
+- add tag key prefix queries for namespace-scoped discovery ([#71](https://github.com/deepjoy/taskmill/pull/71))
+- [**breaking**] support passing state from execute() to finalize() via typed Memo ([#69](https://github.com/deepjoy/taskmill/pull/69))
+
+### Fixed
+
+- use distinct critcmp group names so PR benchmark diff shows two columns ([#77](https://github.com/deepjoy/taskmill/pull/77))
+- use distinct critcmp group names for PR benchmark comparison ([#74](https://github.com/deepjoy/taskmill/pull/74))
+- use distinct critcmp group names for PR benchmark comparison ([#72](https://github.com/deepjoy/taskmill/pull/72))
+
+### Other
+
+- add migration guide for 0.7.0 ([#85](https://github.com/deepjoy/taskmill/pull/85))
+- consolidate paused_groups migration into standard include_str! pattern ([#83](https://github.com/deepjoy/taskmill/pull/83))
+- [**breaking**] improve benchmark throughput across submit, dispatch, retry, and failure paths ([#80](https://github.com/deepjoy/taskmill/pull/80))
+- skip transaction for retry requeue and tune slow benchmarks ([#79](https://github.com/deepjoy/taskmill/pull/79))
+- [**breaking**] consolidate migrations from 9 chronological files into 4 object-oriented files ([#76](https://github.com/deepjoy/taskmill/pull/76))
+
 ## [0.6.0](https://github.com/deepjoy/taskmill/compare/v0.5.3...v0.6.0) - 2026-03-21
 
 ### Added
