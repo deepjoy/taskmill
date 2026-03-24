@@ -31,7 +31,7 @@ pub(crate) async fn handle_failure(
     error: TaskError,
     metrics: &IoBudget,
     deps: &FailureDeps,
-    decrement_module: impl FnOnce(),
+    mut decrement_module: impl FnMut(),
 ) {
     let task_id = task.id;
 

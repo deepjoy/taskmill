@@ -428,7 +428,11 @@ mod tests {
             .tag("env", "prod")
             .tag("region", "us-east");
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        let parent = store.pop_next().await.unwrap().unwrap();
+        let mut parent = store.pop_next().await.unwrap().unwrap();
+        store
+            .populate_tags(std::slice::from_mut(&mut parent))
+            .await
+            .unwrap();
 
         let ctx = ParentContext {
             created_at: parent.created_at,
@@ -462,7 +466,11 @@ mod tests {
             .tag("env", "prod")
             .tag("region", "us-east");
         let parent_id = store.submit(&parent_sub).await.unwrap().id().unwrap();
-        let parent = store.pop_next().await.unwrap().unwrap();
+        let mut parent = store.pop_next().await.unwrap().unwrap();
+        store
+            .populate_tags(std::slice::from_mut(&mut parent))
+            .await
+            .unwrap();
 
         let ctx = ParentContext {
             created_at: parent.created_at,

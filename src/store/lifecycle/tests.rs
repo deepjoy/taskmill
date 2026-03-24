@@ -369,7 +369,11 @@ async fn tags_preserved_on_recurring_requeue() {
         .recurring(Duration::from_secs(3600));
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next().await.unwrap().unwrap();
+    store
+        .populate_tags(std::slice::from_mut(&mut task))
+        .await
+        .unwrap();
     assert_eq!(task.tags.get("schedule").unwrap(), "hourly");
 
     store
@@ -391,7 +395,11 @@ async fn tags_in_pop_next() {
         .tag("color", "blue");
 
     store.submit(&sub).await.unwrap();
-    let task = store.pop_next().await.unwrap().unwrap();
+    let mut task = store.pop_next().await.unwrap().unwrap();
+    store
+        .populate_tags(std::slice::from_mut(&mut task))
+        .await
+        .unwrap();
     assert_eq!(task.tags.get("color").unwrap(), "blue");
 }
 

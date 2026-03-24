@@ -53,16 +53,24 @@ impl Scheduler {
         // instead of peek_next() + gate.admit() + claim_task() (2 SQL).
         // pop_next() skips expired tasks via its WHERE clause.
         if self.inner.fast_dispatch.load(AtomicOrdering::Relaxed) {
-            let Some(task) = self.inner.store.pop_next().await? else {
+            let Some(mut task) = self.inner.store.pop_next().await? else {
                 return Ok(false);
             };
+            self.inner
+                .store
+                .populate_tags(std::slice::from_mut(&mut task))
+                .await?;
             return self.spawn_dispatched_task(task).await;
         }
 
         // Slow path: peek → gate check → claim.
-        let Some(candidate) = self.inner.store.peek_next().await? else {
+        let Some(mut candidate) = self.inner.store.peek_next().await? else {
             return Ok(false);
         };
+        self.inner
+            .store
+            .populate_tags(std::slice::from_mut(&mut candidate))
+            .await?;
 
         // Dispatch-time expiry check: if the candidate has expired, expire
         // it and retry (return Ok(true) to loop again).
@@ -221,10 +229,12 @@ impl Scheduler {
                     break;
                 }
                 let available = max - active_count;
-                let tasks = self.inner.store.pop_next_batch(available).await?;
+                let mut tasks = self.inner.store.pop_next_batch(available).await?;
                 if tasks.is_empty() {
                     break;
                 }
+                // Populate tags in one batch query (lazy — not done at pop time).
+                self.inner.store.populate_tags(&mut tasks).await?;
                 for task in tasks {
                     self.spawn_dispatched_task(task).await?;
                 }

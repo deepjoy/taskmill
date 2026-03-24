@@ -42,11 +42,7 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let mut record = row.as_ref().map(row_to_task_record);
-        if let Some(ref mut r) = record {
-            self.populate_tags(std::slice::from_mut(r)).await?;
-        }
-        Ok(record)
+        Ok(row.as_ref().map(row_to_task_record))
     }
 
     /// Atomically claim a specific pending task by id, setting it to running.
@@ -150,8 +146,7 @@ impl TaskStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
-        self.populate_tags(&mut records).await?;
+        let records: Vec<TaskRecord> = rows.iter().map(row_to_task_record).collect();
         Ok(records)
     }
 
@@ -161,6 +156,10 @@ impl TaskStore {
     ///
     /// For tasks with `ttl_from = 'first_attempt'`, sets `expires_at` on
     /// the first pop.
+    ///
+    /// Tags are **not** populated — callers needing tags should call
+    /// [`populate_tags`](Self::populate_tags) explicitly or use
+    /// [`task_by_id`](Self::task_by_id).
     pub async fn pop_next(&self) -> Result<Option<TaskRecord>, StoreError> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let row = sqlx::query(
@@ -189,11 +188,7 @@ impl TaskStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        let mut record = row.map(|r| row_to_task_record(&r));
-        if let Some(ref mut r) = record {
-            self.populate_tags(std::slice::from_mut(r)).await?;
-        }
-        Ok(record)
+        Ok(row.map(|r| row_to_task_record(&r)))
     }
 
     /// Atomically requeue a running task back to pending.
@@ -794,6 +789,20 @@ impl TaskStore {
         tracing::debug!(count = items.len(), "store.fail_batch: COMMIT ok");
 
         self.maybe_prune().await;
+        Ok(())
+    }
+
+    /// Increment retry count in-place without changing task status.
+    ///
+    /// Used by inline immediate retries: the task stays `running` and is
+    /// re-executed directly in the same spawned future, avoiding the
+    /// requeue-to-pending → pop_next round-trip through SQLite.
+    pub async fn increment_retry(&self, task_id: i64, error: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE tasks SET retry_count = retry_count + 1, last_error = ? WHERE id = ?")
+            .bind(error)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

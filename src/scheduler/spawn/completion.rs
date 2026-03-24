@@ -32,7 +32,7 @@ pub(crate) async fn handle_success(
     metrics: &IoBudget,
     memo: Option<Vec<u8>>,
     deps: &CompletionDeps,
-    decrement_module: impl FnOnce(),
+    mut decrement_module: impl FnMut(),
 ) {
     let task_id = task.id;
 

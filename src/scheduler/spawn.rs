@@ -39,6 +39,9 @@ pub(crate) enum ExecutionPhase {
 /// and spawns the executor on a new tokio task. The actual success and
 /// failure handling is delegated to [`completion::handle_success`] and
 /// [`failure::handle_failure`].
+///
+/// For zero-delay retries, the executor is re-invoked inline (without
+/// requeueing to pending) to avoid the pop_next SQL round-trip.
 pub(crate) async fn spawn_task(
     task: TaskRecord,
     executor: Arc<dyn ErasedExecutor>,
@@ -84,68 +87,134 @@ pub(crate) async fn spawn_task(
         completion_rx: ctx.completion_rx.clone(),
     };
     let failure_deps = failure::FailureDeps {
-        store: ctx.store,
+        store: ctx.store.clone(),
         active: ctx.active.clone(),
-        event_tx: ctx.event_tx,
-        work_notify: ctx.work_notify,
+        event_tx: ctx.event_tx.clone(),
+        work_notify: ctx.work_notify.clone(),
         max_retries: ctx.max_retries,
-        registry: ctx.registry,
-        failure_tx: ctx.failure_tx,
-        failure_rx: ctx.failure_rx,
+        registry: ctx.registry.clone(),
+        failure_tx: ctx.failure_tx.clone(),
+        failure_rx: ctx.failure_rx.clone(),
     };
 
+    // Keep SpawnContext alive for inline retry context rebuilds.
+    let spawn_ctx = ctx;
+
     let task_id_for_handle = task.id;
-    let active_for_handle = ctx.active;
+    let active_for_handle = spawn_ctx.active.clone();
     let token_for_spawn = prepared.token.clone();
-    let module_running = ctx.module_running;
-    let io = prepared.io;
+    let module_running = spawn_ctx.module_running.clone();
 
     let handle = tokio::spawn(async move {
         let task_id = task.id;
+        let mut task = task;
+        let mut prepared = prepared;
 
         // Helper: decrement the module running counter when this task leaves "running".
-        let decrement_module = || {
-            if let Some(name) = task.module_name() {
-                if let Some(counter) = module_running.get(name) {
-                    counter.fetch_sub(1, AtomicOrdering::Relaxed);
+        // Capture module name upfront to avoid borrowing `task` in the closure.
+        let module_name_owned = task.module_name().map(|s| s.to_string());
+        let module_running_for_dec = module_running.clone();
+        let mut decremented = false;
+        let mut decrement_module_once = || {
+            if !decremented {
+                decremented = true;
+                if let Some(ref name) = module_name_owned {
+                    if let Some(counter) = module_running_for_dec.get(name.as_str()) {
+                        counter.fetch_sub(1, AtomicOrdering::Relaxed);
+                    }
                 }
             }
         };
 
-        let result = match phase {
-            ExecutionPhase::Execute => executor.execute_erased(&prepared.ctx).await,
-            ExecutionPhase::Finalize => {
-                executor.finalize_erased(&prepared.ctx).await.map(|()| None)
-            } // finalize doesn't produce a memo
-        };
-
-        // Read IO bytes from the context tracker.
-        let metrics = io.snapshot();
-
-        // Drop the context (and its progress reporter) — executor is done.
-        drop(prepared.ctx);
-
-        match result {
-            Ok(memo) => {
-                completion::handle_success(
-                    &task,
-                    phase,
-                    &metrics,
-                    memo,
-                    &completion_deps,
-                    decrement_module,
-                )
-                .await;
-            }
-            Err(te) => {
-                // If cancelled (preempted), the scheduler already paused it.
-                if token_for_spawn.is_cancelled() {
-                    decrement_module();
-                    failure_deps.active.remove(task_id);
-                    return;
+        loop {
+            let result = match phase {
+                ExecutionPhase::Execute => executor.execute_erased(&prepared.ctx).await,
+                ExecutionPhase::Finalize => {
+                    executor.finalize_erased(&prepared.ctx).await.map(|()| None)
                 }
+            };
 
-                failure::handle_failure(&task, te, &metrics, &failure_deps, decrement_module).await;
+            // Read IO bytes from the context tracker.
+            let metrics = prepared.io.snapshot();
+
+            // Drop the context (and its progress reporter) — executor is done.
+            drop(prepared.ctx);
+
+            match result {
+                Ok(memo) => {
+                    completion::handle_success(
+                        &task,
+                        phase,
+                        &metrics,
+                        memo,
+                        &completion_deps,
+                        &mut decrement_module_once,
+                    )
+                    .await;
+                    break;
+                }
+                Err(te) => {
+                    // If cancelled (preempted), the scheduler already paused it.
+                    if token_for_spawn.is_cancelled() {
+                        decrement_module_once();
+                        failure_deps.active.remove(task_id);
+                        break;
+                    }
+
+                    // Check for inline immediate retry: retryable, under max,
+                    // zero delay, execute phase only.
+                    if phase == ExecutionPhase::Execute && te.retryable {
+                        let policy = failure_deps.registry.type_retry_policy(&task.task_type);
+                        let effective_max = task.max_retries.unwrap_or(
+                            policy
+                                .map(|p| p.max_retries)
+                                .unwrap_or(failure_deps.max_retries),
+                        );
+                        let will_retry = task.retry_count < effective_max;
+
+                        if will_retry {
+                            let delay = if let Some(ms) = te.retry_after_ms {
+                                std::time::Duration::from_millis(ms)
+                            } else if let Some(strategy) = policy.map(|p| &p.strategy) {
+                                strategy.delay_for(task.retry_count)
+                            } else {
+                                std::time::Duration::ZERO
+                            };
+
+                            if delay.is_zero() {
+                                // Inline retry: persist retry_count, re-execute.
+                                let _ = failure_deps
+                                    .store
+                                    .increment_retry(task.id, &te.message)
+                                    .await;
+                                task.retry_count += 1;
+
+                                // Emit retry event.
+                                let _ = failure_deps.event_tx.send(SchedulerEvent::Failed {
+                                    header: task.event_header(),
+                                    error: te.message,
+                                    will_retry: true,
+                                    retry_after: None,
+                                });
+
+                                // Rebuild context for next attempt.
+                                prepared = context::build_task_context(&task, &spawn_ctx);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Not inline-retryable — use normal failure path.
+                    failure::handle_failure(
+                        &task,
+                        te,
+                        &metrics,
+                        &failure_deps,
+                        &mut decrement_module_once,
+                    )
+                    .await;
+                    break;
+                }
             }
         }
     });
