@@ -49,6 +49,21 @@ pub struct SchedulerSnapshot {
     pub recurring_schedules: Vec<crate::task::RecurringScheduleInfo>,
     /// Tasks currently blocked waiting for dependencies.
     pub blocked_count: i64,
+    /// Groups that are currently paused, with the timestamp each was paused.
+    pub paused_groups: Vec<PausedGroupInfo>,
+}
+
+/// Information about a paused group for snapshot/dashboard display.
+///
+/// `paused_at` and `resume_at` are stored as epoch milliseconds (INTEGER) in SQLite.
+/// Converted to `DateTime<Utc>` for the public API (display layer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PausedGroupInfo {
+    pub group: String,
+    pub paused_at: chrono::DateTime<chrono::Utc>,
+    pub paused_task_count: i64,
+    /// When the group will auto-resume (if time-boxed).
+    pub resume_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ── Task Event Header ────────────────────────────────────────────────
@@ -164,6 +179,14 @@ pub enum SchedulerEvent {
     Paused,
     /// The scheduler was resumed via [`Scheduler::resume_all`](super::Scheduler::resume_all).
     Resumed,
+    /// A task group was paused.
+    GroupPaused {
+        group: String,
+        pending_count: usize,
+        running_count: usize,
+    },
+    /// A task group was resumed.
+    GroupResumed { group: String, resumed_count: usize },
 }
 
 impl SchedulerEvent {
@@ -185,7 +208,9 @@ impl SchedulerEvent {
             | Self::TaskUnblocked { .. }
             | Self::DependencyFailed { .. }
             | Self::Paused
-            | Self::Resumed => None,
+            | Self::Resumed
+            | Self::GroupPaused { .. }
+            | Self::GroupResumed { .. } => None,
         }
     }
 }

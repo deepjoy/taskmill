@@ -240,6 +240,19 @@ impl ActiveTaskMap {
         drained.len()
     }
 
+    /// Pause active tasks whose `group_key` matches: cancel their tokens and
+    /// move them to paused state in the store. Returns count paused.
+    pub async fn pause_group(
+        &self,
+        group_key: &str,
+        store: &TaskStore,
+        event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
+    ) -> usize {
+        let drained = self.drain_where(|at| at.record.group_key.as_deref() == Some(group_key));
+        cancel_pause_emit(&drained, store, event_tx, PauseReasons::GROUP).await;
+        drained.len()
+    }
+
     /// Drain tasks matching `predicate` from the active map.
     ///
     /// Collects matching tasks under the sync lock and removes them
@@ -261,7 +274,10 @@ impl ActiveTaskMap {
 
 /// Cancel tokens, pause in store with the given reason, and emit `Preempted`
 /// events for drained tasks.
-async fn cancel_pause_emit(
+///
+/// GROUP reason suppresses per-task events — the caller emits a single
+/// aggregate `GroupPaused` event instead.
+pub(crate) async fn cancel_pause_emit(
     drained: &[(i64, ActiveTask)],
     store: &TaskStore,
     event_tx: &tokio::sync::broadcast::Sender<SchedulerEvent>,
@@ -270,9 +286,12 @@ async fn cancel_pause_emit(
     for (id, at) in drained {
         at.token.cancel();
         let _ = store.pause(*id, reason).await;
-        emit_event(
-            event_tx,
-            SchedulerEvent::Preempted(at.record.event_header()),
-        );
+        // GROUP has its own coordinator-level event (GroupPaused).
+        if !reason.contains(PauseReasons::GROUP) {
+            emit_event(
+                event_tx,
+                SchedulerEvent::Preempted(at.record.event_header()),
+            );
+        }
     }
 }
