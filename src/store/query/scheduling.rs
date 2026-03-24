@@ -49,6 +49,26 @@ impl TaskStore {
             .collect())
     }
 
+    /// Set the `run_after` timestamp for a pending task.
+    ///
+    /// Used by the rate limiter to defer a task until its next token is
+    /// available, preventing head-of-line blocking.
+    pub async fn set_run_after(
+        &self,
+        task_id: i64,
+        run_after: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE tasks SET run_after = ?
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(run_after.timestamp_millis())
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── Recurring control ──────────────────────────────────────────
 
     /// Pause a recurring schedule. The current instance (if running) is

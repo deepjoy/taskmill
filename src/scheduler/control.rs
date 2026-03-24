@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 
 use crate::store::StoreError;
 
+use super::rate_limit::RateLimit;
 use super::{emit_event, Scheduler, SchedulerEvent};
 
 impl Scheduler {
@@ -241,16 +242,51 @@ impl Scheduler {
         self.inner.paused_groups.read().unwrap().contains(group_key)
     }
 
+    // ── Rate Limiting ──────────────────────────────────────────────
+
+    /// Set or update the rate limit for a task type at runtime.
+    ///
+    /// If a bucket already exists, reconfigures in-place (preserving current
+    /// token count, clamped to new burst). If not, creates a new bucket.
+    pub fn set_rate_limit(&self, task_type: impl Into<String>, limit: RateLimit) {
+        self.inner.type_rate_limits.set(task_type.into(), limit);
+        self.inner
+            .fast_dispatch
+            .store(false, AtomicOrdering::Relaxed);
+    }
+
+    /// Remove the task-type rate limit, falling back to unlimited.
+    pub fn remove_rate_limit(&self, task_type: &str) {
+        self.inner.type_rate_limits.remove(task_type);
+        self.maybe_restore_fast_dispatch();
+    }
+
+    /// Set or update the rate limit for a task group at runtime.
+    pub fn set_group_rate_limit(&self, group: impl Into<String>, limit: RateLimit) {
+        self.inner.group_rate_limits.set(group.into(), limit);
+        self.inner
+            .fast_dispatch
+            .store(false, AtomicOrdering::Relaxed);
+    }
+
+    /// Remove the group rate limit, falling back to unlimited.
+    pub fn remove_group_rate_limit(&self, group: &str) {
+        self.inner.group_rate_limits.remove(group);
+        self.maybe_restore_fast_dispatch();
+    }
+
     /// Re-evaluate whether fast dispatch can be re-enabled.
     ///
     /// Must mirror the conditions in `SchedulerBuilder::build()`:
     /// no paused groups, no group limits (default or overrides), no resource
-    /// monitoring, no pressure sources, no module concurrency caps.
+    /// monitoring, no pressure sources, no module concurrency caps, no rate limits.
     fn maybe_restore_fast_dispatch(&self) {
         let has_groups = self.inner.group_limits.default_limit() > 0
             || self.inner.group_limits.has_overrides()
             || !self.inner.paused_groups.read().unwrap().is_empty();
         let has_module_caps = !self.inner.module_caps.read().unwrap().is_empty();
+        let has_rate_limits =
+            !self.inner.type_rate_limits.is_empty() || !self.inner.group_rate_limits.is_empty();
 
         if !has_groups
             && !self
@@ -262,6 +298,7 @@ impl Scheduler {
                 .inner
                 .has_pressure_sources
                 .load(AtomicOrdering::Relaxed)
+            && !has_rate_limits
         {
             self.inner
                 .fast_dispatch

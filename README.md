@@ -79,6 +79,7 @@ async fn main() {
 - **Avoid duplicate work** — key-based deduplication prevents the same task from being queued twice
 - **React to system load** — composable backpressure from any signal (disk, network, memory, battery, API limits)
 - **Control concurrency** — per-group limits (e.g., per S3 bucket), global limits, runtime-adjustable
+- **Rate-limit dispatch** — token-bucket rate limits per task type and/or group cap start rate independently of concurrency
 - **Build for Tauri** — `Clone`, `Serialize` on all types; events bridge directly to frontends
 
 ## Where to start

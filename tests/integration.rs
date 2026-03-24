@@ -26,6 +26,8 @@ mod memo;
 mod module_features;
 #[path = "integration/modules.rs"]
 mod modules;
+#[path = "integration/rate_limit.rs"]
+mod rate_limit;
 #[path = "integration/retry_policy.rs"]
 mod retry_policy;
 #[path = "integration/scheduler_core.rs"]

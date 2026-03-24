@@ -11,7 +11,7 @@ use crate::task::IoBudget;
 
 use super::{emit_event, SchedulerEvent};
 
-use super::gate::GateContext;
+use super::gate::{Admission, GateContext};
 use super::spawn::{self, SpawnContext};
 use super::{Scheduler, ShutdownMode};
 
@@ -103,13 +103,33 @@ impl Scheduler {
             module_caps: &self.inner.module_caps,
             module_running: &self.inner.module_running,
             paused_groups: &paused_groups,
+            type_rate_limits: &self.inner.type_rate_limits,
+            group_rate_limits: &self.inner.group_rate_limits,
         };
 
         // Admission check while the task is still pending — no running
         // window if the gate rejects.
-        if !self.inner.gate.admit(&candidate, &gate_ctx).await? {
-            drop(reader_guard);
-            return Ok(false);
+        match self.inner.gate.admit(&candidate, &gate_ctx).await? {
+            Admission::Admit => { /* proceed to claim */ }
+            Admission::Deny => {
+                drop(reader_guard);
+                return Ok(false);
+            }
+            Admission::RateLimited(next) => {
+                drop(reader_guard);
+                // Set run_after to push the task out of the peek window,
+                // preventing head-of-line blocking. Other task types can
+                // still dispatch while this one waits for a token.
+                let wait = next.duration_since(tokio::time::Instant::now());
+                let run_after = chrono::Utc::now()
+                    + chrono::Duration::from_std(wait).unwrap_or(chrono::Duration::milliseconds(1));
+                self.inner
+                    .store
+                    .set_run_after(candidate.id, run_after)
+                    .await?;
+                // Return true to keep looping — another task may be eligible.
+                return Ok(true);
+            }
         }
         drop(reader_guard);
 

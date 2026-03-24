@@ -168,6 +168,10 @@ impl Scheduler {
             )
             .collect();
 
+        // Rate limits: combine type and group collections.
+        let mut rate_limits = self.inner.type_rate_limits.snapshot_info("type");
+        rate_limits.extend(self.inner.group_rate_limits.snapshot_info("group"));
+
         Ok(SchedulerSnapshot {
             running,
             pending_count,
@@ -182,6 +186,7 @@ impl Scheduler {
             recurring_schedules,
             blocked_count,
             paused_groups,
+            rate_limits,
         })
     }
 }

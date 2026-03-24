@@ -22,6 +22,8 @@
 //! - Supports [task superseding](DuplicateStrategy::Supersede) for atomic cancel-and-replace
 //! - Supports [task TTL](TtlFrom) with automatic expiry, per-type defaults, and child inheritance
 //! - Supports [graceful shutdown](ShutdownMode) with configurable drain timeout
+//! - Supports [token-bucket rate limiting](RateLimit) per task type and/or group to cap start rate
+//!   independently of concurrency
 //!
 //! # Concepts
 //!
@@ -806,9 +808,9 @@ pub use resource::network_pressure::NetworkPressure;
 pub use resource::sampler::SamplerConfig;
 pub use resource::{ResourceReader, ResourceSampler, ResourceSnapshot};
 pub use scheduler::{
-    EstimatedProgress, GroupLimits, PausedGroupInfo, ProgressReporter, Scheduler, SchedulerBuilder,
-    SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode, TaskEventHeader,
-    TaskProgress,
+    EstimatedProgress, GroupLimits, PausedGroupInfo, ProgressReporter, RateLimit, RateLimitInfo,
+    Scheduler, SchedulerBuilder, SchedulerConfig, SchedulerEvent, SchedulerSnapshot, ShutdownMode,
+    TaskEventHeader, TaskProgress,
 };
 pub use store::{RetentionPolicy, StoreConfig, StoreError, TaskStore};
 pub use task::{

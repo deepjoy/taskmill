@@ -349,6 +349,52 @@ scheduler.domain::<Media>().set_max_concurrency(8);
 let current = scheduler.domain::<Media>().max_concurrency();
 ```
 
+## Rate limiting
+
+Rate limits control how many tasks *start per unit of time*, complementing concurrency limits which control how many run *simultaneously*. This is useful when fast tasks (e.g., small API calls completing in milliseconds) could produce bursts that exceed external rate limits.
+
+Configure at build time:
+
+```rust
+use taskmill::{RateLimit, Scheduler};
+
+Scheduler::builder()
+    // Task-type rate limit: at most 100 uploads per second.
+    .rate_limit("media::upload", RateLimit::per_second(100))
+    // Group rate limit: at most 50 requests/sec to this S3 bucket.
+    .group_rate_limit("s3://prod-bucket", RateLimit::per_second(50))
+    // Allow short bursts above the steady-state rate.
+    .rate_limit("media::thumbnail", RateLimit::per_second(10).with_burst(20))
+    // ...
+    .build()
+    .await?;
+```
+
+Adjust at runtime via the scheduler or a domain handle:
+
+```rust
+scheduler.set_rate_limit("media::upload", RateLimit::per_second(200));
+scheduler.remove_rate_limit("media::upload");
+
+// Domain handles auto-prefix the task type:
+let media = scheduler.domain::<Media>();
+media.set_rate_limit("upload", RateLimit::per_second(150));   // → "media::upload"
+media.set_group_rate_limit("s3://prod-bucket", RateLimit::per_minute(3000));
+```
+
+A task can be subject to both a task-type rate limit and a group rate limit — it must pass both to be dispatched. Rate limit tokens are acquired *after* all free checks (backpressure, IO budget, concurrency, group pause) so tokens are never wasted on tasks that would be rejected anyway.
+
+When a task is rate-limited, its `run_after` is set to the next token availability, removing it from the dispatch window so other task types can proceed without head-of-line blocking.
+
+Current rate limit state is visible in the scheduler snapshot:
+
+```rust
+let snap = scheduler.snapshot().await?;
+for rl in &snap.rate_limits {
+    println!("{}: {}/{} tokens available", rl.scope, rl.available_tokens, rl.burst);
+}
+```
+
 ## Tuning for specific workloads
 
 ### Desktop app with file processing
@@ -386,6 +432,7 @@ Scheduler::builder()
     .with_resource_monitoring()
     .bandwidth_limit(50_000_000.0)  // 50 MB/s cap
     .group_concurrency("s3-bucket", 4)  // per-endpoint limits
+    .group_rate_limit("s3-bucket", RateLimit::per_second(100))  // stay under API rate limit
     .shutdown_mode(ShutdownMode::Graceful(Duration::from_secs(30)))
 ```
 
@@ -435,6 +482,8 @@ Scheduler::builder()
 | `bandwidth_limit(bytes_per_sec)` | Set a network bandwidth cap; registers a built-in `NetworkPressure` source. |
 | `default_group_concurrency(n)` | Default concurrency limit for grouped tasks (0 = unlimited). |
 | `group_concurrency(group, n)` | Per-group concurrency limit override. |
+| `rate_limit(task_type, limit)` | Set a token-bucket rate limit for a task type. |
+| `group_rate_limit(group, limit)` | Set a token-bucket rate limit for a task group. |
 | `app_state(state)` | Register global state visible to all domains. |
 | `app_state_arc(arc)` | Register global state from a pre-existing `Arc`. |
 | `build()` | Build and return the `Scheduler`. |

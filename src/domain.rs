@@ -710,6 +710,32 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.max_concurrency()
     }
 
+    // ── Rate Limiting ──────────────────────────────────────────────
+
+    /// Set a rate limit for a task type in this domain.
+    pub fn set_rate_limit(&self, task_type: &str, limit: crate::scheduler::RateLimit) {
+        self.inner.set_rate_limit(task_type, limit);
+    }
+
+    /// Remove the rate limit for a task type in this domain.
+    pub fn remove_rate_limit(&self, task_type: &str) {
+        self.inner.remove_rate_limit(task_type);
+    }
+
+    /// Set a rate limit for a task group.
+    pub fn set_group_rate_limit(
+        &self,
+        group: impl Into<String>,
+        limit: crate::scheduler::RateLimit,
+    ) {
+        self.inner.set_group_rate_limit(group, limit);
+    }
+
+    /// Remove a group rate limit.
+    pub fn remove_group_rate_limit(&self, group: &str) {
+        self.inner.remove_group_rate_limit(group);
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Subscribe to all events for this domain.

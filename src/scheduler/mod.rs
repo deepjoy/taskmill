@@ -2,18 +2,19 @@
 //!
 //! [`Scheduler`] coordinates task execution — popping from the
 //! [`TaskStore`], applying [backpressure](crate::backpressure),
-//! IO-budget checks, and [group concurrency](crate::GroupLimits) limits,
+//! IO-budget checks, [group concurrency](crate::GroupLimits) limits,
+//! and [token-bucket rate limiting](crate::RateLimit) per task type and group,
 //! preempting lower-priority work, and emitting [`SchedulerEvent`]s for UI
 //! integration. Use [`SchedulerBuilder`] for ergonomic construction.
 //!
 //! The `Scheduler` implementation is split across focused submodules:
 //! - `submit` — task submission, lookup, cancellation, and superseding
 //! - `run_loop` — the main event loop, dispatch, and shutdown
-//! - `control` — pause/resume, concurrency limits, and group limits
+//! - `control` — pause/resume, concurrency limits, group limits, and rate limits
 //! - `queries` — read-only queries (active tasks, progress, snapshots)
 //! - `builder` — ergonomic construction via [`SchedulerBuilder`]
 //! - `dispatch` — task spawning, active-task tracking, and preemption
-//! - `gate` — admission control (IO budget, backpressure, group limits)
+//! - `gate` — admission control (IO budget, backpressure, group limits, rate limits)
 //! - `event` — event types and scheduler configuration
 //! - [`progress`] — progress reporting, byte-level tracking, and extrapolation
 //!
@@ -27,6 +28,7 @@ pub(crate) mod event;
 pub(crate) mod gate;
 pub mod progress;
 mod queries;
+pub(crate) mod rate_limit;
 mod run_loop;
 pub(crate) mod spawn;
 mod submit;
@@ -81,6 +83,7 @@ pub use event::{
 };
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
+pub use rate_limit::{RateLimit, RateLimitInfo, RateLimits};
 
 /// Emit a scheduler event only when at least one subscriber is listening.
 ///
@@ -131,6 +134,10 @@ pub(crate) struct SchedulerInner {
     pub(crate) work_notify: Arc<Notify>,
     /// Per-group concurrency limits.
     pub(crate) group_limits: GroupLimits,
+    /// Per-task-type rate limits (e.g. "media::upload" → 100/sec).
+    pub(crate) type_rate_limits: rate_limit::RateLimits,
+    /// Per-group rate limits (e.g. "s3://b2-us-west" → 200/sec).
+    pub(crate) group_rate_limits: rate_limit::RateLimits,
     /// Timeout for on_cancel hooks.
     pub(crate) cancel_hook_timeout: Duration,
     /// Default TTL for tasks without an explicit TTL.
@@ -196,9 +203,10 @@ pub(crate) struct SchedulerInner {
 /// 1. Popping highest-priority pending tasks from the SQLite store
 /// 2. Checking IO budget against running task estimates and system capacity
 /// 3. Applying backpressure throttling based on external pressure sources
-/// 4. Preempting lower-priority tasks when high-priority work arrives
-/// 5. Managing retries and failure recording
-/// 6. Emitting lifecycle events for UI integration
+/// 4. Enforcing token-bucket rate limits per task type and group
+/// 5. Preempting lower-priority tasks when high-priority work arrives
+/// 6. Managing retries and failure recording
+/// 7. Emitting lifecycle events for UI integration
 ///
 /// `Scheduler` is `Clone` — each clone shares the same underlying state.
 /// This makes it easy to hold in `tauri::State<Scheduler>` or share across
@@ -307,6 +315,8 @@ impl Scheduler {
                 paused: AtomicBool::new(false),
                 work_notify: Arc::new(Notify::new()),
                 group_limits: GroupLimits::new(),
+                type_rate_limits: rate_limit::RateLimits::new(),
+                group_rate_limits: rate_limit::RateLimits::new(),
                 cancel_hook_timeout: config.cancel_hook_timeout,
                 default_ttl: config.default_ttl,
                 expiry_sweep_interval: config.expiry_sweep_interval,
