@@ -232,6 +232,26 @@ impl TaskStore {
         Ok(count.0)
     }
 
+    /// Count of pending tasks in a group (for event emission).
+    pub async fn pending_count_for_group(&self, group_key: &str) -> Result<i64, StoreError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE group_key = ? AND status = 'pending'")
+                .bind(group_key)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
+    /// Count of paused tasks in a group.
+    pub async fn paused_count_for_group(&self, group_key: &str) -> Result<i64, StoreError> {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE group_key = ? AND status = 'paused'")
+                .bind(group_key)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(count)
+    }
+
     /// Return the dependency edges for a given task (what it depends on).
     pub async fn task_dependencies(&self, task_id: i64) -> Result<Vec<i64>, StoreError> {
         let rows: Vec<(i64,)> =

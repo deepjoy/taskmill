@@ -107,6 +107,129 @@ impl TaskStore {
         Ok(fully_resumed)
     }
 
+    // ── Group Pause State ──────────────────────────────────────────
+
+    /// Record a group as paused. Returns `true` if the group was newly paused
+    /// (not already paused — idempotent).
+    pub async fn pause_group_state(
+        &self,
+        group_key: &str,
+        resume_at: Option<i64>, // epoch milliseconds
+    ) -> Result<bool, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO paused_groups (group_key, paused_at, resume_at) VALUES (?, ?, ?)",
+        )
+        .bind(group_key)
+        .bind(now_ms)
+        .bind(resume_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Remove a group from the paused state. Returns `true` if the group was
+    /// actually paused (idempotent).
+    pub async fn resume_group_state(&self, group_key: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM paused_groups WHERE group_key = ?")
+            .bind(group_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List all currently paused groups with their pause timestamps.
+    pub async fn paused_groups(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT group_key, paused_at FROM paused_groups ORDER BY paused_at")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
+    /// Check if a specific group is currently paused.
+    pub async fn is_group_paused(&self, group_key: &str) -> Result<bool, StoreError> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM paused_groups WHERE group_key = ?")
+            .bind(group_key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    /// Find groups whose `resume_at` has elapsed (for auto-resume).
+    pub async fn groups_due_for_resume(&self) -> Result<Vec<String>, StoreError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT group_key FROM paused_groups
+             WHERE resume_at IS NOT NULL AND resume_at <= ?",
+        )
+        .bind(now_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(k,)| k).collect())
+    }
+
+    // ── Bulk pause / resume by group ──────────────────────────────
+
+    /// Pause tasks in a group. ORs the GROUP bit into all pending and
+    /// already-paused tasks in the group:
+    /// - Pending tasks → paused with GROUP bit.
+    /// - Already-paused tasks → GROUP bit added (prevents premature resume
+    ///   by other mechanisms clearing their own bit).
+    ///
+    /// Returns the count of newly paused tasks (status changed from pending).
+    pub async fn pause_tasks_in_group(&self, group_key: &str) -> Result<u64, StoreError> {
+        // Add GROUP bit to already-paused tasks (no status change, just adds the bit).
+        sqlx::query(
+            "UPDATE tasks SET pause_reasons = pause_reasons | 8
+             WHERE group_key = ? AND status = 'paused' AND (pause_reasons & 8) = 0",
+        )
+        .bind(group_key)
+        .execute(&self.pool)
+        .await?;
+
+        // Pause pending tasks with GROUP bit.
+        let result = sqlx::query(
+            "UPDATE tasks SET status = 'paused',
+                              pause_reasons = pause_reasons | 8
+             WHERE group_key = ? AND status = 'pending'",
+        )
+        .bind(group_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Resume group-paused tasks. Two-step process:
+    ///
+    /// 1. **Fully resume** tasks where GROUP is the sole reason (pause_reasons = 8).
+    /// 2. **Clear GROUP bit** from multi-reason tasks (they stay paused under
+    ///    their remaining reasons).
+    ///
+    /// Returns the count of tasks that fully resumed (became pending).
+    pub async fn resume_paused_by_group(&self, group_key: &str) -> Result<u64, StoreError> {
+        // 1. Fully resume tasks where GROUP is the sole reason.
+        let fully_resumed = sqlx::query(
+            "UPDATE tasks SET status = 'pending', pause_reasons = 0
+             WHERE group_key = ? AND status = 'paused' AND pause_reasons = 8",
+        )
+        .bind(group_key)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        // 2. Clear GROUP bit from multi-reason tasks (stays paused).
+        sqlx::query(
+            "UPDATE tasks SET pause_reasons = pause_reasons & ~8
+             WHERE group_key = ? AND status = 'paused' AND (pause_reasons & 8) != 0",
+        )
+        .bind(group_key)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(fully_resumed)
+    }
+
     // ── Cancellation (user-initiated) ──────────────────────────────
 
     /// Move a task to history as cancelled and delete it from the active queue.

@@ -298,16 +298,17 @@ impl TaskStore {
         .await?;
 
         // ALTER TABLE ADD COLUMN is not idempotent — tolerate failure.
-        let _ = sqlx::raw_sql(
-            "ALTER TABLE tasks ADD COLUMN pause_reasons INTEGER NOT NULL DEFAULT 0;",
-        )
-        .execute(&self.pool)
-        .await;
+        let _ =
+            sqlx::raw_sql("ALTER TABLE tasks ADD COLUMN pause_reasons INTEGER NOT NULL DEFAULT 0;")
+                .execute(&self.pool)
+                .await;
 
         // Backfill: existing paused tasks get PREEMPTION bit.
-        sqlx::raw_sql("UPDATE tasks SET pause_reasons = 1 WHERE status = 'paused' AND pause_reasons = 0;")
-            .execute(&self.pool)
-            .await?;
+        sqlx::raw_sql(
+            "UPDATE tasks SET pause_reasons = 1 WHERE status = 'paused' AND pause_reasons = 0;",
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
