@@ -661,6 +661,29 @@ impl ModuleHandle {
             .is_some_and(|f| f.load(AtomicOrdering::Acquire))
     }
 
+    // ── Group pause / resume ───────────────────────────────────────
+
+    /// Pause all tasks in a group. This is scheduler-global — a group paused
+    /// via one module's handle affects all modules.
+    pub async fn pause_group(&self, group_key: &str) -> Result<(), StoreError> {
+        self.scheduler.pause_group(group_key).await
+    }
+
+    /// Resume a paused group.
+    pub async fn resume_group(&self, group_key: &str) -> Result<(), StoreError> {
+        self.scheduler.resume_group(group_key).await
+    }
+
+    /// Check if a group is paused.
+    pub fn is_group_paused(&self, group_key: &str) -> bool {
+        self.scheduler.is_group_paused(group_key)
+    }
+
+    /// List all currently paused groups.
+    pub fn paused_groups(&self) -> Vec<String> {
+        self.scheduler.paused_groups()
+    }
+
     // ── Module concurrency ────────────────────────────────────────
 
     /// Set the maximum number of tasks from this module that may run concurrently.

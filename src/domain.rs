@@ -601,6 +601,29 @@ impl<D: DomainKey> DomainHandle<D> {
         self.inner.is_paused()
     }
 
+    // ── Group pause / resume ────────────────────────────────────────
+
+    /// Pause all tasks in a group. Delegates to the scheduler — group pause is
+    /// global, not scoped to this domain.
+    pub async fn pause_group(&self, group_key: &str) -> Result<(), StoreError> {
+        self.inner.pause_group(group_key).await
+    }
+
+    /// Resume a paused group.
+    pub async fn resume_group(&self, group_key: &str) -> Result<(), StoreError> {
+        self.inner.resume_group(group_key).await
+    }
+
+    /// Check if a group is paused.
+    pub fn is_group_paused(&self, group_key: &str) -> bool {
+        self.inner.is_group_paused(group_key)
+    }
+
+    /// List all currently paused groups.
+    pub fn paused_groups(&self) -> Vec<String> {
+        self.inner.paused_groups()
+    }
+
     // ── Queries ─────────────────────────────────────────────────────
 
     /// Capture a status snapshot for this domain.

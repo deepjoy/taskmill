@@ -58,6 +58,20 @@ impl TaskStore {
         }
         let unblocked: Vec<(i64,)> = q.fetch_all(&mut **conn).await?;
 
+        // Step 3: If any newly-unblocked task's group is paused, downgrade to
+        // paused with the GROUP reason bit instead of leaving it as pending.
+        for (task_id,) in &unblocked {
+            sqlx::query(
+                "UPDATE tasks SET status = 'paused',
+                                  pause_reasons = pause_reasons | 8
+                 WHERE id = ? AND status = 'pending'
+                   AND group_key IN (SELECT group_key FROM paused_groups)",
+            )
+            .bind(task_id)
+            .execute(&mut **conn)
+            .await?;
+        }
+
         Ok(unblocked.into_iter().map(|(id,)| id).collect())
     }
 
@@ -171,6 +185,16 @@ impl TaskStore {
                         .execute(&mut **conn)
                         .await?;
                             if result.rows_affected() > 0 {
+                                // If the task's group is paused, downgrade to paused.
+                                sqlx::query(
+                                    "UPDATE tasks SET status = 'paused',
+                                                      pause_reasons = pause_reasons | 8
+                                     WHERE id = ? AND status = 'pending'
+                                       AND group_key IN (SELECT group_key FROM paused_groups)",
+                                )
+                                .bind(dep_id)
+                                .execute(&mut **conn)
+                                .await?;
                                 all_unblocked.push(dep_id);
                             }
                         }

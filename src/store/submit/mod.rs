@@ -167,7 +167,33 @@ pub(crate) async fn submit_one(
             }
         }
 
-        return Ok(SubmitOutcome::Inserted(task_id));
+        // If the task's group is paused, insert as paused with the GROUP reason.
+        let is_group_paused = if let Some(ref gk) = sub.group_key {
+            let row: Option<(i64,)> =
+                sqlx::query_as("SELECT 1 FROM paused_groups WHERE group_key = ?")
+                    .bind(gk)
+                    .fetch_optional(&mut **conn)
+                    .await?;
+            row.is_some()
+        } else {
+            false
+        };
+
+        if is_group_paused {
+            sqlx::query(
+                "UPDATE tasks SET status = 'paused',
+                                  pause_reasons = pause_reasons | 8
+                 WHERE id = ? AND status = 'pending'",
+            )
+            .bind(task_id)
+            .execute(&mut **conn)
+            .await?;
+        }
+
+        return Ok(SubmitOutcome::Inserted {
+            id: task_id,
+            group_paused: is_group_paused,
+        });
     }
 
     // Dedup hit — branch on the duplicate strategy.

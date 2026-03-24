@@ -749,7 +749,7 @@
 //! let sync: DomainHandle<Sync> = scheduler.domain::<Sync>();
 //! let outcome = sync.submit(SyncFile { path: "path/to/file.txt".into() }).await?;
 //! // outcome is Superseded { new_task_id, replaced_task_id } if a duplicate existed,
-//! // or Inserted(id) if this was the first submission.
+//! // or Inserted { id, group_paused } if this was the first submission.
 //! ```
 //!
 //! # How the dispatch loop works

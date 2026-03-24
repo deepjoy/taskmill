@@ -64,7 +64,7 @@ use taskmill::SubmitOutcome;
 
 let outcome = scheduler.domain::<App>().submit(task).await?;
 match outcome {
-    SubmitOutcome::Inserted(id) => println!("new task: {id}"),
+    SubmitOutcome::Inserted { id, group_paused } => println!("new task: {id}, group_paused: {group_paused}"),
     SubmitOutcome::Duplicate => println!("already queued"),
     SubmitOutcome::Upgraded(id) => println!("priority upgraded: {id}"),
     SubmitOutcome::Requeued(id) => println!("requeued from history: {id}"),
