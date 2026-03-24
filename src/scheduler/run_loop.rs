@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -94,12 +95,14 @@ impl Scheduler {
 
         // Build gate context from current state.
         let reader_guard = self.inner.resource_reader.lock().await;
+        let paused_groups = self.inner.paused_groups.read().unwrap().clone();
         let gate_ctx = GateContext {
             store: &self.inner.store,
             resource_reader: reader_guard.as_ref(),
             group_limits: Some(&self.inner.group_limits),
             module_caps: &self.inner.module_caps,
             module_running: &self.inner.module_running,
+            paused_groups: &paused_groups,
         };
 
         // Admission check while the task is still pending — no running
@@ -180,6 +183,22 @@ impl Scheduler {
             finalizers.remove(&id);
             id
         };
+
+        // Check if parent's group is paused — defer finalize if so.
+        if let Ok(Some(parent_record)) = self.inner.store.task_by_id(parent_id).await {
+            if let Some(ref gk) = parent_record.group_key {
+                if self.inner.paused_groups.read().unwrap().contains(gk) {
+                    // Re-insert into pending_finalizers for later.
+                    self.inner
+                        .active
+                        .pending_finalizers
+                        .lock()
+                        .unwrap()
+                        .insert(parent_id);
+                    return Ok(false);
+                }
+            }
+        }
 
         // Transition the parent from waiting to running for finalize.
         self.inner.store.set_running_for_finalize(parent_id).await?;
@@ -459,6 +478,25 @@ impl Scheduler {
                         .has_preemptors_for(task.priority, self.inner.preempt_priority)
                     {
                         let _ = self.inner.store.resume_preempted(task.id).await;
+                    }
+                }
+            }
+        }
+
+        // Auto-resume time-boxed group pauses (throttled to avoid per-cycle DB queries).
+        if !self.inner.paused_groups.read().unwrap().is_empty() {
+            let now = tokio::time::Instant::now();
+            let should_check = {
+                let last = self.inner.last_group_resume_check.lock().unwrap();
+                now.duration_since(*last) >= Duration::from_secs(5)
+            };
+            if should_check {
+                *self.inner.last_group_resume_check.lock().unwrap() = now;
+                if let Ok(due_groups) = self.inner.store.groups_due_for_resume().await {
+                    for group_key in due_groups {
+                        if let Err(e) = self.resume_group(&group_key).await {
+                            tracing::error!(group = group_key, error = %e, "auto-resume failed");
+                        }
                     }
                 }
             }

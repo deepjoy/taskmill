@@ -4,7 +4,7 @@
 //! requeued. The built-in [`DefaultDispatchGate`] applies backpressure
 //! throttling and IO-budget checks.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,6 +35,8 @@ pub struct GateContext<'a> {
     pub module_caps: &'a StdRwLock<HashMap<String, usize>>,
     /// Per-module live running counts (module name → AtomicUsize).
     pub module_running: &'a HashMap<String, AtomicUsize>,
+    /// Set of currently paused group keys.
+    pub paused_groups: &'a HashSet<String>,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -147,6 +149,18 @@ impl DispatchGate for DefaultDispatchGate {
                     "task deferred — network IO budget exhausted — requeuing"
                 );
                 return Ok(false);
+            }
+
+            // Group pause check.
+            if let Some(group_key) = &task.group_key {
+                if ctx.paused_groups.contains(group_key) {
+                    tracing::trace!(
+                        task_type = task.task_type,
+                        group = group_key,
+                        "task deferred — group paused — requeuing"
+                    );
+                    return Ok(false);
+                }
             }
 
             // Group concurrency check.
@@ -351,5 +365,10 @@ impl GroupLimits {
     /// Read the current default limit.
     pub fn default_limit(&self) -> usize {
         self.default.load(Ordering::Relaxed)
+    }
+
+    /// Returns true if any per-group overrides are configured.
+    pub fn has_overrides(&self) -> bool {
+        !self.overrides.read().unwrap().is_empty()
     }
 }
