@@ -14,6 +14,8 @@ use crate::resource::sampler::{SamplerConfig, SmoothedReader};
 use crate::resource::{ResourceReader, ResourceSampler};
 use crate::store::{StoreConfig, StoreError, TaskStore};
 
+use super::rate_limit::RateLimit;
+
 use super::event::{SchedulerConfig, ShutdownMode};
 use super::Scheduler;
 
@@ -52,6 +54,8 @@ pub struct SchedulerBuilder {
     bandwidth_limit_bps: Option<f64>,
     default_group_concurrency: usize,
     group_concurrency_overrides: Vec<(String, usize)>,
+    type_rate_limits: Vec<(String, RateLimit)>,
+    group_rate_limits: Vec<(String, RateLimit)>,
 }
 
 impl SchedulerBuilder {
@@ -72,6 +76,8 @@ impl SchedulerBuilder {
             bandwidth_limit_bps: None,
             default_group_concurrency: 0,
             group_concurrency_overrides: Vec::new(),
+            type_rate_limits: Vec::new(),
+            group_rate_limits: Vec::new(),
         }
     }
 
@@ -242,6 +248,24 @@ impl SchedulerBuilder {
     /// concurrent executions.
     pub fn group_concurrency(mut self, group: impl Into<String>, limit: usize) -> Self {
         self.group_concurrency_overrides.push((group.into(), limit));
+        self
+    }
+
+    /// Set a rate limit for a task type.
+    ///
+    /// The `task_type` should be the full prefixed name (e.g. `"media::upload"`).
+    /// Multiple calls with the same key overwrite.
+    pub fn rate_limit(mut self, task_type: impl Into<String>, limit: RateLimit) -> Self {
+        self.type_rate_limits.push((task_type.into(), limit));
+        self
+    }
+
+    /// Set a rate limit for a task group.
+    ///
+    /// Tasks with a matching `group_key` are rate-limited to the configured
+    /// rate, independent of task-type rate limits (both must pass).
+    pub fn group_rate_limit(mut self, group: impl Into<String>, limit: RateLimit) -> Self {
+        self.group_rate_limits.push((group.into(), limit));
         self
     }
 
@@ -453,6 +477,16 @@ impl SchedulerBuilder {
             std::sync::atomic::Ordering::Relaxed,
         );
 
+        // Apply rate limits.
+        let has_rate_limits =
+            !self.type_rate_limits.is_empty() || !self.group_rate_limits.is_empty();
+        for (scope, limit) in self.type_rate_limits {
+            scheduler.inner.type_rate_limits.set(scope, limit);
+        }
+        for (scope, limit) in self.group_rate_limits {
+            scheduler.inner.group_rate_limits.set(scope, limit);
+        }
+
         // Compute fast-dispatch eligibility before consuming builder fields.
         let has_groups =
             self.default_group_concurrency > 0 || !self.group_concurrency_overrides.is_empty();
@@ -501,7 +535,12 @@ impl SchedulerBuilder {
         // Enable fast dispatch (single pop_next instead of peek + gate + claim)
         // when no groups, no resource monitoring, no pressure sources, no
         // module caps, and no paused groups are present.
-        if !has_groups && !has_monitoring && !has_pressure && !has_module_caps && !has_paused_groups
+        if !has_groups
+            && !has_monitoring
+            && !has_pressure
+            && !has_module_caps
+            && !has_paused_groups
+            && !has_rate_limits
         {
             scheduler
                 .inner

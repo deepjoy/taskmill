@@ -16,6 +16,7 @@ use tokio::time::Duration;
 use crate::priority::Priority;
 
 use super::progress::{EstimatedProgress, TaskProgress};
+use super::rate_limit::RateLimitInfo;
 
 // ── Snapshot ────────────────────────────────────────────────────────
 
@@ -51,6 +52,8 @@ pub struct SchedulerSnapshot {
     pub blocked_count: i64,
     /// Groups that are currently paused, with the timestamp each was paused.
     pub paused_groups: Vec<PausedGroupInfo>,
+    /// Configured rate limits with current utilization.
+    pub rate_limits: Vec<RateLimitInfo>,
 }
 
 /// Information about a paused group for snapshot/dashboard display.

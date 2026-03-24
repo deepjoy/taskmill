@@ -714,6 +714,37 @@ impl ModuleHandle {
             .unwrap_or(0)
     }
 
+    // ── Rate Limiting ─────────────────────────────────────────────
+
+    /// Set a rate limit for a task type in this module.
+    ///
+    /// The `task_type` is the unprefixed name (e.g. `"upload"` for a module
+    /// named `"media"` becomes `"media::upload"` internally).
+    pub fn set_rate_limit(&self, task_type: &str, limit: crate::scheduler::RateLimit) {
+        let prefixed = format!("{}{}", self.prefix, task_type);
+        self.scheduler.set_rate_limit(prefixed, limit);
+    }
+
+    /// Remove the rate limit for a task type in this module.
+    pub fn remove_rate_limit(&self, task_type: &str) {
+        let prefixed = format!("{}{}", self.prefix, task_type);
+        self.scheduler.remove_rate_limit(&prefixed);
+    }
+
+    /// Set a rate limit for a task group.
+    pub fn set_group_rate_limit(
+        &self,
+        group: impl Into<String>,
+        limit: crate::scheduler::RateLimit,
+    ) {
+        self.scheduler.set_group_rate_limit(group, limit);
+    }
+
+    /// Remove a group rate limit.
+    pub fn remove_group_rate_limit(&self, group: &str) {
+        self.scheduler.remove_group_rate_limit(group);
+    }
+
     // ── Scoped queries ────────────────────────────────────────────
 
     /// All active tasks in this module (any status).

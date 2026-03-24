@@ -15,8 +15,23 @@ use crate::resource::ResourceReader;
 use crate::store::{StoreError, TaskStore};
 use crate::task::TaskRecord;
 
+use super::rate_limit::RateLimits;
+
 /// Boxed future returned by [`DispatchGate`] methods.
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+// ── Admission ─────────────────────────────────────────────────────
+
+/// Result of a [`DispatchGate::admit`] call.
+pub enum Admission {
+    /// Task should be dispatched.
+    Admit,
+    /// Task should be requeued (backpressure, concurrency, etc.).
+    Deny,
+    /// Task was rate-limited. Contains the `Instant` the next token
+    /// will be available — caller should set `run_after` accordingly.
+    RateLimited(tokio::time::Instant),
+}
 
 // ── Gate Context ───────────────────────────────────────────────────
 
@@ -37,6 +52,10 @@ pub struct GateContext<'a> {
     pub module_running: &'a HashMap<String, AtomicUsize>,
     /// Set of currently paused group keys.
     pub paused_groups: &'a HashSet<String>,
+    /// Per-task-type rate limits.
+    pub type_rate_limits: &'a RateLimits,
+    /// Per-group rate limits.
+    pub group_rate_limits: &'a RateLimits,
 }
 
 // ── Dispatch Gate ──────────────────────────────────────────────────
@@ -45,16 +64,16 @@ pub struct GateContext<'a> {
 ///
 /// The scheduler calls [`admit`](DispatchGate::admit) after popping a
 /// task from the store but before spawning the executor. Returning
-/// `Ok(false)` causes the task to be requeued for a later cycle.
+/// `Ok(Admission::Deny)` causes the task to be requeued for a later cycle.
 ///
-/// The default [`DefaultDispatchGate`] applies backpressure throttling
-/// and IO-budget checks. Custom implementations can add per-type rate
-/// limiting, cost-model gating, feature flags, etc.
+/// The default [`DefaultDispatchGate`] applies backpressure throttling,
+/// IO-budget checks, group concurrency, module concurrency, and
+/// rate-limit checks.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use taskmill::scheduler::gate::{DispatchGate, GateContext};
+/// use taskmill::scheduler::gate::{Admission, DispatchGate, GateContext};
 /// use taskmill::store::StoreError;
 /// use taskmill::task::TaskRecord;
 ///
@@ -65,20 +84,22 @@ pub struct GateContext<'a> {
 ///         &'a self,
 ///         _task: &'a TaskRecord,
 ///         _ctx: &'a GateContext<'a>,
-///     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, StoreError>> + Send + 'a>> {
-///         Box::pin(async { Ok(true) })
+///     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Admission, StoreError>> + Send + 'a>> {
+///         Box::pin(async { Ok(Admission::Admit) })
 ///     }
 /// }
 /// ```
 pub trait DispatchGate: Send + Sync + 'static {
     /// Check whether `task` should be dispatched given the current context.
     ///
-    /// Return `Ok(true)` to dispatch, `Ok(false)` to requeue.
+    /// Return `Ok(Admission::Admit)` to dispatch, `Ok(Admission::Deny)` to
+    /// requeue, or `Ok(Admission::RateLimited(next))` to defer until the
+    /// given instant.
     fn admit<'a>(
         &'a self,
         task: &'a TaskRecord,
         ctx: &'a GateContext<'a>,
-    ) -> BoxFuture<'a, Result<bool, StoreError>>;
+    ) -> BoxFuture<'a, Result<Admission, StoreError>>;
 
     /// Current aggregate pressure (0.0–1.0). Returns 0.0 by default.
     fn pressure<'a>(&'a self) -> BoxFuture<'a, f32> {
@@ -116,7 +137,7 @@ impl DispatchGate for DefaultDispatchGate {
         &'a self,
         task: &'a TaskRecord,
         ctx: &'a GateContext<'a>,
-    ) -> BoxFuture<'a, Result<bool, StoreError>> {
+    ) -> BoxFuture<'a, Result<Admission, StoreError>> {
         Box::pin(async move {
             // Backpressure check.
             let current_pressure = self.pressure.lock().await.pressure();
@@ -126,7 +147,7 @@ impl DispatchGate for DefaultDispatchGate {
                     pressure = current_pressure,
                     "task throttled by backpressure — requeuing"
                 );
-                return Ok(false);
+                return Ok(Admission::Deny);
             }
 
             // IO budget check (disk).
@@ -137,7 +158,7 @@ impl DispatchGate for DefaultDispatchGate {
                     expected_write = task.expected_io.disk_write,
                     "task deferred — disk IO budget exhausted — requeuing"
                 );
-                return Ok(false);
+                return Ok(Admission::Deny);
             }
 
             // Network IO budget check.
@@ -148,7 +169,7 @@ impl DispatchGate for DefaultDispatchGate {
                     expected_tx = task.expected_io.net_tx,
                     "task deferred — network IO budget exhausted — requeuing"
                 );
-                return Ok(false);
+                return Ok(Admission::Deny);
             }
 
             // Group pause check.
@@ -159,7 +180,7 @@ impl DispatchGate for DefaultDispatchGate {
                         group = group_key,
                         "task deferred — group paused — requeuing"
                     );
-                    return Ok(false);
+                    return Ok(Admission::Deny);
                 }
             }
 
@@ -176,7 +197,7 @@ impl DispatchGate for DefaultDispatchGate {
                                 limit,
                                 "task deferred — group concurrency saturated — requeuing"
                             );
-                            return Ok(false);
+                            return Ok(Admission::Deny);
                         }
                     }
                 }
@@ -198,12 +219,35 @@ impl DispatchGate for DefaultDispatchGate {
                             cap,
                             "task deferred — module concurrency saturated — requeuing"
                         );
-                        return Ok(false);
+                        return Ok(Admission::Deny);
                     }
                 }
             }
 
-            Ok(true)
+            // Rate limit check — task type (acquire-last: only after all
+            // free checks pass, so tokens are never wasted on downstream
+            // rejections).
+            if let Some(Err(next)) = ctx.type_rate_limits.try_acquire(&task.task_type) {
+                tracing::trace!(
+                    task_type = task.task_type,
+                    "task deferred — task-type rate limit"
+                );
+                return Ok(Admission::RateLimited(next));
+            }
+
+            // Rate limit check — group.
+            if let Some(group_key) = &task.group_key {
+                if let Some(Err(next)) = ctx.group_rate_limits.try_acquire(group_key) {
+                    tracing::trace!(
+                        task_type = task.task_type,
+                        group = group_key,
+                        "task deferred — group rate limit"
+                    );
+                    return Ok(Admission::RateLimited(next));
+                }
+            }
+
+            Ok(Admission::Admit)
         })
     }
 

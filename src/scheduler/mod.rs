@@ -27,6 +27,7 @@ pub(crate) mod event;
 pub(crate) mod gate;
 pub mod progress;
 mod queries;
+pub(crate) mod rate_limit;
 mod run_loop;
 pub(crate) mod spawn;
 mod submit;
@@ -81,6 +82,7 @@ pub use event::{
 };
 pub use gate::GroupLimits;
 pub use progress::{EstimatedProgress, ProgressReporter, TaskProgress};
+pub use rate_limit::{RateLimit, RateLimitInfo, RateLimits};
 
 /// Emit a scheduler event only when at least one subscriber is listening.
 ///
@@ -131,6 +133,10 @@ pub(crate) struct SchedulerInner {
     pub(crate) work_notify: Arc<Notify>,
     /// Per-group concurrency limits.
     pub(crate) group_limits: GroupLimits,
+    /// Per-task-type rate limits (e.g. "media::upload" → 100/sec).
+    pub(crate) type_rate_limits: rate_limit::RateLimits,
+    /// Per-group rate limits (e.g. "s3://b2-us-west" → 200/sec).
+    pub(crate) group_rate_limits: rate_limit::RateLimits,
     /// Timeout for on_cancel hooks.
     pub(crate) cancel_hook_timeout: Duration,
     /// Default TTL for tasks without an explicit TTL.
@@ -307,6 +313,8 @@ impl Scheduler {
                 paused: AtomicBool::new(false),
                 work_notify: Arc::new(Notify::new()),
                 group_limits: GroupLimits::new(),
+                type_rate_limits: rate_limit::RateLimits::new(),
+                group_rate_limits: rate_limit::RateLimits::new(),
                 cancel_hook_timeout: config.cancel_hook_timeout,
                 default_ttl: config.default_ttl,
                 expiry_sweep_interval: config.expiry_sweep_interval,
