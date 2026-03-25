@@ -314,12 +314,11 @@ impl TaskContext {
             return spawner.spawn_batch(&mut submissions).await;
         }
 
-        // Module-aware path: prepare each submission then submit via module handle.
-        let mut outcomes = Vec::with_capacity(submissions.len());
-        for sub in submissions {
-            let sub = spawner.prepare(sub);
-            outcomes.push(self.current_module().submit(sub).await?);
-        }
-        Ok(outcomes)
+        // Module-aware path: prepare each submission then batch-submit via module handle.
+        let prepared: Vec<_> = submissions
+            .into_iter()
+            .map(|sub| spawner.prepare(sub))
+            .collect();
+        self.current_module().submit_batch(prepared).await
     }
 }

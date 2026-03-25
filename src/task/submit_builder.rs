@@ -259,6 +259,16 @@ impl SubmitBuilder {
         (self.scheduler, self.submission)
     }
 
+    /// Apply all default layers and per-call overrides, returning the
+    /// fully resolved [`TaskSubmission`] without submitting.
+    ///
+    /// Used by `ModuleHandle::submit_batch` to prepare each submission
+    /// before a single-transaction batch submit with shared parent
+    /// TTL/tag inheritance.
+    pub(crate) fn resolve_only(self) -> (Scheduler, TaskSubmission) {
+        self.resolve()
+    }
+
     /// Prefix `task_type` with the module name (e.g. `"thumbnail"` →
     /// `"media::thumbnail"`). Updates `label` when it matches the old
     /// unprefixed type.

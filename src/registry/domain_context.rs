@@ -217,6 +217,105 @@ impl<'a, D: DomainKey> DomainTaskContext<'a, D> {
             .collect();
         self.inner.spawn_children(submissions).await
     }
+
+    // ── Typed sibling spawning ─────────────────────────────────────
+
+    /// Spawn a same-domain sibling task (shares this task's parent).
+    ///
+    /// The new task's `parent_id` is set to this task's `parent_id`, making
+    /// it a peer under the same orchestrator. Returns a
+    /// [`SiblingSpawnBuilder`] for optional per-call overrides (`.key()`,
+    /// `.priority()`, etc.), then `.await` to submit.
+    ///
+    /// Returns `StoreError::InvalidState` if this task has no `parent_id`.
+    /// Only available in `execute()`, not `finalize()`.
+    ///
+    /// # Parent-relationship table
+    ///
+    /// | Method | `parent_id` on new task |
+    /// |---|---|
+    /// | `submit_with(task)` | `None` (root) |
+    /// | `submit_with(task).parent(id)` | Explicit ID |
+    /// | `ctx.spawn_child_with(task)` | Current task's ID |
+    /// | `ctx.spawn_sibling_with(task)` | Current task's `parent_id` |
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Inside a child executor — spawn a peer task under the same orchestrator:
+    /// ctx.spawn_sibling_with(ScanL1DirTask { bucket, prefix })
+    ///     .key(&format!("{bucket}:{prefix}"))
+    ///     .await?;
+    /// ```
+    pub fn spawn_sibling_with<T: TypedTask<Domain = D>>(
+        &self,
+        task: T,
+    ) -> SiblingSpawnBuilder<'a, D, T> {
+        SiblingSpawnBuilder {
+            ctx: self.inner,
+            task,
+            override_key: None,
+            override_priority: None,
+            override_ttl: None,
+            override_group: None,
+            _domain: PhantomData,
+        }
+    }
+
+    /// Spawn multiple same-domain siblings in one call.
+    ///
+    /// Routes through `ModuleHandle::submit_batch` for single-transaction
+    /// efficiency. Each sibling gets its own `TaskSubmission` default for
+    /// `fail_fast` (true).
+    ///
+    /// Returns `StoreError::InvalidState` if this task has no `parent_id`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let siblings: Vec<ScanL1DirTask> = dirs.into_iter()
+    ///     .map(|d| ScanL1DirTask { bucket: bucket.clone(), dir: d })
+    ///     .collect();
+    /// ctx.spawn_siblings_with(siblings).await?;
+    /// ```
+    pub async fn spawn_siblings_with<T: TypedTask<Domain = D>>(
+        &self,
+        tasks: impl IntoIterator<Item = T>,
+    ) -> Result<Vec<SubmitOutcome>, StoreError> {
+        let parent_id = self.inner.record().parent_id.ok_or_else(|| {
+            StoreError::InvalidState(format!(
+                "spawn_siblings_with called on task {} which has no parent_id",
+                self.inner.record().id,
+            ))
+        })?;
+
+        let submissions: Vec<TaskSubmission> = tasks
+            .into_iter()
+            .map(|t| {
+                let mut sub = TaskSubmission::from_typed(&t);
+                sub.parent_id = Some(parent_id);
+                // Apply priority aging if enabled
+                if let Some(ref config) = self.inner.aging_config {
+                    let parent = self.inner.record();
+                    let parent_effective = parent.effective_priority(Some(config));
+                    let child_config = <T as TypedTask>::config()
+                        .priority
+                        .unwrap_or(crate::priority::Priority::NORMAL);
+                    let inherited = crate::priority::Priority::new(
+                        parent_effective.value().min(child_config.value()),
+                    );
+                    sub = sub.priority(inherited);
+                }
+                sub
+            })
+            .collect();
+
+        if submissions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.inner.current_module().submit_batch(submissions).await
+    }
 }
 
 // ── ChildSpawnBuilder ───────────────────────────────────────────────
@@ -303,6 +402,124 @@ impl<'a, D: DomainKey, T: TypedTask<Domain = D>> ChildSpawnBuilder<'a, D, T> {
 
 impl<'a, D: DomainKey, T: TypedTask<Domain = D>> std::future::IntoFuture
     for ChildSpawnBuilder<'a, D, T>
+{
+    type Output = Result<SubmitOutcome, StoreError>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.submit())
+    }
+}
+
+// ── SiblingSpawnBuilder ─────────────────────────────────────────────
+
+/// Builder for spawning a single typed sibling task with optional per-call
+/// overrides.
+///
+/// Created by [`DomainTaskContext::spawn_sibling_with`]. Chain override methods
+/// then `.await` to submit. The new task's `parent_id` is set to the spawning
+/// task's `parent_id` (i.e. the orchestrator), making it a peer under the
+/// same parent.
+///
+/// Implements [`IntoFuture`] so bare `.await` works:
+///
+/// ```ignore
+/// ctx.spawn_sibling_with(task).key("my-key").await?;
+/// ```
+pub struct SiblingSpawnBuilder<'a, D: DomainKey, T: TypedTask<Domain = D>> {
+    ctx: &'a TaskContext,
+    task: T,
+    override_key: Option<String>,
+    override_priority: Option<crate::priority::Priority>,
+    override_ttl: Option<std::time::Duration>,
+    override_group: Option<String>,
+    _domain: PhantomData<D>,
+}
+
+impl<'a, D: DomainKey, T: TypedTask<Domain = D>> SiblingSpawnBuilder<'a, D, T> {
+    /// Override the dedup key for this sibling task.
+    pub fn key(mut self, k: impl Into<String>) -> Self {
+        self.override_key = Some(k.into());
+        self
+    }
+
+    /// Override the priority for this sibling task.
+    pub fn priority(mut self, p: crate::priority::Priority) -> Self {
+        self.override_priority = Some(p);
+        self
+    }
+
+    /// Override the time-to-live for this sibling task.
+    pub fn ttl(mut self, d: std::time::Duration) -> Self {
+        self.override_ttl = Some(d);
+        self
+    }
+
+    /// Override the group key for this sibling task.
+    pub fn group(mut self, key: impl Into<String>) -> Self {
+        self.override_group = Some(key.into());
+        self
+    }
+
+    /// Submit the sibling task.
+    ///
+    /// Routes through `ModuleHandle` → `SubmitBuilder` so that module
+    /// prefix and defaults are applied, and the orchestrator's TTL and
+    /// tags are correctly inherited (not the current task's).
+    ///
+    /// Returns `StoreError::InvalidState` if the spawning task has no
+    /// `parent_id`.
+    pub async fn submit(self) -> Result<SubmitOutcome, StoreError> {
+        let parent_id = self.ctx.record().parent_id.ok_or_else(|| {
+            StoreError::InvalidState(format!(
+                "spawn_sibling_with called on task {} which has no parent_id",
+                self.ctx.record().id,
+            ))
+        })?;
+
+        let mut sub = TaskSubmission::from_typed(&self.task);
+
+        // Apply builder overrides
+        if let Some(k) = self.override_key {
+            sub = sub.key(k);
+        }
+        if let Some(p) = self.override_priority {
+            sub = sub.priority(p);
+        } else if let Some(ref config) = self.ctx.aging_config {
+            // Priority aging: use current task's effective priority as baseline
+            // (same as ChildSpawnBuilder — current task already inherited from
+            // the orchestrator at its own dispatch time).
+            let parent = self.ctx.record();
+            let parent_effective = parent.effective_priority(Some(config));
+            let child_config = <T as TypedTask>::config()
+                .priority
+                .unwrap_or(crate::priority::Priority::NORMAL);
+            let inherited =
+                crate::priority::Priority::new(parent_effective.value().min(child_config.value()));
+            sub = sub.priority(inherited);
+        }
+        if let Some(d) = self.override_ttl {
+            sub = sub.ttl(d);
+        }
+        if let Some(g) = self.override_group {
+            sub = sub.group(g);
+        }
+
+        // Route through module handle — SubmitBuilder.submit() fetches the
+        // parent record from the store to inherit TTL and tags correctly.
+        // This gives us orchestrator's remaining TTL, not current task's TTL.
+        self.ctx
+            .current_module()
+            .submit(sub)
+            .parent(parent_id)
+            .submit()
+            .await
+    }
+}
+
+impl<'a, D: DomainKey, T: TypedTask<Domain = D>> std::future::IntoFuture
+    for SiblingSpawnBuilder<'a, D, T>
 {
     type Output = Result<SubmitOutcome, StoreError>;
     type IntoFuture =

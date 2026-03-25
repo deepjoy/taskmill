@@ -839,7 +839,7 @@ pub use domain::{
     Domain, DomainHandle, DomainKey, DomainSubmitBuilder, TaskEvent, TaskTypeConfig,
     TaskTypeOptions, TypedEventStream, TypedExecutor,
 };
-pub use registry::{ChildSpawnBuilder, DomainTaskContext};
+pub use registry::{ChildSpawnBuilder, DomainTaskContext, SiblingSpawnBuilder};
 
 // ── Core re-exports ──────────────────────────────────────────────────
 pub use backpressure::{CompositePressure, PressureSource, ThrottlePolicy};

@@ -962,6 +962,29 @@ impl<D: DomainKey> DomainSubmitBuilder<D> {
         self.parent(ctx.record().id)
     }
 
+    /// Mark this task as a sibling of the task currently executing in the
+    /// given [`DomainTaskContext`] (shares the same parent).
+    ///
+    /// Returns `Err(StoreError::InvalidState)` if the context task has no
+    /// `parent_id`.
+    ///
+    /// ```ignore
+    /// ctx.domain::<Analytics>()
+    ///     .submit_with(ScanStartedEvent { .. })
+    ///     .sibling_of(&ctx)?
+    ///     .priority(Priority::HIGH)
+    ///     .await?;
+    /// ```
+    pub fn sibling_of<D2: DomainKey>(
+        self,
+        ctx: &DomainTaskContext<'_, D2>,
+    ) -> Result<Self, StoreError> {
+        let pid = ctx.record().parent_id.ok_or_else(|| {
+            StoreError::InvalidState("sibling_of called on a task with no parent_id".into())
+        })?;
+        Ok(self.parent(pid))
+    }
+
     /// Submit the task, returning the outcome.
     pub async fn submit(self) -> Result<SubmitOutcome, StoreError> {
         self.inner.submit().await
