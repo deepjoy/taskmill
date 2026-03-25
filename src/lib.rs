@@ -139,7 +139,7 @@
 //! [`SchedulerBuilder::group_minimum_slots`], or adjust at runtime via
 //! [`Scheduler::set_group_weight`] and [`Scheduler::set_group_minimum_slots`].
 //!
-//! ## Child tasks & two-phase execution
+//! ## Child tasks, sibling tasks & two-phase execution
 //!
 //! An executor can spawn child tasks via [`DomainTaskContext::spawn_child_with`]. When
 //! children exist, the parent enters a **waiting** state after its executor
@@ -150,6 +150,15 @@
 //! are cancelled and the parent fails immediately. Disable this with
 //! [`DomainSubmitBuilder::fail_fast(false)`](DomainSubmitBuilder::fail_fast)
 //! (or [`TaskSubmission::fail_fast`] for untyped submissions).
+//!
+//! A child executor can also spawn **sibling** tasks — peers under the same
+//! parent — via [`DomainTaskContext::spawn_sibling_with`]. This avoids manually
+//! extracting and threading the parent ID, and returns
+//! [`StoreError::InvalidState`] if the current task has no parent (instead of
+//! silently creating a root task). A batch variant
+//! [`DomainTaskContext::spawn_siblings_with`] uses a single-transaction path
+//! for high-fan-out patterns (e.g. BFS directory scans). For cross-domain
+//! siblings, use [`DomainSubmitBuilder::sibling_of`].
 //!
 //! ## Task TTL & automatic expiry
 //!

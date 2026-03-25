@@ -308,6 +308,56 @@ scheduler.submit(
 ).await?;
 ```
 
+## Sibling tasks
+
+When a child task needs to spawn peer tasks under the same parent (flat hierarchy), use `ctx.spawn_sibling_with()` instead of manually extracting and threading the parent ID. The new task's `parent_id` is set to the current task's `parent_id`, making it a peer under the same orchestrator.
+
+```rust
+impl TypedExecutor<ScanL1DirTask> for DirScanner {
+    async fn execute<'a>(
+        &'a self, task: ScanL1DirTask, ctx: DomainTaskContext<'a, Scanner>,
+    ) -> Result<(), TaskError> {
+        for subdir in list_subdirs(&task.prefix).await? {
+            ctx.spawn_sibling_with(ScanL1DirTask {
+                bucket: task.bucket.clone(),
+                prefix: subdir,
+            })
+            .key(&format!("{}:{}", task.bucket, subdir))
+            .await?;
+        }
+        Ok(())
+    }
+}
+```
+
+For high-fan-out patterns, use `spawn_siblings_with()` which routes through a single-transaction batch path:
+
+```rust
+let siblings: Vec<ScanL1DirTask> = subdirs.into_iter()
+    .map(|d| ScanL1DirTask { bucket: bucket.clone(), prefix: d })
+    .collect();
+ctx.spawn_siblings_with(siblings).await?;
+```
+
+If the current task has no parent (i.e. it's a root task), both methods return `StoreError::InvalidState` instead of silently creating a root task.
+
+For cross-domain siblings, use `.sibling_of(&ctx)` on the submit builder:
+
+```rust
+ctx.domain::<Analytics>()
+    .submit_with(ScanStartedEvent { .. })
+    .sibling_of(&ctx)?
+    .priority(Priority::HIGH)
+    .await?;
+```
+
+| Method | `parent_id` on new task |
+|---|---|
+| `submit_with(task)` | `None` (root) |
+| `submit_with(task).parent(id)` | Explicit ID |
+| `ctx.spawn_child_with(task)` | Current task's ID |
+| `ctx.spawn_sibling_with(task)` | Current task's `parent_id` |
+
 ## Sharing the scheduler
 
 A single `Scheduler` is `Clone` (via `Arc`) and can be shared across your entire application. Domains can carry their own scoped state, so library domains don't need to share a namespace with the host app's state.

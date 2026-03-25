@@ -2,8 +2,31 @@
 //!
 //! This module provides a zero-cost wrapper around [`TaskContext`] that carries
 //! domain identity as a type parameter. This enables compile-time–safe child
-//! spawning: [`spawn_child_with`](DomainTaskContext::spawn_child_with) only
-//! accepts tasks belonging to the same domain `D`.
+//! and sibling spawning:
+//!
+//! - [`spawn_child_with`](DomainTaskContext::spawn_child_with) — spawn a child
+//!   task whose `parent_id` is the current task's ID.
+//! - [`spawn_sibling_with`](DomainTaskContext::spawn_sibling_with) — spawn a
+//!   peer task whose `parent_id` is the current task's `parent_id` (i.e. the
+//!   same orchestrator). Returns `StoreError::InvalidState` if the current task
+//!   has no parent.
+//!
+//! Both accept only tasks belonging to the same domain `D`. Batch variants
+//! ([`spawn_children_with`](DomainTaskContext::spawn_children_with),
+//! [`spawn_siblings_with`](DomainTaskContext::spawn_siblings_with)) route
+//! through a single-transaction batch path for efficiency.
+//!
+//! For cross-domain spawning, use [`DomainSubmitBuilder::child_of`] or
+//! [`DomainSubmitBuilder::sibling_of`].
+//!
+//! # Parent-relationship table
+//!
+//! | Method | `parent_id` on new task |
+//! |---|---|
+//! | `submit_with(task)` | `None` (root) |
+//! | `submit_with(task).parent(id)` | Explicit ID |
+//! | `ctx.spawn_child_with(task)` | Current task's ID |
+//! | `ctx.spawn_sibling_with(task)` | Current task's `parent_id` |
 //!
 //! # Why a wrapper instead of `TaskContext<D>`?
 //!
