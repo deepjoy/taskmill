@@ -38,5 +38,7 @@ mod rate_limit;
 mod retry_policy;
 #[path = "integration/scheduler_core.rs"]
 mod scheduler_core;
+#[path = "integration/sibling_spawn.rs"]
+mod sibling_spawn;
 #[path = "integration/typed_events.rs"]
 mod typed_events;

@@ -20,7 +20,7 @@ use crate::task::retry::RetryPolicy;
 use crate::task::submit_builder::TypedTaskDefaults;
 use crate::task::{ModuleSubmitDefaults, SubmitBuilder};
 use crate::task::{
-    SubmitOutcome, TaskHistoryRecord, TaskRecord, TaskStatus, TaskSubmission, TypedTask,
+    SubmitOutcome, TaskHistoryRecord, TaskRecord, TaskStatus, TaskSubmission, TtlFrom, TypedTask,
 };
 
 /// Per-executor options for task type registration within a module.
@@ -485,6 +485,58 @@ impl ModuleHandle {
             tags: task.tags(),
         };
         self.submit(sub).with_typed_defaults(typed_defaults)
+    }
+
+    /// Submit multiple tasks in a single transaction.
+    ///
+    /// Each submission gets the module prefix and defaults applied (the
+    /// `submit()` path — non-typed defaults fill gaps only). When all
+    /// submissions share the same `parent_id`, the parent record is fetched
+    /// once and used to inherit remaining TTL and tags for the batch.
+    ///
+    /// Used by `spawn_children_with` and `spawn_siblings_with` for
+    /// single-transaction efficiency.
+    pub(crate) async fn submit_batch(
+        &self,
+        submissions: Vec<TaskSubmission>,
+    ) -> Result<Vec<SubmitOutcome>, StoreError> {
+        let mut resolved = Vec::with_capacity(submissions.len());
+        for sub in submissions {
+            // Reuse SubmitBuilder::resolve() for prefix + defaults (submit() path).
+            let builder = SubmitBuilder::new(
+                sub,
+                self.scheduler.clone(),
+                self.name.as_ref(),
+                self.defaults.clone(),
+            );
+            let (_sched, r) = builder.resolve_only();
+            resolved.push(r);
+        }
+
+        // Inherit parent TTL and tags for all submissions sharing a parent_id.
+        // Fetch the parent record once and apply to all.
+        if let Some(pid) = resolved.first().and_then(|s| s.parent_id) {
+            if let Ok(Some(parent)) = self.scheduler.store().task_by_id(pid).await {
+                for s in &mut resolved {
+                    // TTL inheritance (only if no layer set a TTL)
+                    if s.ttl.is_none() {
+                        if let Some(remaining) = parent.remaining_ttl() {
+                            s.ttl = Some(remaining);
+                            s.ttl_from = TtlFrom::Submission;
+                        }
+                    }
+                    // Tag inheritance (parent fills gaps)
+                    for (k, v) in &parent.tags {
+                        s.tags.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+
+        self.scheduler
+            .submit_batch(&resolved)
+            .await
+            .map(|batch_outcome| batch_outcome.outcomes)
     }
 
     // ── Single-task operations ────────────────────────────────────

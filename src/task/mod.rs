@@ -327,6 +327,28 @@ impl TaskRecord {
         )
     }
 
+    /// Compute the remaining TTL for this task record.
+    ///
+    /// Returns `None` if the task has no TTL, or if the TTL start hasn't been
+    /// reached yet (e.g. `TtlFrom::FirstAttempt` on a task that hasn't started).
+    /// Used by sibling/child spawning to inherit the parent's remaining TTL.
+    pub fn remaining_ttl(&self) -> Option<std::time::Duration> {
+        let parent_ttl_secs = self.ttl_seconds?;
+        let parent_ttl = std::time::Duration::from_secs(parent_ttl_secs as u64);
+
+        let ttl_start = match self.ttl_from {
+            TtlFrom::Submission => Some(self.created_at),
+            TtlFrom::FirstAttempt => self.started_at,
+        };
+        let start = ttl_start?;
+        let elapsed = chrono::Utc::now() - start;
+        let elapsed_std = elapsed.to_std().unwrap_or_default();
+
+        parent_ttl
+            .checked_sub(elapsed_std)
+            .filter(|r| *r > std::time::Duration::ZERO)
+    }
+
     /// Build a [`TaskEventHeader`](crate::scheduler::event::TaskEventHeader) from this record.
     ///
     /// When `aging_config` is provided, the header's `effective_priority` reflects

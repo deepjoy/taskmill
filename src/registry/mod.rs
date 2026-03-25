@@ -24,7 +24,7 @@ use crate::task::TaskError;
 
 pub(crate) use child_spawner::{ChildSpawner, ParentContext};
 pub(crate) use context::TaskContext;
-pub use domain_context::{ChildSpawnBuilder, DomainTaskContext};
+pub use domain_context::{ChildSpawnBuilder, DomainTaskContext, SiblingSpawnBuilder};
 pub(crate) use io_tracker::IoTracker;
 pub(crate) use state::{StateMap, StateSnapshot};
 
